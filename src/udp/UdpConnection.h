@@ -30,8 +30,8 @@ enum UdpEncryptMethod {
 
 struct ConnectionOffsets {
   static constexpr size_t kHeapIndex = 0x18;
-  static constexpr size_t kEncryptPasses = 0x40;   // 2 x {method pmf, this-adjust, pad}, stride 0x18
-  static constexpr size_t kDecryptPasses = 0x70;
+  static constexpr size_t kDecryptPasses = 0x40;   // 2 x {method pmf, this-adjust, pad}, stride 0x18
+  static constexpr size_t kEncryptPasses = 0x70;
   static constexpr size_t kIp = 0xA0;
   static constexpr size_t kPort = 0xA4;
   static constexpr size_t kManager = 0xE0;
@@ -59,6 +59,8 @@ void ConnectionDisconnect(UdpConnection* self, int flushTimeout, int reason);  /
 int64_t ConnectionClock(UdpConnection* self);                       // 0x140345b20
 void SendTerminatePacket(UdpConnection* self, uint32_t connectCode, uint16_t reason);  // 0x140349980
 void FlushChannels(UdpConnection* self);                            // 0x140346820
+void PhysicalSend(UdpConnection* self, const uint8_t* data, int length, bool writable);  // 0x140348070
+UdpConnection* PriorityQueueUpdate(ConnectionPriorityQueue* queue, UdpConnection* c, int64_t time);  // 0x140345830
 void ManagerScheduleConnection(UdpManager* manager, UdpConnection* c, int64_t time);  // 0x1403499e0
 void ManagerAddDisconnecting(UdpManager* manager, UdpConnection* c);  // 0x1403421d0
 void ManagerRemoveConnection(UdpManager* manager, UdpConnection* c);  // 0x1403437b0

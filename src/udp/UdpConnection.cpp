@@ -31,10 +31,10 @@ struct MethodSlot {
 static_assert(sizeof(MethodSlot) == 0x18);
 
 struct EncryptMethodTable {
-  uintptr_t encrypt;
-  uintptr_t decrypt;
+  uintptr_t decrypt;  // stored at +0x40
+  uintptr_t encrypt;  // stored at +0x70 (PhysicalSend uses these)
 };
-// Per method: UdpConnection::Encrypt*/Decrypt* member functions.
+// Per method: UdpConnection::Decrypt*/Encrypt* member functions.
 constexpr EncryptMethodTable kMethods[] = {
     {0x140345d30, 0x140346220},  // none
     {0x140345da0, 0x140346290},  // user supplied
@@ -101,8 +101,8 @@ void ConnectionSetupEncryption(UdpConnection* c) {
   for (int pass = 0; pass < 2; ++pass) {
     int method = ConnField<int>(c, O::kEncryptMethods + pass * 4);
     if (method < kEncryptNone || method > kEncryptXor) continue;
-    auto& encrypt = ConnField<MethodSlot>(c, O::kEncryptPasses + pass * sizeof(MethodSlot));
     auto& decrypt = ConnField<MethodSlot>(c, O::kDecryptPasses + pass * sizeof(MethodSlot));
+    auto& encrypt = ConnField<MethodSlot>(c, O::kEncryptPasses + pass * sizeof(MethodSlot));
     // The original leaves the high half of the padding word uninitialized;
     // it is never read.
     encrypt = {kMethods[method].encrypt, 0, 0};

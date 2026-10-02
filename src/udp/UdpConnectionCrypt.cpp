@@ -1,7 +1,7 @@
 // UdpConnection's packet encryption methods. Each has the signature
 // int (UdpConnection*, uint8_t* dest, const uint8_t* src, int length) and
 // returns the output length; the connection's encrypt/decrypt tables point
-// at these (see ConnectionSetupEncryption).
+// at these (see ConnectionSetupDecryption).
 #include <cstring>
 
 #include "core/hook.h"
@@ -34,25 +34,25 @@ int UserCipher(UdpConnection* c, int slot, uint8_t* dest, const uint8_t* src, in
 }  // namespace
 
 // 0x140345d30 / 0x140346220
-int EncryptNone(UdpConnection*, uint8_t* dest, const uint8_t* src, int length) {
+int DecryptNone(UdpConnection*, uint8_t* dest, const uint8_t* src, int length) {
   std::memcpy(dest, src, length);
   return length;
 }
-int DecryptNone(UdpConnection*, uint8_t* dest, const uint8_t* src, int length) {
+int EncryptNone(UdpConnection*, uint8_t* dest, const uint8_t* src, int length) {
   std::memcpy(dest, src, length);
   return length;
 }
 
 // 0x140345da0 / 0x140346290 / 0x140345d60 / 0x140346250
-int EncryptUserSupplied(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 3, d, s, n); }
-int DecryptUserSupplied(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 2, d, s, n); }
-int EncryptUserSupplied2(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 5, d, s, n); }
-int DecryptUserSupplied2(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 4, d, s, n); }
+int DecryptUserSupplied(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 3, d, s, n); }
+int EncryptUserSupplied(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 2, d, s, n); }
+int DecryptUserSupplied2(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 5, d, s, n); }
+int EncryptUserSupplied2(UdpConnection* c, uint8_t* d, const uint8_t* s, int n) { return UserCipher(c, 4, d, s, n); }
 
-// 0x140345de0. Word-chained XOR: each 32-bit word is XORed with the previous
-// plaintext word (the encrypt code for the first); trailing bytes with the
-// low byte of the last plaintext word.
-int EncryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
+// 0x140345de0. Inverse of EncryptXor: each 32-bit word is XORed with the
+// previous ciphertext word (the encrypt code for the first); trailing bytes
+// with the low byte of the last ciphertext word.
+int DecryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
   const uint8_t* end = src + length;
   uint32_t previous = EncryptCode(c);
   for (; src + 4 <= end; src += 4, dest += 4) {
@@ -65,8 +65,9 @@ int EncryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) 
   return length;
 }
 
-// 0x1403462d0
-int DecryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
+// 0x1403462d0. Ciphertext-chained XOR: c[i] = p[i] ^ c[i-1], c[-1] = the
+// encrypt code; trailing bytes XORed with the low byte of the last c.
+int EncryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
   const uint8_t* end = src + length;
   uint32_t previous = EncryptCode(c);
   for (; src + 4 <= end; src += 4, dest += 4) {
@@ -78,9 +79,9 @@ int DecryptXor(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) 
   return length;
 }
 
-// 0x140345f00. Chained XOR plus the connection's random key stream;
-// trailing bytes are XORed with the key stream only.
-int EncryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
+// 0x140345f00. Inverse of EncryptXorBuffer; trailing bytes are XORed with
+// the key stream only.
+int DecryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
   const uint8_t* key = XorKey(c);
   const uint8_t* end = src + length;
   uint32_t previous = EncryptCode(c);
@@ -93,8 +94,9 @@ int EncryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int le
   return length;
 }
 
-// 0x1403463f0
-int DecryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
+// 0x1403463f0. Ciphertext-chained XOR plus the connection's random key
+// stream; trailing bytes are XORed with the key stream only.
+int EncryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int length) {
   const uint8_t* key = XorKey(c);
   const uint8_t* end = src + length;
   uint32_t previous = EncryptCode(c);
@@ -106,15 +108,15 @@ int DecryptXorBuffer(UdpConnection* c, uint8_t* dest, const uint8_t* src, int le
   return length;
 }
 
-REBUILD_FUNCTION(UdpConnection_EncryptNone, 0x140345d30, EncryptNone);
-REBUILD_FUNCTION(UdpConnection_DecryptNone, 0x140346220, DecryptNone);
-REBUILD_FUNCTION(UdpConnection_EncryptUserSupplied, 0x140345da0, EncryptUserSupplied);
-REBUILD_FUNCTION(UdpConnection_DecryptUserSupplied, 0x140346290, DecryptUserSupplied);
-REBUILD_FUNCTION(UdpConnection_EncryptUserSupplied2, 0x140345d60, EncryptUserSupplied2);
-REBUILD_FUNCTION(UdpConnection_DecryptUserSupplied2, 0x140346250, DecryptUserSupplied2);
-REBUILD_FUNCTION(UdpConnection_EncryptXor, 0x140345de0, EncryptXor);
-REBUILD_FUNCTION(UdpConnection_DecryptXor, 0x1403462d0, DecryptXor);
-REBUILD_FUNCTION(UdpConnection_EncryptXorBuffer, 0x140345f00, EncryptXorBuffer);
-REBUILD_FUNCTION(UdpConnection_DecryptXorBuffer, 0x1403463f0, DecryptXorBuffer);
+REBUILD_FUNCTION(UdpConnection_DecryptNone, 0x140345d30, DecryptNone);
+REBUILD_FUNCTION(UdpConnection_EncryptNone, 0x140346220, EncryptNone);
+REBUILD_FUNCTION(UdpConnection_DecryptUserSupplied, 0x140345da0, DecryptUserSupplied);
+REBUILD_FUNCTION(UdpConnection_EncryptUserSupplied, 0x140346290, EncryptUserSupplied);
+REBUILD_FUNCTION(UdpConnection_DecryptUserSupplied2, 0x140345d60, DecryptUserSupplied2);
+REBUILD_FUNCTION(UdpConnection_EncryptUserSupplied2, 0x140346250, EncryptUserSupplied2);
+REBUILD_FUNCTION(UdpConnection_DecryptXor, 0x140345de0, DecryptXor);
+REBUILD_FUNCTION(UdpConnection_EncryptXor, 0x1403462d0, EncryptXor);
+REBUILD_FUNCTION(UdpConnection_DecryptXorBuffer, 0x140345f00, DecryptXorBuffer);
+REBUILD_FUNCTION(UdpConnection_EncryptXorBuffer, 0x1403463f0, EncryptXorBuffer);
 
 }  // namespace rebuild::udp

@@ -322,6 +322,25 @@ static_assert(offsetof(UdpManager, pooledCreated) == 0x5D0);
 static_assert(offsetof(UdpManager, pooledAvailable) == 0x5F0);
 static_assert(sizeof(UdpManager) == 0x660);
 
+// Advances a 40 x 25 ms bandwidth window to `now`, clearing buckets that slid
+// out of it (inlined in UdpManager and UdpConnection alike).
+inline void AdvanceBandwidthBuckets(int64_t now, int64_t& bucketTime, int& total, int* buckets) {
+  constexpr int kBuckets = 40;
+  int64_t bucket = now / 25;
+  int64_t elapsed = bucket - bucketTime;
+  if (elapsed <= kBuckets) {
+    for (int64_t i = 0; i < elapsed; ++i) {
+      int index = static_cast<int>((i + bucket) % kBuckets);
+      total -= buckets[index];
+      buckets[index] = 0;
+    }
+  } else {
+    for (int i = 0; i < kBuckets; ++i) buckets[i] = 0;
+    total = 0;
+  }
+  bucketTime = bucket;
+}
+
 void PoolCreated(UdpManager* self, PooledLogicalPacket* packet);    // 0x1403425c0
 void PoolDestroyed(UdpManager* self, PooledLogicalPacket* packet);  // 0x140342650
 void PoolReturn(UdpManager* self, PooledLogicalPacket* packet);     // 0x1403426f0

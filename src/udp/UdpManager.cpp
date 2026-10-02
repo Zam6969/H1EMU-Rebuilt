@@ -22,35 +22,17 @@ bool LoseSimulatedPacket(UdpManager* self, float lossPercent) {
   return static_cast<float>(roll % 10000) < lossPercent * kPercentScale;
 }
 
-// Advances a 40 x 25 ms bandwidth window to `now`, clearing buckets that
-// slid out of it. Shared body of the two functions below.
-void AdvanceBuckets(int64_t now, int64_t& bucketTime, int& total, int* buckets) {
-  int64_t bucket = now / 25;
-  int64_t elapsed = bucket - bucketTime;
-  if (elapsed <= UdpManager::kBandwidthBuckets) {
-    for (int64_t i = 0; i < elapsed; ++i) {
-      int index = static_cast<int>((i + bucket) % UdpManager::kBandwidthBuckets);
-      total -= buckets[index];
-      buckets[index] = 0;
-    }
-  } else {
-    std::memset(buckets, 0, sizeof(int) * UdpManager::kBandwidthBuckets);
-    total = 0;
-  }
-  bucketTime = bucket;
-}
-
 }  // namespace
 
 // 0x140340330
 void UpdateSendBuckets(UdpManager* self) {
-  AdvanceBuckets(self->CachedClock(), self->sendBucketTime, self->sendBucketTotal,
+  AdvanceBandwidthBuckets(self->CachedClock(), self->sendBucketTime, self->sendBucketTotal,
                  self->sendBuckets);
 }
 
 // 0x140340230
 void UpdateReceiveBuckets(UdpManager* self) {
-  AdvanceBuckets(self->CachedClock(), self->receiveBucketTime, self->receiveBucketTotal,
+  AdvanceBandwidthBuckets(self->CachedClock(), self->receiveBucketTime, self->receiveBucketTotal,
                  self->receiveBuckets);
 }
 
