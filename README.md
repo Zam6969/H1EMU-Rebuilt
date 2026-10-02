@@ -1,0 +1,83 @@
+# H1Z1 client rebuild
+
+A function-by-function C++ reimplementation of `H1Z1.exe` (the 2016-12-20 build,
+timestamp `0x5859C0E4`). The original exe keeps running; each rebuilt function
+replaces its original through a hook, so the game stays playable at every step
+and any single rebuild can be switched off to find a regression.
+
+## How it loads
+
+`H1Z1.exe` imports `VERSION.dll`. This project builds a `version.dll` that sits
+in the game folder, forwards all 17 real exports to `version_orig.dll` (a copy
+of the system DLL), and installs the hooks from `DllMain`, before any game code
+runs. The existing `dinput8.dll` mod loader in the game folder is left alone.
+
+## Build and install
+
+```
+powershell -ExecutionPolicy Bypass -File tools\build.ps1
+powershell -ExecutionPolicy Bypass -File tools\install.ps1            # into C:\Users\zam\Documents\H1emu
+powershell -ExecutionPolicy Bypass -File tools\install.ps1 -Uninstall
+```
+
+Requires VS Build Tools with the C++ workload (MSVC + bundled CMake).
+`build.ps1` finishes by running `hookcheck.exe`, which maps the real
+`H1Z1.exe` as an image (without running it) and installs every hook against
+it, so a wrong address or an unpatchable function fails the build.
+
+`rebuild.ini` in the game folder: `enabled=0` runs the stock client,
+`console=1` opens a log window, `[hooks] Name=0` disables one rebuild.
+The log is written to `rebuild.log` next to the exe.
+
+## Adding a rebuilt function
+
+1. Decompile in Ghidra (project `C:\Users\zam\h1.gpr`) and rename the function
+   there, e.g. `UdpPlatformDriver_SocketSend`, so the Ghidra project and this
+   code stay in sync.
+2. Write it in C++ under `src/<system>/`, matching the original signature exactly
+   (`this` becomes the first parameter). Reconstruct struct layouts with
+   `static_assert(offsetof(...))` against the offsets seen in the disassembly.
+3. Call code that isn't rebuilt yet with `game::Call<Fn>(address)`. Allocate and
+   free through `soeutil::Allocate/Free` (the game's operator new/delete).
+4. Register it: `REBUILD_FUNCTION(Name, 0x14xxxxxxx, Function);` For originals
+   under 5 bytes use `REBUILD_FUNCTION_TOO_SMALL` (kept as source, not hooked).
+5. Build (runs hookcheck), install, play, and check `rebuild.log`.
+
+Check return types in the disassembly: MSVC returns `bool` in `AL` only, so
+a function ending in `mov al, 1` must be rebuilt as `bool`, not `int`.
+Identical function bodies are folded by the linker (e.g. `return this->int_08`
+is one function shared by many classes); a rebuild of such a body must stay
+correct for every class that points at it.
+
+`tools/rtti_names.py` names every virtual function in Ghidra after its owning
+class from the RTTI in the exe (`Namespace__Class_vfNN`). Only 571 vtables
+carry RTTI; most engine classes were built without it.
+
+## Progress
+
+| System | Class | Rebuilt |
+|---|---|---|
+| SoeUtil | allocator | complete: TLS slot, SetThreadAllocator, MemoryAllocate/Free, default aligned alloc/free |
+| SoeUtil | `HashListMap<int,uint64,1024,-1>` | layout, Increment (inlined at 2 sites), Clear |
+| UdpLibrary | `UdpPlatformDriver` | complete: ctor, dtor, all 16 vtable slots, error counters (20 functions) |
+| UdpLibrary | `UdpPlatformGuardObject` | complete: ctor, dtor, Enter, Leave |
+| UdpLibrary | `UdpRefCount`, `UdpGuardedRefCount` | complete: all 5 vtable slots each |
+| UdpLibrary | `UdpPlatformThreadObject` | complete: ctor, dtor, Start, IsRunning, thread proc |
+| UdpLibrary | `UdpManagerThread` | complete: ctor, dtor, Run |
+| UdpLibrary | `LogicalPacket` family | complete: Logical, Simple, Group (incl. AddPacket), Pooled, Fixed<128/256/512/1024> |
+| UdpLibrary | `UdpMisc` | Put/GetVariableValue, Random, NextPrime, CreateQuickLogicalPacket |
+| UdpLibrary | `UdpManager::Params` | constructor with all 5 role presets |
+| SoeUtil | `Mutex` | Lock, Unlock (critical section or Win32 mutex mode) |
+| UdpLibrary | `UdpManager` | GiveTime, ProcessRawPacket (incoming dispatch: connect, remap, unknown-terminate, unreachable reply), ActualReceive/Send/SendHelper, NextIncomingPacket, CreatePacket, connection lookup (by address and code), AddNewConnection, address/code hash tables (resize, insert, remove), event queue (alloc, clear, release, queue, DeliverEvents), all 6 handler callbacks, packet pool (3), clock (2), bandwidth buckets (2), priority-queue reprioritize, disconnect cleanup (4), SimulateQueueEntry ctor |
+| UdpLibrary | `UdpConnection` | Init, SetupEncryption, GiveTime, GetStatus, Disconnect, Clock, SendTerminatePacket, FlushChannels, all 5 handler callbacks, all 10 encrypt/decrypt methods (none, user-supplied x2, XOR, XOR-buffer); manager-side Schedule/AddDisconnecting/RemoveConnection |
+
+Total: 179 functions (168 hooked, 11 too small to hook).
+
+Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
+ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
+PhysicalSend 0x140348070, priority-queue update 0x140345830,
+constructor 0x140345090), then the `UdpManager` constructor/destructor and
+the SoeUtil DynamicMemoryPool it owns at +0x610.
+
+Third-party code in the exe (PhysX/APEX, curl, Vivox, Steam API, MSVC CRT/STL)
+is not rebuilt by hand: it gets identified and linked from the real libraries.

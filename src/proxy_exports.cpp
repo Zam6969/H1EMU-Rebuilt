@@ -1,0 +1,21 @@
+// Every real version.dll export is forwarded to version_orig.dll, a copy of
+// C:\Windows\System32\version.dll that tools/install.ps1 puts next to the game.
+#define FORWARD(name) __pragma(comment(linker, "/export:" #name "=version_orig." #name))
+
+FORWARD(GetFileVersionInfoA)
+FORWARD(GetFileVersionInfoByHandle)
+FORWARD(GetFileVersionInfoExA)
+FORWARD(GetFileVersionInfoExW)
+FORWARD(GetFileVersionInfoSizeA)
+FORWARD(GetFileVersionInfoSizeExA)
+FORWARD(GetFileVersionInfoSizeExW)
+FORWARD(GetFileVersionInfoSizeW)
+FORWARD(GetFileVersionInfoW)
+FORWARD(VerFindFileA)
+FORWARD(VerFindFileW)
+FORWARD(VerInstallFileA)
+FORWARD(VerInstallFileW)
+FORWARD(VerLanguageNameA)
+FORWARD(VerLanguageNameW)
+FORWARD(VerQueryValueA)
+FORWARD(VerQueryValueW)
