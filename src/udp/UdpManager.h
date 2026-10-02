@@ -225,12 +225,14 @@ struct UdpManager : UdpGuardedRefCount {
   int64_t packetsSent;                      // +0x350 }
   int64_t bytesReceived;                    // +0x358 }
   int64_t packetsReceived;                  // +0x360 }
-  uint8_t unknown368[0x3A8 - 0x368];        // +0x368
+  int64_t unknown368;                       // +0x368
+  int64_t crcRejects;                       // +0x370
+  uint8_t unknown378[0x3A8 - 0x378];        // +0x378
   int64_t priorityConnectionsProcessed;     // +0x3A8
   int64_t priorityConnectionsTotal;         // +0x3B0 sum of connection counts per pass
   uint8_t unknown3B8[0x3C8 - 0x3B8];        // +0x3B8
   int64_t giveTimeCalls;                    // +0x3C8
-  int64_t unknown3D0;                       // +0x3D0
+  int64_t corruptPackets;                   // +0x3D0
   int64_t sendFailures;                     // +0x3D8
   int64_t pollTimeouts;                     // +0x3E0 polls cut short by maxPollingTime
   int64_t eventDeliveryTimeouts;            // +0x3E8 DeliverEvents runs that used up their time
@@ -273,6 +275,9 @@ struct UdpManager : UdpGuardedRefCount {
   bool ReplyUnreachableConnection() { return params.At<uint8_t>(0x28) != 0; }
   bool AllowAddressRemapping() { return params.At<uint8_t>(0x29) != 0; }
   bool AllowRemapFromAnyAddress() { return params.At<uint8_t>(0x2A) != 0; }
+  int IcmpErrorRetryPeriod() { return params.At<int>(0x2C); }
+  bool ProcessIcmpErrors() { return params.At<uint8_t>(0x68) != 0; }
+  bool ProcessIcmpErrorsDuringNegotiating() { return params.At<uint8_t>(0x69) != 0; }
   bool EventQueuing() { return params.At<uint8_t>(0x178) != 0; }
   bool OnlyAcceptPendingAddresses() { return params.At<uint8_t>(0x180) != 0; }
   int EventPoolMax() { return params.At<int>(0x64); }

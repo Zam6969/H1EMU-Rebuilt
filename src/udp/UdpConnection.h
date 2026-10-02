@@ -59,6 +59,8 @@ void ConnectionDisconnect(UdpConnection* self, int flushTimeout, int reason);  /
 int64_t ConnectionClock(UdpConnection* self);                       // 0x140345b20
 void SendTerminatePacket(UdpConnection* self, uint32_t connectCode, uint16_t reason);  // 0x140349980
 void FlushChannels(UdpConnection* self);                            // 0x140346820
+uint32_t Crc32(const uint8_t* data, int length, uint32_t seed);     // 0x14034b470
+int ConnectionElapsed(UdpConnection* self, int64_t since);          // 0x14030d440
 void PhysicalSend(UdpConnection* self, const uint8_t* data, int length, bool writable);  // 0x140348070
 UdpConnection* PriorityQueueUpdate(ConnectionPriorityQueue* queue, UdpConnection* c, int64_t time);  // 0x140345830
 void ManagerScheduleConnection(UdpManager* manager, UdpConnection* c, int64_t time);  // 0x1403499e0
