@@ -52,7 +52,7 @@ struct ReliableOffsets {
   static constexpr size_t kOutgoingRing = 0xA8;
   static constexpr size_t kCongestionWindow = 0xD4;
   static constexpr size_t kSlowStartThreshold = 0xD8;
-  static constexpr size_t kCongestionControl = 0xE0;  // bool
+  static constexpr size_t kWindowFullLastPass = 0xE0;  // bool: the window limited the last GiveTime pass
   static constexpr size_t kNextIncomingId = 0xE8;
   static constexpr size_t kIncomingWindow = 0xF0;
   static constexpr size_t kPendingAck = 0x118;  // points into the connection's multi-buffer

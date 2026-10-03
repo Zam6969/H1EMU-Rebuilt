@@ -191,7 +191,7 @@ void ReliableAckInternal(UdpReliableChannel* c, int64_t id) {
   if (!entry.data) return;
 
   RelField<int64_t>(c, R::kResendTimer) = 0;
-  if (RelField<uint8_t>(c, R::kCongestionControl)) {
+  if (RelField<uint8_t>(c, R::kWindowFullLastPass)) {
     int window = RelField<int>(c, R::kCongestionWindow);
     int maxData = RelField<int>(c, R::kMaxDataBytes);
     if (window < RelField<int>(c, R::kSlowStartThreshold)) {
