@@ -25,7 +25,7 @@ Fn ApiVirtual(uint8_t* api, size_t slot) {
 // Fields after the api pointer (constructor 0x14063b470).
 struct GatewayConnection {
   uint8_t* api;              // +0x00, Gateway::ExternalGatewayApi (0x1068 bytes, own manager)
-  uint64_t createdMs;        // +0x08
+  uint64_t ownerThread;      // +0x08, GetCurrentThreadId() of the creating thread
   void** listVtable;         // +0x10 (0x1420dd230)
   void* listHead;            // +0x18
   void* listTail;            // +0x20
@@ -35,6 +35,9 @@ struct GatewayConnection {
   CRITICAL_SECTION mutex;    // +0x38
 };
 static_assert(offsetof(GatewayConnection, listCount) == 0x28 && offsetof(GatewayConnection, mutex) == 0x38);
+
+// 0x14032e7b0: GetCurrentThreadId, zero-extended.
+uint64_t CurrentThreadId() { return game::Call<uint64_t (*)()>(0x14032e7b0)(); }
 
 // 0x14063b470: create the gateway api (with its own UdpManager) and the
 // connection's bookkeeping.
@@ -50,7 +53,7 @@ GatewayConnection* GatewayConnectionConstruct(GatewayConnection* self, const uin
                                                port, params, unused, flag);
   }
   self->api = api;
-  self->createdMs = game::Call<uint64_t (*)()>(0x14032e7b0)();
+  self->ownerThread = CurrentThreadId();
   self->listVtable = reinterpret_cast<void**>(0x1420dd230);
   self->listCount = 0;
   self->listHead = nullptr;
@@ -105,6 +108,24 @@ QueuedDataPacketEx* QueuedDataPacketExDeletingDestructor(QueuedDataPacketEx* sel
   soeutil::ByteArrayDestroy(&self->stream.inlineArray);
   self->vtable = reinterpret_cast<void**>(kVtQueuedPacket);
   if (flags & 1) SizedDelete(self, sizeof(QueuedDataPacketEx));
+  return self;
+}
+
+// 0x14063b3d0: QueuedDataPacket(api, data, length, mode).
+QueuedDataPacket* QueuedDataPacketConstruct(QueuedDataPacket* self, uint8_t* api, const void* data, int length, int mode) {
+  self->api = api;
+  self->mode = mode;
+  self->vtable = reinterpret_cast<void**>(0x1420dd1f0);
+  soeutil::ByteStream& stream = self->stream;
+  stream.inlineArray.data = nullptr;
+  stream.inlineArray.size = 0;
+  stream.inlineArray.unknown14 = 0;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.unknown202C = 0;
+  stream.writePos = 0;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  stream.array = &stream.inlineArray;
+  soeutil::StreamPut(&stream, data, length);
   return self;
 }
 
@@ -271,6 +292,68 @@ bool GatewayConnectionFlushQueue(GatewayConnection* self) {
   return ok;
 }
 
+using AllocNodeFn = PacketListNode* (*)(PacketList*);
+
+// 0x14063c2d0: PacketList::PushFront(&packet).
+PacketListNode* PacketListPushFront(PacketList* list, QueuedPacket** packet) {
+  auto* node = reinterpret_cast<AllocNodeFn>(list->vtable[2])(list);
+  if (node) node->packet = *packet;
+  node->prev = nullptr;
+  node->next = list->head;
+  if (!list->head)
+    list->tail = node;
+  else
+    list->head->prev = node;
+  ++list->count;
+  list->head = node;
+  return node;
+}
+
+// 0x14063b820: append a packet for the owning thread to send.
+void GatewayConnectionEnqueue(GatewayConnection* self, QueuedPacket* packet) {
+  CRITICAL_SECTION* mutex = &self->mutex;
+  soeutil::MutexLock(mutex);
+  PacketList* list = ConnectionPackets(self);
+  auto* node = reinterpret_cast<AllocNodeFn>(list->vtable[2])(list);
+  if (node) node->packet = packet;
+  node->prev = list->tail;
+  node->next = nullptr;
+  if (!list->tail)
+    list->head = node;
+  else
+    list->tail->next = node;
+  list->tail = node;
+  ++list->count;
+  self->flag = true;
+  if (mutex) soeutil::MutexUnlock(mutex);
+}
+
+bool SendThroughApi(uint8_t* api, const void* data, int length, bool reliable) {
+  return game::Call<bool (*)(uint8_t*, const void*, int, bool)>(0x14162db20)(api, data, length, reliable);
+}
+
+// Off the owning thread a packet is copied and queued (sent by FlushQueue on
+// the owner); on it, the queue is flushed first so ordering is kept.
+bool SendOrQueue(GatewayConnection* self, const void* data, int length, bool reliable) {
+  if (CurrentThreadId() == self->ownerThread)
+    return GatewayConnectionFlushQueue(self) && SendThroughApi(self->api, data, length, reliable);
+  QueuedDataPacket* packet = nullptr;
+  if (void* memory = soeutil::Allocate(sizeof(QueuedDataPacket)))
+    packet = QueuedDataPacketConstruct(static_cast<QueuedDataPacket*>(memory), self->api, data, length, reliable);
+  GatewayConnectionEnqueue(self, packet);
+  return true;
+}
+
+// 0x14063c030: Send(data, length, reliable).
+bool GatewayConnectionSend(GatewayConnection* self, const void* data, int length, bool reliable) {
+  return SendOrQueue(self, data, length, reliable);
+}
+
+// 0x14063c0e0: SendReliable(data, length).
+bool GatewayConnectionSendReliable(GatewayConnection* self, const void* data, int length) {
+  return SendOrQueue(self, data, length, true);
+}
+
 // 0x14063b8f0: install a session key (type, key bytes, extra) on the gateway api.
 bool GatewayConnectionSetSessionKey(GatewayConnection* self, int type, const void* keyBytes, int extra) {
   alignas(8) uint8_t bytes[0x60];  // Crypto::ArraySecure<unsigned char,64,1>
@@ -369,6 +452,11 @@ REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Stream, 0x14063bc90, QueuedDataPacket
 REBUILD_FUNCTION(GatewayPacketList_AllocateNode, 0x14063b8c0, PacketListAllocateNode);
 REBUILD_FUNCTION(GatewayPacketList_FreeNode, 0x14063bba0, PacketListFreeNode);
 REBUILD_FUNCTION(GatewayPacketList_Clear, 0x14063be70, PacketListClear);
+REBUILD_FUNCTION(GatewayPacketList_PushFront, 0x14063c2d0, PacketListPushFront);
+REBUILD_FUNCTION(GatewayQueuedDataPacket_Construct, 0x14063b3d0, QueuedDataPacketConstruct);
+REBUILD_FUNCTION(GatewayConnection_Enqueue, 0x14063b820, GatewayConnectionEnqueue);
+REBUILD_FUNCTION(GatewayConnection_Send, 0x14063c030, GatewayConnectionSend);
+REBUILD_FUNCTION(GatewayConnection_SendReliable, 0x14063c0e0, GatewayConnectionSendReliable);
 REBUILD_FUNCTION(GatewayConnection_FlushQueue, 0x14063b9f0, GatewayConnectionFlushQueue);
 REBUILD_FUNCTION(GatewayConnection_SetSessionKey, 0x14063b8f0, GatewayConnectionSetSessionKey);
 REBUILD_FUNCTION_TOO_SMALL(GatewayPacketList_AlwaysTrue, 0x14063be00, PacketListAlwaysTrue);
