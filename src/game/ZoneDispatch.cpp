@@ -284,6 +284,17 @@ struct RefreshRequest {
 };
 static_assert(offsetof(RefreshRequest, c) == 0x18);
 
+struct Packet3F {
+  void** vtable;
+  int opcode;
+  int padding;
+  soeutil::IString message;  // +0x10 (vtable 0x142049dc8)
+  uint8_t body[0x88];        // filled by the reader
+  int seconds;               // +0xB0
+  int padding2;
+};
+static_assert(offsetof(Packet3F, seconds) == 0xB0 && sizeof(Packet3F) == 0xB8);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1247,13 +1258,60 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(UiArgs*)>(0x1403a06c0)(&args);
       break;
     }
+    case 0x3F: {  // timed kick: "KickedFromServerTimedMessage" with a seconds countdown
+      Packet3F packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063c60);
+      packet.opcode = 0x3F;
+      packet.message = {reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+      using ReadFn = bool (*)(Packet3F*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038b150)(&packet, data, length, true)) {
+        soeutil::IString title{reinterpret_cast<void**>(0x14204aea0), soeutil::EmptyStringData(), 0, 0};
+        auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
+        using LookupFn = int (*)(void*, const char*);
+        int titleId = reinterpret_cast<LookupFn>((*reinterpret_cast<void***>(strings))[4])(strings, GameText(0x14206dfe8));
+        // Four tooltip parameters, each in its own 0x400-byte slot of the shared buffer.
+        uint8_t* playerParam = opaque;
+        uint8_t* secondsParam = opaque + 0x400;
+        uint8_t* timeParam = opaque + 0x800;
+        uint8_t* messageParam = opaque + 0xC00;
+        void* self = game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C));
+        game::Call<void (*)(uint8_t*, void*)>(0x14047fcb0)(playerParam, self);
+        soeutil::StringAssign(playerParam, GameText(0x14206e008));  // "player"
+        soeutil::IString seconds{reinterpret_cast<void**>(0x14204baa8), soeutil::EmptyStringData(), 0, 0};
+        soeutil::StringFormat(&seconds, GameText(0x14204b3f4), packet.seconds);  // "%02d"
+        using NewParamFn = void (*)(uint8_t*);
+        using SetTextFn = void (*)(uint8_t*, const char*, const char*);
+        game::Call<NewParamFn>(0x14047fe00)(secondsParam);
+        game::Call<SetTextFn>(0x140483490)(secondsParam, GameText(0x14206e010), seconds.data);  // "seconds"
+        game::Call<NewParamFn>(0x14047fe00)(timeParam);
+        strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
+        int timeId = reinterpret_cast<LookupFn>((*reinterpret_cast<void***>(strings))[4])(strings, GameText(0x14206e018));
+        game::Call<void (*)(uint8_t*, int)>(0x140483ca0)(timeParam, timeId);  // "TimeRemainingSeconds"
+        soeutil::StringAssign(timeParam, GameText(0x14206e030));               // "time"
+        game::Call<NewParamFn>(0x14047fe00)(messageParam);
+        game::Call<SetTextFn>(0x140483490)(messageParam, GameText(0x14206e038), packet.message.data);  // "message"
+        using ShowFn = void (*)(void*, soeutil::IString*, int, int, uint8_t*, uint8_t*, uint8_t*, uint8_t*);
+        game::Call<ShowFn>(0x140484820)(Member(game, 0x76D7), &title, titleId, 4, playerParam, secondsParam, timeParam,
+                                        messageParam);
+        game::Call<void (*)(uint8_t*, const char*, int)>(0x14040aa60)(game, title.data, packet.seconds);
+        using ParamDtorFn = void (*)(uint8_t*);
+        game::Call<ParamDtorFn>(0x140480710)(messageParam);
+        game::Call<ParamDtorFn>(0x140480710)(timeParam);
+        game::Call<ParamDtorFn>(0x140480710)(secondsParam);
+        game::Call<void (*)(soeutil::IString*)>(0x1403aad80)(&seconds);
+        game::Call<ParamDtorFn>(0x140480710)(playerParam);
+        game::Call<void (*)(soeutil::IString*)>(0x14030c3c0)(&title);
+      }
+      game::Call<void (*)(Packet3F*)>(0x1403b08a0)(&packet);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E: case 0x3F:
+    case 0x3E:
     case 0x99:
    
     case 0xDE: case 0xE3:
