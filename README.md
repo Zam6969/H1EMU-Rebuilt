@@ -99,9 +99,10 @@ carry RTTI; most engine classes were built without it.
 | Game | zone connection wrapper | 14 accessors over the gateway api: stats, counters, character id, UdpConnection / UdpManager / params, IsConnecting / IsConnected / IsLoggedIn, session key, SetLoginPending, SetListener, Disconnect |
 | Game | zone client (gateway listener) | OnConnect, OnChannelIsRoutable, OnConnectionIsNotRoutable, OnTunnelData (zone packet entry: channel 2 = opcode 0x79 packets, opcode 0xF5 float, rest -> game packet handler), 4 no-op slots |
 | Game | game client zone packet entry | HandleZonePacket (slot 42 of the game client, vtable 0x1420646e0): sequence + timestamp, dispatch now vs. time-ordered delay queue, per-channel last-packet record |
+| Game | zone opcode dispatcher (partial) | DispatchZonePacket 0x1403fe210: 26 single-call opcodes (0x0C-0x2B, 0xF1-0xF8) and the out-of-range extension handler are rebuilt; the rest still go to the original through its trampoline (`REBUILD_FUNCTION_WITH_ORIGINAL`) |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 602 functions (581 hooked, 21 too small to hook).
+Total: 603 functions (582 hooked, 21 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,

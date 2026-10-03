@@ -38,3 +38,11 @@ HookResult InstallHooks();
 #define REBUILD_FUNCTION_TOO_SMALL(name, address, fn)                           \
   static const bool rebuild_hook_##name = ::rebuild::RegisterHook(             \
       {#name, address, reinterpret_cast<void*>(&fn), nullptr, false})
+
+// Like REBUILD_FUNCTION, but `original` (a function pointer variable) receives
+// a trampoline to the original game code. Used for partially rebuilt
+// functions, e.g. a dispatcher whose not-yet-rebuilt cases still run the
+// original body.
+#define REBUILD_FUNCTION_WITH_ORIGINAL(name, address, fn, original)             \
+  static const bool rebuild_hook_##name = ::rebuild::RegisterHook(             \
+      {#name, address, reinterpret_cast<void*>(&fn), reinterpret_cast<void**>(&original)})
