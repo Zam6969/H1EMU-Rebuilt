@@ -453,7 +453,8 @@ void StreamWriteBytes(soeutil::ByteStream* stream, const void* data, int count) 
 
 // 0x1415f3420: BaseApi(manager, defaultPort, rpcIdEncoding) - shares an
 // existing BaseUdpManager.
-uint8_t* BaseApiConstruct(uint8_t* api, uint8_t* manager, int defaultPort, int rpcIdEncoding) {
+// Member construction shared by both BaseApi constructors.
+void BaseApiConstructMembers(uint8_t* api, int rpcIdEncoding) {
   game::Call<void (*)(uint8_t*)>(0x1415f2dc0)(api);  // handler bases
   game::Field<uintptr_t>(api, 0x00) = 0x1424b03a8;  // BaseApi vtables
   game::Field<uintptr_t>(api, 0x80) = 0x1424b0458;
@@ -482,9 +483,36 @@ uint8_t* BaseApiConstruct(uint8_t* api, uint8_t* manager, int defaultPort, int r
   game::Field<uint64_t>(api, 0xBE8) = 0;
   game::Field<uint64_t>(api, 0xBF0) = 0;
   initString(0xC08, 0x142049e08);  // StringFixed<256> current address
+}
+
+uint8_t* BaseApiConstruct(uint8_t* api, uint8_t* manager, int defaultPort, int rpcIdEncoding) {
+  BaseApiConstructMembers(api, rpcIdEncoding);
   game::Field<uint8_t*>(api, 0x2D0) = manager;
   game::Field<bool>(api, 0x2D8) = false;  // manager not owned
   game::Field<int>(api, 0x2DC) = defaultPort;
+  BaseApiInitFields(api);
+  return api;
+}
+
+// 0x1415f35d0: BaseApi(name, threaded, compression, largeBuffers, defaultPort,
+// logChannel, rpcIdEncoding) - creates and owns its BaseUdpManager.
+uint8_t* BaseApiConstructOwnManager(uint8_t* api, const char* name, bool threaded, bool compression, bool largeBuffers,
+                                    int defaultPort, const char* logChannel, int rpcIdEncoding) {
+  BaseApiConstructMembers(api, rpcIdEncoding);
+  void* memory = soeutil::Allocate(0x2E0);
+  uint8_t* manager = nullptr;
+  if (memory) {
+    using CtorFn = uint8_t* (*)(void*, const char*, bool, bool, bool, const char*);
+    manager = game::Call<CtorFn>(0x1415f37f0)(memory, name, threaded, compression, largeBuffers, logChannel);
+  }
+  game::Field<uint8_t*>(api, 0x2D0) = manager;
+  game::Field<bool>(api, 0x2D8) = true;  // owns the manager
+  game::Field<int>(api, 0x2DC) = defaultPort;
+  game::Field<void*>(api, 0xC00) = nullptr;
+  const size_t trackers[] = {0x368, 0x780};
+  for (size_t tracker : trackers) {  // SetWindowMs(5000)
+    reinterpret_cast<void (*)(uint8_t*, int)>((*reinterpret_cast<void***>(api + tracker))[2])(api + tracker, 5000);
+  }
   BaseApiInitFields(api);
   return api;
 }
@@ -538,6 +566,7 @@ REBUILD_FUNCTION(ClientServerCore_RpcTableClear, 0x1415f6b40, RpcTableClear);
 REBUILD_FUNCTION(ClientServerCore_RpcRouterRemoveHandler, 0x1415f6ff0, RpcRouterRemoveHandler);
 REBUILD_FUNCTION(SoeUtil_ByteStream_Put, 0x1415f6d40, StreamWriteBytes);
 REBUILD_FUNCTION(BaseApi_Construct, 0x1415f3420, BaseApiConstruct);
+REBUILD_FUNCTION(BaseApi_ConstructOwnManager, 0x1415f35d0, BaseApiConstructOwnManager);
 REBUILD_FUNCTION(CryptoBaseApi_Construct, 0x1415f8b10, CryptoBaseApiConstruct);
 REBUILD_FUNCTION(CryptoBaseApi_ConstructOwnManager, 0x1415f8b70, CryptoBaseApiConstructOwnManager);
 REBUILD_FUNCTION(BaseApi_ConnectionValue1C4, 0x1415f4340, BaseApiConnectionValue1C4);

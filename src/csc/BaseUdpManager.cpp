@@ -190,12 +190,68 @@ void BaseApiSetLogChannel(uint8_t* api, const char* name) {
   BaseUdpManagerSetLogChannel(game::Field<uint8_t*>(api, 0x2D0), name);
 }
 
+// 0x1415f37f0: BaseUdpManager(name, threaded, compression, largeBuffers, logChannel)
+uint8_t* BaseUdpManagerConstruct(uint8_t* manager, const char* name, bool threaded, bool compression, bool largeBuffers,
+                                 const char* logChannel) {
+  game::Call<void (*)(uint8_t*)>(0x1415f2dc0)(manager);  // UdpCompressionHandler()
+  game::Field<uintptr_t>(manager, 0) = 0x1424b04a8;     // BaseUdpManager vtable
+  game::Call<void (*)(uint8_t*, int)>(0x14033c720)(manager + kParams, largeBuffers ? 2 : 4);  // UdpManager::Params(role)
+  auto initString = [manager](size_t offset) {
+    game::Field<const char*>(manager, offset + 8) = soeutil::EmptyStringData();
+    game::Field<uint64_t>(manager, offset + 0x10) = 0;
+    game::Field<uintptr_t>(manager, offset) = 0x14204a378;  // StringFixed<32>
+  };
+  initString(kLogChannel);
+  game::Field<bool>(manager, 0x288) = true;  // verbose logging
+  initString(kIniSectionString);
+  game::Field<int64_t>(manager, kLastIniCheck) = 0;
+  game::Field<int>(manager, kServiceRefs) = 0;
+  game::Field<int>(manager, 0xA8) = 29000;    // params: port
+  game::Field<int>(manager, 0xBC) = 120000;
+  game::Field<int>(manager, 0xE0) = 20000;
+  game::Field<int>(manager, 0xEC) = 20000;
+  game::Field<int>(manager, 0xDC) = 5;
+  game::Field<void*>(manager, kUdpManager) = nullptr;
+  game::Field<bool>(manager, kThreaded) = threaded;
+  game::Field<bool>(manager, kCompression) = compression;
+  BaseUdpManagerSetLogChannel(manager, logChannel);
+  if (game::Field<bool>(manager, kThreaded)) {
+    game::Field<bool>(manager, 0x200) = true;
+    game::Field<int>(manager, 0xF8) = 0x19;
+  }
+  // Copy the name into the 32-byte buffer at +0x209 (31 chars max).
+  char* out = reinterpret_cast<char*>(manager + kName);
+  char* end = out + 0x1F;
+  for (const char* in = name; out != end && *in; ++in, ++out) *out = *in;
+  *out = '\0';
+  if (game::Field<bool>(manager, kCompression)) {  // install the compression "encryption" slots
+    game::Field<int>(manager, 0x230) = 1;
+    game::Field<int>(manager, 0x1EC) = 1;
+  }
+  if (largeBuffers) {
+    game::Field<int>(manager, 0x124) = 4000;
+    game::Field<int>(manager, 0x11C) = 0x400000;
+    game::Field<int>(manager, 0x120) = 4000;
+    game::Field<int>(manager, 0x140) = 0x4000;
+    game::Field<int>(manager, 0x144) = 0x10000;
+    game::Field<int>(manager, 0x134) = 500;
+    game::Field<int>(manager, 0xC4) = 0;
+  }
+  game::Field<uint8_t*>(manager, kParams) = manager;  // params.handler
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(manager + kIniSectionString),
+                        reinterpret_cast<const char*>(0x1424b0e00));  // "BaseApi"
+  game::Field<int64_t>(manager, kLastIniCheck) = TimeSeconds();
+  game::Field<uint64_t>(manager, kIniCrc64) = 0;
+  return manager;
+}
+
 REBUILD_FUNCTION(UdpManager_SetHandler, 0x1415f5700, UdpManagerSetHandler);
 REBUILD_FUNCTION(BaseUdpManager_ServiceStart, 0x1415f54b0, BaseUdpManagerServiceStart);
 REBUILD_FUNCTION(BaseUdpManager_ServiceStop, 0x1415f5670, BaseUdpManagerServiceStop);
 REBUILD_FUNCTION(BaseUdpManager_SetIniSection, 0x1415f5780, BaseUdpManagerSetIniSection);
 REBUILD_FUNCTION(BaseUdpManager_SetLogChannel, 0x1415f5840, BaseUdpManagerSetLogChannel);
 REBUILD_FUNCTION(BaseApi_SetLogChannel, 0x1415f57d0, BaseApiSetLogChannel);
+REBUILD_FUNCTION(BaseUdpManager_Construct, 0x1415f37f0, BaseUdpManagerConstruct);
 REBUILD_FUNCTION(BaseUdpManager_GiveTime, 0x1415f4470, BaseUdpManagerGiveTime);
 
 }  // namespace rebuild::csc
