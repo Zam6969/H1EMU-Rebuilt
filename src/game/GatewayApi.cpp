@@ -519,9 +519,87 @@ bool ReadForcedLogout(const uint8_t* data, int length, PacketForcedLogout* packe
   return true;
 }
 
+void DestroyStringFixedMember(uint8_t* object, size_t offset, uintptr_t iStringFixedVtable) {
+  auto* string = reinterpret_cast<soeutil::IString*>(object + offset);
+  string->vtable = reinterpret_cast<void**>(iStringFixedVtable);
+  soeutil::StringRelease(string);
+  string->data = soeutil::EmptyStringData();
+  string->length = 0;
+  string->capacity = 0;
+  string->vtable = soeutil::IStringVtable();
+}
+
+// 0x14162cb70: ~ExternalGatewayApi
+void GatewayDestroy(uint8_t* api) {
+  constexpr uintptr_t kIStringFixed16 = 0x14204ba88;
+  game::Field<uintptr_t>(api, 0x000) = 0x1424be298;  // ExternalGatewayApi vtables (main + subobjects)
+  game::Field<uintptr_t>(api, 0x080) = 0x1424be358;
+  game::Field<uintptr_t>(api, 0x088) = 0x1424be390;
+  game::Field<uintptr_t>(api, 0xD40) = 0x1424be3a8;
+  game::Call<void (*)(uint8_t*)>(0x14165b570)(api + kPendingQueue);  // DataQueue::Clear
+  DestroyStringFixedMember(api, kClientBuild, kIStringFixed16);
+  DestroyStringFixedMember(api, kClientProtocol, kIStringFixed16);
+  DestroyStringFixedMember(api, kTicket, kIStringFixed16);
+  DestroyStringFixedMember(api, 0xF80, kVtIStringFixed32);           // server address
+  game::Call<void (*)(uint8_t*)>(0x14165ac00)(api + kPendingQueue);  // ~DataQueue
+  game::Call<void (*)(uint8_t*)>(0x14165c630)(api + kLog);           // ~logger
+  game::Call<void (*)(uint8_t*)>(0x1415f8c20)(api);                  // ~CryptoBaseApi
+}
+
+void GatewayInit(uint8_t* api, const uint64_t* characterId, const char* ticket, const char* clientProtocol,
+                 const char* clientBuild);
+
+// Member construction shared by both ExternalGatewayApi constructors (after
+// the base class): vtables, logger, pending queue, strings, flags, Init.
+void GatewayConstructMembers(uint8_t* api, const uint64_t* characterId, const char* ticket, const char* clientProtocol,
+                             const char* clientBuild, bool flag1063) {
+  game::Call<void (*)(uint8_t*)>(0x14165c600)(api + kLog);  // logger
+  game::Field<uintptr_t>(api, 0x000) = 0x1424be298;
+  game::Field<uintptr_t>(api, 0x080) = 0x1424be358;
+  game::Field<uintptr_t>(api, 0x088) = 0x1424be390;
+  game::Field<uintptr_t>(api, 0xD40) = 0x1424be3a8;
+  game::Call<void (*)(uint8_t*)>(0x14165aaf0)(api + kPendingQueue);  // DataQueue
+  auto initString = [api](size_t offset, uintptr_t vtable) {
+    auto* string = reinterpret_cast<soeutil::IString*>(api + offset);
+    string->data = soeutil::EmptyStringData();
+    string->length = 0;
+    string->capacity = 0;
+    string->vtable = reinterpret_cast<void**>(vtable);
+  };
+  constexpr uintptr_t kStringFixed16 = 0x14204baa8;
+  initString(0xF80, kVtStringFixed32);
+  initString(kTicket, kStringFixed16);
+  initString(kClientProtocol, kStringFixed16);
+  initString(kClientBuild, kStringFixed16);
+  game::Field<uint16_t>(api, kLoginPending) = 1;  // login pending, raw logging off
+  game::Field<bool>(api, 0x1063) = flag1063;
+  uint64_t id = *characterId;
+  GatewayInit(api, &id, ticket, clientProtocol, clientBuild);
+}
+
+// 0x14162c890: ExternalGatewayApi(characterId, ticket, protocol, build, manager, port, flag)
+uint8_t* GatewayConstruct(uint8_t* api, const uint64_t* characterId, const char* ticket, const char* clientProtocol,
+                          const char* clientBuild, void* manager, int port, bool flag1063) {
+  game::Call<void (*)(uint8_t*, void*, int)>(0x1415f8b10)(api, manager, port);  // CryptoBaseApi(shared manager)
+  GatewayConstructMembers(api, characterId, ticket, clientProtocol, clientBuild, flag1063);
+  return api;
+}
+
+// 0x14162c9f0: ExternalGatewayApi(..., threaded, compression, port, params, .., flag) -
+// variant that creates its own manager named "ExternalGatewayApi".
+uint8_t* GatewayConstructOwnManager(uint8_t* api, const uint64_t* characterId, const char* ticket,
+                                    const char* clientProtocol, const char* clientBuild, bool threaded,
+                                    bool compression, int port, void* params, void* /*unused*/, bool flag1063) {
+  const char* name = *reinterpret_cast<const char**>(0x142ab6758);  // "ExternalGatewayApi"
+  using BaseFn = void (*)(uint8_t*, const char*, bool, bool, bool, int, void*);
+  game::Call<BaseFn>(0x1415f8b70)(api, name, threaded, compression, false, port, params);
+  GatewayConstructMembers(api, characterId, ticket, clientProtocol, clientBuild, flag1063);
+  return api;
+}
+
 // 0x14162cf50 (slot 0): ExternalGatewayApi scalar deleting destructor.
 uint8_t* GatewayDeletingDestructor(uint8_t* api, unsigned flags) {
-  game::Call<void (*)(uint8_t*)>(0x14162cb70)(api);  // ~ExternalGatewayApi
+  GatewayDestroy(api);
   if (flags & 1) soeutil::Free(api, 0x1068);
   return api;
 }
@@ -639,6 +717,9 @@ REBUILD_FUNCTION(Gateway_SendSecure, 0x14162dba0, GatewaySendSecure);
 REBUILD_FUNCTION(Gateway_SendTunnelPacket, 0x14162dcc0, GatewaySendTunnelPacket);
 REBUILD_FUNCTION(Gateway_SerializeU64, 0x14162c4d0, SerializeU64);
 REBUILD_FUNCTION(Gateway_ReadForcedLogout, 0x14162c750, ReadForcedLogout);
+REBUILD_FUNCTION(Gateway_Destroy, 0x14162cb70, GatewayDestroy);
+REBUILD_FUNCTION(Gateway_Construct, 0x14162c890, GatewayConstruct);
+REBUILD_FUNCTION(Gateway_ConstructOwnManager, 0x14162c9f0, GatewayConstructOwnManager);
 REBUILD_FUNCTION(Gateway_DeletingDestructor, 0x14162cf50, GatewayDeletingDestructor);
 REBUILD_FUNCTION(Gateway_SendPacket, 0x14162c020, GatewaySendPacket);
 REBUILD_FUNCTION(Gateway_Init, 0x14162d1e0, GatewayInit);
