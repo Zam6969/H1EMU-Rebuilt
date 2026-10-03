@@ -8,6 +8,8 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Allocator.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
 #include "soeutil/String.h"
 
@@ -172,10 +174,115 @@ uint8_t* ZoneClientConstruct(uint8_t* self, const uint64_t* characterId, const c
   return self;
 }
 
+// Frees container storage the way SoeUtil containers do: through the SoeUtil
+// allocator while any thread has its own, otherwise delete[].
+void FreeContainerStorage(void* data) {
+  if (*reinterpret_cast<uint64_t*>(0x143e09638) == 0)
+    soeutil::FreeArray(data);
+  else
+    soeutil::MemoryFree(data, 8);
+}
+
+// Small array {vtable 0x1420dd6a0, data, count}.
+struct ZoneArray {
+  void** vtable;
+  void* data;
+  int count;
+  int padding;
+};
+
+// 0x14063ce60: ZoneArray destructor.
+void ZoneArrayDestroy(ZoneArray* array) {
+  array->count = 0;
+  array->vtable = reinterpret_cast<void**>(0x1420dd6a0);
+  FreeContainerStorage(array->data);
+  array->data = nullptr;
+}
+
+// One of the client's four records (+0xE8, +0x150, +0x1B0, +0x210): an array
+// at +8 and a string at +0x30.
+struct ZoneRecord {
+  void* unknown0;
+  ZoneArray array;        // +0x08
+  uint8_t unknown20[0x10];
+  soeutil::IString text;  // +0x30
+};
+static_assert(offsetof(ZoneRecord, array) == 8 && offsetof(ZoneRecord, text) == 0x30);
+
+// 0x14063cf70: ZoneRecord destructor.
+void ZoneRecordDestroy(ZoneRecord* record) {
+  record->text.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&record->text);
+  record->array.vtable = reinterpret_cast<void**>(0x1420dd6a0);
+  record->array.count = 0;
+  FreeContainerStorage(record->array.data);
+  record->array.data = nullptr;
+}
+
+// Intrusive list whose links live at fixed offsets inside the node.
+template <size_t kNext, size_t kPrev>
+void UnlinkHead(uint8_t* list) {
+  uint8_t* node = game::Field<uint8_t*>(list, 8);
+  uint8_t* next = game::Field<uint8_t*>(node, kNext);
+  uint8_t* prev = game::Field<uint8_t*>(node, kPrev);
+  if (!prev)
+    game::Field<uint8_t*>(list, 8) = next;
+  else
+    game::Field<uint8_t*>(prev, kNext) = next;
+  if (!next)
+    game::Field<uint8_t*>(list, 0x10) = prev;
+  else
+    game::Field<uint8_t*>(next, kPrev) = prev;
+  --game::Field<int>(list, 0x18);
+}
+
+void FreeListNode(uint8_t* list, uint8_t* node) {
+  reinterpret_cast<void (*)(uint8_t*, uint8_t*)>((*reinterpret_cast<void***>(list))[3])(list, node);
+}
+
+// 0x14063cec0: list (vtable 0x1420dd670, links at +0x10/+0x18) destructor.
+void ZoneListDestroy(uint8_t* list) {
+  game::Field<void*>(list, 0) = reinterpret_cast<void*>(0x1420dd670);
+  while (uint8_t* node = game::Field<uint8_t*>(list, 8)) {
+    UnlinkHead<0x10, 0x18>(list);
+    FreeListNode(list, node);
+  }
+}
+
+// 0x14063e1c0: list of byte arrays (array at +8, links at +0x2038/+0x2040).
+void ZoneStreamListClear(uint8_t* list) {
+  while (uint8_t* node = game::Field<uint8_t*>(list, 8)) {
+    UnlinkHead<0x2038, 0x2040>(list);
+    soeutil::ByteArrayDestroy(reinterpret_cast<soeutil::ByteArray8k*>(node + 8));
+    FreeListNode(list, node);
+  }
+}
+
+// 0x14063d0c0: ZoneClient destructor.
+void ZoneClientDestroy(uint8_t* self) {
+  game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd6e0);
+  if (uint8_t* connection = game::Field<uint8_t*>(self, 8)) {
+    game::Call<void (*)(uint8_t*)>(0x14063b6d0)(connection);
+    soeutil::Free(connection, 0x80);
+  }
+  game::Field<void*>(self, 0x288) = reinterpret_cast<void*>(0x1420dd6c0);
+  ZoneStreamListClear(self + 0x288);
+  ZoneRecordDestroy(reinterpret_cast<ZoneRecord*>(self + 0x210));
+  ZoneRecordDestroy(reinterpret_cast<ZoneRecord*>(self + 0x1B0));
+  ZoneRecordDestroy(reinterpret_cast<ZoneRecord*>(self + 0x150));
+  ZoneRecordDestroy(reinterpret_cast<ZoneRecord*>(self + 0xE8));
+  game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd620);
+}
+
 // Slots 3, 4, 5, 9: `ret 0` - nothing to do.
 void ZoneClientIgnore() {}
 
 REBUILD_FUNCTION(ZoneClient_Construct, 0x14063cc10, ZoneClientConstruct);
+REBUILD_FUNCTION(ZoneClient_Destroy, 0x14063d0c0, ZoneClientDestroy);
+REBUILD_FUNCTION(ZoneClient_RecordDestroy, 0x14063cf70, ZoneRecordDestroy);
+REBUILD_FUNCTION(ZoneClient_ArrayDestroy, 0x14063ce60, ZoneArrayDestroy);
+REBUILD_FUNCTION(ZoneClient_ListDestroy, 0x14063cec0, ZoneListDestroy);
+REBUILD_FUNCTION(ZoneClient_StreamListClear, 0x14063e1c0, ZoneStreamListClear);
 REBUILD_FUNCTION(ZoneClient_OnConnect, 0x14063dbb0, ZoneClientOnConnect);
 REBUILD_FUNCTION(ZoneClient_OnChannelIsRoutable, 0x14063db80, ZoneClientOnChannelIsRoutable);
 REBUILD_FUNCTION(ZoneClient_OnConnectionIsNotRoutable, 0x14063dc00, ZoneClientOnConnectionIsNotRoutable);
