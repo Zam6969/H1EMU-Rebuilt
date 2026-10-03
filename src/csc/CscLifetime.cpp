@@ -46,6 +46,67 @@ udp::UdpPlatformGuardObject* ConnectionGuard(uint8_t* connection) {
 
 }  // namespace
 
+// 0x1415f2dc0: UdpCompressionHandler() - stats mutex + zeroed counters.
+uint8_t* UdpCompressionHandlerConstruct(uint8_t* handler) {
+  CRITICAL_SECTION* mutex = StatsMutex(handler);
+  SetVtable(handler, kVtUdpCompressionHandler);
+  soeutil::MutexConstruct(mutex, 4000, nullptr);
+  soeutil::MutexLock(mutex);
+  std::memset(handler + 0x50, 0, 0x30);
+  if (mutex) soeutil::MutexUnlock(mutex);
+  return handler;
+}
+
+void UdpCompressionHandlerDestroy(uint8_t* handler);  // below
+
+// 0x1415f3a40: ~BaseApi
+void BaseApiDestroy(uint8_t* api) {
+  game::Field<uintptr_t>(api, 0x00) = 0x1424b03a8;
+  game::Field<uintptr_t>(api, 0x80) = 0x1424b0458;
+  game::Field<uintptr_t>(api, 0x88) = 0x1424b0490;
+  auto* manager = game::Field<uint8_t*>(api, 0x2D0);
+  if (manager && game::Field<bool>(manager, 0x288)) {
+    game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(
+        game::Field<void*>(manager, 0x250), reinterpret_cast<const char*>(0x1424b04d8), manager + 0x209);  // "BaseApi destructed (%s)"
+  }
+  if (auto* connection = game::Field<uint8_t*>(api, 0x2C0)) {
+    ConnectionGuard(connection + 8)->Enter();  // guard at +0x2E8
+    game::Field<void*>(connection, 0x2B0) = nullptr;
+    ConnectionGuard(connection + 8)->Leave();
+    game::Call<void (*)(uint8_t*, int)>(0x1415f5ed0)(api, game::Field<int>(api, 0x2F4));  // WaitForFlush
+    auto* current = game::Field<uint8_t*>(api, 0x2C0);
+    reinterpret_cast<void (*)(void*)>((*reinterpret_cast<void***>(current))[1])(current);  // Release
+    game::Field<void*>(api, 0x2C0) = nullptr;
+  }
+  if (game::Field<bool>(api, 0x2D9)) game::Call<void (*)(void*)>(0x1415f5670)(game::Field<void*>(api, 0x2D0));  // ServiceStop
+  if (game::Field<bool>(api, 0x2D8)) {  // owned manager
+    if (auto* owned = game::Field<uint8_t*>(api, 0x2D0)) {
+      reinterpret_cast<void (*)(void*, int)>((*reinterpret_cast<void***>(owned))[0])(owned, 1);
+    }
+    game::Field<void*>(api, 0x2D0) = nullptr;
+  }
+  auto destroyString = [api](size_t offset, uintptr_t iStringFixedVtable) {
+    auto* string = reinterpret_cast<soeutil::IString*>(api + offset);
+    string->vtable = reinterpret_cast<void**>(iStringFixedVtable);
+    soeutil::StringRelease(string);
+    string->data = soeutil::EmptyStringData();
+    string->length = 0;
+    string->capacity = 0;
+    string->vtable = soeutil::IStringVtable();
+  };
+  destroyString(0xC08, 0x142049de8);                  // StringFixed<256>
+  game::Field<uintptr_t>(api, 0xBE0) = 0x1424b0380;  // ~List<IString>
+  game::Call<void (*)(uint8_t*)>(0x140453600)(api + 0xBE0);
+  destroyString(0xBA0, 0x14204a358);                  // StringFixed<32>
+  game::Field<uintptr_t>(api, 0x780) = 0x14204b290;  // ~IRateTracker
+  game::Field<uintptr_t>(api, 0x368) = 0x14204b290;
+  destroyString(0x300, 0x142049ce0);                  // StringFixed<64>
+  game::Call<void (*)(uint8_t*)>(0x1415f67d0)(api + 0x90);  // ~RpcRouter
+  game::Field<uintptr_t>(api, 0x88) = kVtRpcManagerHandler;
+  game::Field<uintptr_t>(api, 0x80) = kVtUdpConnectionHandler;
+  UdpCompressionHandlerDestroy(api);
+}
+
 // 0x1415f2e30: ~UdpCompressionHandler
 void UdpCompressionHandlerDestroy(uint8_t* handler) {
   SetVtable(handler, kVtUdpCompressionHandler);
@@ -456,6 +517,8 @@ uint8_t* CryptoBaseApiConstructOwnManager(uint8_t* api, const char* name, bool t
   return api;
 }
 
+REBUILD_FUNCTION(UdpCompressionHandler_Construct, 0x1415f2dc0, UdpCompressionHandlerConstruct);
+REBUILD_FUNCTION(BaseApi_Destroy, 0x1415f3a40, BaseApiDestroy);
 REBUILD_FUNCTION(UdpCompressionHandler_Destroy, 0x1415f2e30, UdpCompressionHandlerDestroy);
 REBUILD_FUNCTION(UdpCompressionHandler_GetStats, 0x1415f2ef0, UdpCompressionHandlerGetStats);
 REBUILD_FUNCTION(UdpCompressionHandler_ClearStats, 0x1415f2f50, UdpCompressionHandlerClearStats);
