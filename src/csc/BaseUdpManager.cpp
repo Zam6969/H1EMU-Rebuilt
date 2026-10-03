@@ -7,6 +7,7 @@
 #include "core/game.h"
 #include "core/hook.h"
 #include "soeutil/Memory.h"
+#include "soeutil/String.h"
 #include "udp/UdpRefCount.h"
 
 namespace rebuild::csc {
@@ -20,7 +21,9 @@ constexpr size_t kParamsPort = 0x94;
 constexpr size_t kParamsPortRange = 0x98;
 constexpr size_t kName = 0x209;          // char[]
 constexpr size_t kUdpManager = 0x240;    // UdpManager*
+constexpr size_t kLogChannel = 0x248;    // IString: log channel name (data at +0x250)
 constexpr size_t kLog = 0x250;
+constexpr size_t kIniSectionString = 0x290;  // IString (data at +0x298)
 constexpr size_t kIniSection = 0x298;    // const char*
 constexpr size_t kIniReloadEnabled = 0x2A0;  // int
 constexpr size_t kLastIniCheck = 0x2D0;  // seconds
@@ -163,9 +166,36 @@ void BaseUdpManagerGiveTime(uint8_t* manager, int maxPollingMs) {
   game::Call<void (*)(void*, uint8_t*)>(0x140344f40)(game::Field<void*>(manager, kUdpManager), manager + kParams);
 }
 
+// 0x1415f5780: SetInifileSection(section)
+void BaseUdpManagerSetIniSection(uint8_t* manager, const char* section) {
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(manager + kIniSectionString), section);
+  if (!IniFile()) LogError(manager, 0x1424b1030);  // "... hasn't provided access to the inifile."
+}
+
+// 0x1415f5840: SetLogChannel(name); null clears it.
+void BaseUdpManagerSetLogChannel(uint8_t* manager, const char* name) {
+  auto* channel = reinterpret_cast<soeutil::IString*>(manager + kLogChannel);
+  if (name) {
+    soeutil::StringAssign(channel, name);
+    return;
+  }
+  soeutil::StringRelease(channel);
+  channel->data = soeutil::EmptyStringData();
+  channel->length = 0;
+  channel->capacity = 0;
+}
+
+// 0x1415f57d0: BaseApi::SetLogChannel - forwards to its BaseUdpManager.
+void BaseApiSetLogChannel(uint8_t* api, const char* name) {
+  BaseUdpManagerSetLogChannel(game::Field<uint8_t*>(api, 0x2D0), name);
+}
+
 REBUILD_FUNCTION(UdpManager_SetHandler, 0x1415f5700, UdpManagerSetHandler);
 REBUILD_FUNCTION(BaseUdpManager_ServiceStart, 0x1415f54b0, BaseUdpManagerServiceStart);
 REBUILD_FUNCTION(BaseUdpManager_ServiceStop, 0x1415f5670, BaseUdpManagerServiceStop);
+REBUILD_FUNCTION(BaseUdpManager_SetIniSection, 0x1415f5780, BaseUdpManagerSetIniSection);
+REBUILD_FUNCTION(BaseUdpManager_SetLogChannel, 0x1415f5840, BaseUdpManagerSetLogChannel);
+REBUILD_FUNCTION(BaseApi_SetLogChannel, 0x1415f57d0, BaseApiSetLogChannel);
 REBUILD_FUNCTION(BaseUdpManager_GiveTime, 0x1415f4470, BaseUdpManagerGiveTime);
 
 }  // namespace rebuild::csc
