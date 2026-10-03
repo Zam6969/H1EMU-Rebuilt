@@ -304,6 +304,24 @@ struct Packet08 {
 };
 static_assert(offsetof(Packet08, text) == 0x18 && sizeof(Packet08) == 0x30);
 
+struct ZoneDetailsPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  soeutil::IString zoneName;  // +0x10
+  int zoneType;               // +0x28, 0x7FFFFFFF by default
+  bool flag1;                 // +0x2C
+  int a;                      // +0x30 (3 is special)
+  int b;                      // +0x34
+  int c;                      // +0x38
+  bool flag2;                 // +0x3C
+  soeutil::IString extra;     // +0x40
+  bool invitational;          // +0x58
+  uint64_t guid;              // +0x60
+};
+static_assert(offsetof(ZoneDetailsPacket, zoneType) == 0x28 && offsetof(ZoneDetailsPacket, flag2) == 0x3C);
+static_assert(offsetof(ZoneDetailsPacket, extra) == 0x40 && offsetof(ZoneDetailsPacket, guid) == 0x60);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -359,7 +377,7 @@ static_assert(sizeof(LastPacket) == 12);
 constexpr size_t kLastReceived = 0x96D28;   // LastPacket[8] in the client state block
 constexpr size_t kLastProcessed = 0x96D88;  // LastPacket[8]
 
-// The tail of case 0x2C: dump the channel's last received / processed packet
+// The tail of opcode 0x2C: dump the channel's last received / processed packet
 // and the current one to "#|BadPackets.txt".
 void LogShutdownPackets(uint8_t* state, int channel, const uint8_t* data, int length) {
   auto* received = reinterpret_cast<LastPacket*>(state + kLastReceived) + channel;
@@ -1419,12 +1437,67 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(uint8_t*)>(0x1403b1130)(packet);
       break;
     }
+    case 0x99: {
+      // Opcode byte + one int, nothing after it.
+      if (data) {
+        const uint8_t* end = data + length;
+        const uint8_t* cursor = data + 1;
+        bool failed = false;
+        if (cursor > end) {
+          failed = true;
+          cursor = end;
+        }
+        if (cursor + 4 <= end) {
+          cursor += 4;
+          if (!failed && static_cast<int>(end - cursor) <= 0) game::Call<void (*)(uint8_t*)>(0x140467920)(game);
+        }
+      }
+      [[fallthrough]];  // the original falls into ZoneDetails (0x16) in every case
+    }
+    case 0x16: {  // ZoneDetails
+      ZoneDetailsPacket packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063c20);
+      packet.opcode = 0x16;
+      packet.zoneName = {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      packet.zoneType = 0x7FFFFFFF;
+      packet.extra = {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      packet.guid = game::Field<uint64_t>(game, 0x31498);
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(ZoneDetailsPacket*, PacketReader*)>(0x140372f90)(&packet, &reader);
+        if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0) {
+          game::Call<void (*)(uint8_t*, const char*)>(0x14046da20)(game, packet.zoneName.data);
+          game::Call<void (*)(uint8_t*, int)>(0x14046de30)(game, packet.zoneType);
+          game::Field<int>(game, 0x3899C) = packet.b;
+          auto& cached = *reinterpret_cast<int*>(0x142b17c78);
+          if (cached != packet.b) {
+            cached = packet.b;
+            game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(0x142b17c10));
+          }
+          game::Field<int>(game, 0x389A0) = packet.c;
+          game::Field<int>(game, 0x38F48) = packet.a;
+          game::Call<void (*)(uint8_t*, bool)>(0x14046b0d0)(game, packet.a == 3);
+          game::Call<void (*)(void*, bool)>(0x1417005b0)(game::Field<void*>(game, 0x38F40), packet.flag1);
+          game::Call<void (*)(const char*, bool)>(0x14133e6c0)(GameText(0x1420544d8), packet.invitational);  // "IsInvitational"
+          game::Call<void (*)(uint8_t*)>(0x140474500)(game);
+          game::Field<bool>(GlobalObject(0x142b19c50), 0xAB8) = packet.flag2;
+          if (packet.extra.length != 0) {
+            if (void* target = GlobalObject(0x142b19b18)) game::Call<void (*)(void*, const char*)>(0x141902ef0)(target, packet.extra.data);
+          }
+          game::Call<void (*)(const char*, const char*, const char*)>(0x1402bab70)(
+              GameText(0x142054710), GameText(0x14206de78), packet.zoneName.data);  // "RECEIVED=ZoneDetails - %s"
+        }
+      }
+      game::Call<void (*)(ZoneDetailsPacket*)>(0x1403b0d10)(&packet);
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0x16: case 0x3E: case 0x99: case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0x3E: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
