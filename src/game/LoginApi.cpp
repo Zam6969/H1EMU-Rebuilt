@@ -10,6 +10,7 @@
 #include "soeutil/Allocator.h"
 #include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
+#include "soeutil/String.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -261,6 +262,88 @@ bool LoginSendHeaderOnly(uint8_t* api, const uint8_t* packet) {
   return SendSerialized(api, [packet](soeutil::ByteStream** s) { PutOpcode(s, reinterpret_cast<const RequestHeader*>(packet)); });
 }
 
+// ---- Alternate transport (BaseTcpApi): requests are written as XML with the
+// game's XmlWriter and sent as text through vtable slot 17.
+
+namespace {
+
+constexpr size_t kXmlWriterSize = 0x8970;
+constexpr uintptr_t kNameEntityKey = 0x1424c0200;  // "EntityKey"
+constexpr uintptr_t kNameServerId = 0x1421c8120;   // "ServerId"
+constexpr uintptr_t kNamePayload = 0x1424c0210;    // "Payload"
+
+struct XmlRequestWriter {
+  alignas(16) uint8_t writer[kXmlWriterSize];
+
+  explicit XmlRequestWriter(const char* element) {
+    game::Call<void (*)(uint8_t*, bool)>(0x1403212f0)(writer, true);              // XmlWriter()
+    game::Call<void (*)(uint8_t*, const char*)>(0x140325b10)(writer, element);   // BeginElement
+  }
+  ~XmlRequestWriter() { game::Call<void (*)(uint8_t*)>(0x1403219d0)(writer); }  // ~XmlWriter
+
+  // writer[1] selects attribute mode for scalar fields.
+  void U64(uintptr_t name, const uint64_t* value) {
+    uintptr_t fn = writer[1] ? 0x141638160 : 0x141638870;
+    game::Call<bool (*)(uint8_t*, const char*, const uint64_t*)>(fn)(writer, reinterpret_cast<const char*>(name), value);
+  }
+  void Bytes(uintptr_t name, const RequestByteArray* value) {
+    game::Call<bool (*)(uint8_t*, const char*, const RequestByteArray*)>(0x141639a10)(
+        writer, reinterpret_cast<const char*>(name), value);
+  }
+
+  // EndElement, render to text and send through the TCP api.
+  int Send(uint8_t* tcpApi) {
+    game::Call<void (*)(uint8_t*, int)>(0x140325740)(writer, 0);  // EndElement
+    soeutil::StringFixed<8192> text;
+    text.data = soeutil::EmptyStringData();
+    text.length = 0;
+    text.capacity = 0;
+    text.vtable = reinterpret_cast<void**>(0x14204a268);  // StringFixed<8192>
+    game::Call<void (*)(uint8_t*, soeutil::IString*, int)>(0x1403236d0)(writer, &text, 0);  // ToString
+    using SendFn = int (*)(uint8_t*, const char*, int);
+    int result = reinterpret_cast<SendFn>((*reinterpret_cast<void***>(tcpApi))[0x88 / 8])(tcpApi, text.data, text.length);
+    text.vtable = reinterpret_cast<void**>(0x14204a248);  // IStringFixed<char,8192>
+    soeutil::StringRelease(&text);
+    text.data = soeutil::EmptyStringData();
+    text.length = 0;
+    text.capacity = 0;
+    text.vtable = soeutil::IStringVtable();
+    return result;
+  }
+};
+
+}  // namespace
+
+// 0x141634370: CharacterCreateRequest as XML (ServerId, Payload).
+int LoginTcpSendCharacterCreate(uint8_t* tcpApi, const uint8_t* packet, const char* element) {
+  XmlRequestWriter xml(element);
+  xml.U64(kNameServerId, reinterpret_cast<const uint64_t*>(packet + 0x10));
+  xml.Bytes(kNamePayload, reinterpret_cast<const RequestByteArray*>(packet + 0x18));
+  return xml.Send(tcpApi);
+}
+
+// 0x1416344f0: CharacterDeleteRequest as XML (EntityKey).
+int LoginTcpSendCharacterDelete(uint8_t* tcpApi, const uint8_t* packet, const char* element) {
+  XmlRequestWriter xml(element);
+  xml.U64(kNameEntityKey, reinterpret_cast<const uint64_t*>(packet + 0x10));
+  return xml.Send(tcpApi);
+}
+
+// 0x141634650: CharacterLoginRequest as XML (EntityKey, ServerId, Payload).
+int LoginTcpSendCharacterLogin(uint8_t* tcpApi, const uint8_t* packet, const char* element) {
+  XmlRequestWriter xml(element);
+  xml.U64(kNameEntityKey, reinterpret_cast<const uint64_t*>(packet + 0x10));
+  xml.U64(kNameServerId, reinterpret_cast<const uint64_t*>(packet + 0x18));
+  xml.Bytes(kNamePayload, *reinterpret_cast<RequestByteArray* const*>(packet + 0x20));
+  return xml.Send(tcpApi);
+}
+
+// 0x1416347f0: header-only request as XML (an empty element).
+int LoginTcpSendHeaderOnly(uint8_t* tcpApi, const uint8_t* /*packet*/, const char* element) {
+  XmlRequestWriter xml(element);
+  return xml.Send(tcpApi);
+}
+
 // 0x14163d900: CharacterDeleteRequest(characterId)
 void LoginRequestCharacterDelete(uint8_t* requests, const uint64_t* characterId) {
   struct : RequestHeader {
@@ -337,6 +420,10 @@ REBUILD_FUNCTION(Login_SendCharacterDelete, 0x141635270, LoginSendCharacterDelet
 REBUILD_FUNCTION(Login_SendCharacterCreate, 0x1416350d0, LoginSendCharacterCreate);
 REBUILD_FUNCTION(Login_SendCharacterLogin, 0x141635410, LoginSendCharacterLogin);
 REBUILD_FUNCTION(Login_SendHeaderOnly, 0x1416355b0, LoginSendHeaderOnly);
+REBUILD_FUNCTION(Login_TcpSendCharacterCreate, 0x141634370, LoginTcpSendCharacterCreate);
+REBUILD_FUNCTION(Login_TcpSendCharacterDelete, 0x1416344f0, LoginTcpSendCharacterDelete);
+REBUILD_FUNCTION(Login_TcpSendCharacterLogin, 0x141634650, LoginTcpSendCharacterLogin);
+REBUILD_FUNCTION(Login_TcpSendHeaderOnly, 0x1416347f0, LoginTcpSendHeaderOnly);
 REBUILD_FUNCTION(Login_RequestCharacterDelete, 0x14163d900, LoginRequestCharacterDelete);
 REBUILD_FUNCTION(Login_RequestCharacterSelectInfo, 0x14163db00, LoginRequestCharacterSelectInfo);
 REBUILD_FUNCTION(Login_RequestCharacterLogin, 0x14163e310, LoginRequestCharacterLogin);
