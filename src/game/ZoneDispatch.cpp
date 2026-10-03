@@ -1,13 +1,13 @@
-﻿// The zone opcode dispatcher (0x1403fe210, ~16 KB, ~175 cases): routes each
-// zone packet to the game subsystem that owns it. Rebuilt opcode by opcode -
-// cases not rebuilt yet are handed to the original function through its
-// trampoline, which runs its own copy of the common exit.
+// The zone opcode dispatcher (0x1403fe210, ~16 KB, 168 built-in opcodes):
+// routes each zone packet to the game subsystem that owns it. Opcodes the
+// built-in table has no case for go to the extension handler. Every case is
+// rebuilt; the original's fallthroughs (0x99 -> 0x16, 0xB0 -> 0xB1 on a failed
+// read) are kept.
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
-
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -16,8 +16,6 @@
 namespace rebuild::game_net {
 namespace {
 
-using DispatchFn = bool (*)(uint8_t*, uint8_t*, const uint8_t*, int, int);
-DispatchFn g_originalDispatch = nullptr;
 
 constexpr size_t kClientState = 0x314A8;
 constexpr size_t kLocalPlayer = 0xF80;  // in the client state block
@@ -459,6 +457,133 @@ void LogShutdownPackets(uint8_t* state, int channel, const uint8_t* data, int le
   game::Call<void (*)(const char*, const char*, const char*)>(0x1402baba0)(GameText(0x14206e150), GameText(0x142046fb8),
                                                                            text.data);  // "#|BadPackets.txt", "%s"
   game::Call<void (*)(soeutil::IString*)>(0x1402ef190)(&text);
+}
+
+// Opcode 0xE3 sub-case 8: write the match results table to
+// "matchresults_<date>.csv" next to the game and tell the player.
+struct MatchResultsPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  int subtype;            // +0x10, 8
+  int padding2;
+  soeutil::IString name;  // +0x18, winner name
+  uint64_t guid;          // +0x30, winner guid
+  int kills;              // +0x38
+  int padding3;
+};
+static_assert(offsetof(MatchResultsPacket, guid) == 0x30 && sizeof(MatchResultsPacket) == 0x40);
+
+// Variant cell value filled by the results table (dtor 0x1402ed380).
+struct TableCell {
+  void** vtable;
+  void* value;
+  uint64_t reserved;
+};
+
+void ShowMessage(const char* text) {
+  void* display = *reinterpret_cast<void**>(0x142b19b88);
+  int a = game::Call<int (*)()>(0x1416dfd50)();
+  int b = game::Call<int (*)()>(0x1416dfe30)();
+  using ShowFn = void (*)(void*, const char*, int, int, int, bool, void*, bool);
+  reinterpret_cast<ShowFn>((*static_cast<void***>(display))[0x28 / 8])(display, text, 0, b, a, false, nullptr, true);
+}
+
+void WriteMatchResults(const uint8_t* data, int length) {
+  MatchResultsPacket packet{reinterpret_cast<void**>(0x1420663b8), 0xE3, 0, 8, 0,
+                            {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0},
+                            *reinterpret_cast<uint64_t*>(0x142b181f8), 0, 0};
+  using ReadFn = bool (*)(MatchResultsPacket*, const uint8_t*, int, bool);
+  if (game::Call<ReadFn>(0x14038c0e0)(&packet, data, length, false) && game::Call<bool (*)()>(0x1406ed8b0)()) {
+    auto* root = static_cast<uint8_t*>(GlobalObject(0x142b19cc0));
+    uint8_t* results = root ? game::Field<uint8_t*>(root, 0x168) : nullptr;
+    uint8_t* table = results ? results + 0x38 : nullptr;
+    void** vtable = table ? *reinterpret_cast<void***>(table) : nullptr;
+    int rows = table ? reinterpret_cast<int (*)(uint8_t*)>(vtable[2])(table) : 0;
+    if (rows <= 0) {
+      ShowMessage(GameText(0x14206e378));  // "No match results data, nothing written"
+    } else {
+      auto append = [](soeutil::IString* text, const char* more) {
+        game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(text, more);
+      };
+      const char* quote = GameText(0x14204c8c8);
+      const char* comma = GameText(0x142052284);
+      const char* newline = GameText(0x142047048);
+      soeutil::IString csv{reinterpret_cast<void**>(0x142049e48), soeutil::EmptyStringData(), 0, 0};
+      append(&csv, GameText(0x14206e2d0));  // "Results"
+      append(&csv, comma);
+      append(&csv, GameText(0x14206e2dc));  // "Guid"
+      append(&csv, comma);
+      append(&csv, GameText(0x14206e2e4));  // "Name"
+      append(&csv, comma);
+      append(&csv, GameText(0x14206e2f0));  // "Kills"\n
+      append(&csv, GameText(0x14206e300));  // "Winner:"
+      append(&csv, comma);
+      append(&csv, quote);
+      game::Call<void (*)(soeutil::IString*, uint64_t*)>(0x140355070)(&csv, &packet.guid);
+      append(&csv, quote);
+      append(&csv, comma);
+      append(&csv, quote);
+      append(&csv, packet.name.data);
+      append(&csv, quote);
+      append(&csv, comma);
+      append(&csv, quote);
+      game::Call<void (*)(soeutil::IString*, int*)>(0x140304e30)(&csv, &packet.kills);
+      append(&csv, quote);
+      append(&csv, newline);
+      int columns = reinterpret_cast<int (*)(uint8_t*)>(vtable[0])(table);
+      for (int column = 0; column < columns; ++column) {
+        append(&csv, quote);
+        append(&csv, reinterpret_cast<const char* (*)(uint8_t*, int)>((*reinterpret_cast<void***>(table))[1])(table, column));
+        append(&csv, quote);
+        if (column < columns - 1) append(&csv, comma);
+      }
+      append(&csv, newline);
+      for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+          TableCell cell{reinterpret_cast<void**>(0x142046da8), reinterpret_cast<void*>(0x142ae85c8), 0};
+          soeutil::IString value{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+          using CellFn = int (*)(uint8_t*, int, int, TableCell*);
+          if (reinterpret_cast<CellFn>((*reinterpret_cast<void***>(table))[3])(table, row, column, &cell)) {
+            game::Call<void (*)(void*, soeutil::IString*)>(0x140ce9690)(cell.value, &value);
+            append(&csv, quote);
+            append(&csv, value.data);
+            append(&csv, quote);
+          } else {
+            append(&csv, GameText(0x14206e30c));  // "-"
+          }
+          if (column < columns - 1) append(&csv, comma);
+          game::Call<void (*)(soeutil::IString*)>(0x1402bace0)(&value);
+          game::Call<void (*)(TableCell*)>(0x1402ed380)(&cell);
+        }
+        append(&csv, newline);
+      }
+      soeutil::IString fileName{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+      int date[8] = {0, 1, 1, 0, 0, 0, 0, 0};  // year, month, day, hour, minute, second
+      uint64_t timeSlot;
+      uint64_t* now = game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&timeSlot);
+      if (game::Call<bool (*)(uint64_t*, int*, bool)>(0x14032fbe0)(now, date, true)) {
+        soeutil::StringFormat(&fileName, GameText(0x14206e310), date[0], date[1], date[2], date[3], date[4],
+                              date[5]);  // "matchresults_%04d_%02d_%02d_%02d_%02d_%02d.csv"
+      } else {
+        append(&fileName, GameText(0x14206e340));  // "matchresults.csv"
+      }
+      soeutil::IString path{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+      game::Call<void (*)(soeutil::IString*)>(0x140d09120)(&path);
+      append(&path, GameText(0x14204b3f0));  // "/"
+      append(&path, fileName.data);
+      game::Call<void (*)(const char*, const char*, bool)>(0x140339990)(path.data, csv.data, true);
+      soeutil::IString message{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFormat(&message, GameText(0x14206e358), path.data);  // "Match results written to %s\n"
+      ShowMessage(message.data);
+      message.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&message);
+      game::Call<void (*)(soeutil::IString*)>(0x140305cf0)(&path);
+      game::Call<void (*)(soeutil::IString*)>(0x1402bace0)(&fileName);
+      game::Call<void (*)(soeutil::IString*)>(0x140305d50)(&csv);
+    }
+  }
+  game::Call<void (*)(MatchResultsPacket*)>(0x1403b0fb0)(&packet);
 }
 
 }  // namespace
@@ -1718,8 +1843,9 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
           *flags() |= 4;
           game::Call<void (*)(bool)>(0x1406efaf0)(true);
           break;
-        case 8:  // match results summary (builds a long JSON-like string) - still the original
-          return g_originalDispatch(game, header, data, length, channel);
+        case 8:
+          WriteMatchResults(data, length);
+          break;
         case 12: {
           U64Packet2 packet{reinterpret_cast<void**>(0x142066368), 0xE3, 0, 12, 0, *reinterpret_cast<uint64_t*>(0x142b181f8)};
           if (game::Call<bool (*)(U64Packet2*, const uint8_t*, int, bool)>(0x14038c1c0)(&packet, data, length, false) &&
@@ -1787,7 +1913,6 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
   return Finish(state, channel, data, length, result);
 }
 
-REBUILD_FUNCTION_WITH_ORIGINAL(GameClient_DispatchZonePacket, 0x1403fe210, GameClientDispatchZonePacket,
-                               g_originalDispatch);
+REBUILD_FUNCTION(GameClient_DispatchZonePacket, 0x1403fe210, GameClientDispatchZonePacket);
 
 }  // namespace rebuild::game_net
