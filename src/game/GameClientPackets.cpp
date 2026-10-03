@@ -1404,6 +1404,80 @@ bool GameClientConnectToGateway(uint8_t* game) {
   return connected;
 }
 
+// Inlined IString write helpers: get a private buffer of `bytes`, then write.
+void StringMakeWritable(soeutil::IString* text, int bytes) {
+  if (text->capacity < bytes || (text->capacity > 0 && reinterpret_cast<int*>(text->data)[-1] > 1))
+    soeutil::StringReserve(text, bytes);
+}
+void StringAppendChar(soeutil::IString* text, char c) {
+  StringMakeWritable(text, text->length + 2);
+  text->data[text->length++] = c;
+  text->data[text->length] = 0;
+}
+
+// Case-insensitive compare through the game's lower-case table (0x1429f91d0).
+bool GameStringEqualsNoCase(const char* a, const char* b) {
+  auto* lower = reinterpret_cast<const signed char*>(0x1429f91d0);
+  while (*a && lower[static_cast<uint8_t>(*a)] == lower[static_cast<uint8_t>(*b)]) {
+    ++a;
+    ++b;
+  }
+  return lower[static_cast<uint8_t>(*a)] == lower[static_cast<uint8_t>(*b)];
+}
+
+// Login error detail {name IString +0, value IString +0x40}, 0x80 bytes;
+// the list is {?, entries +8, count +0x10}.
+constexpr int kLoginErrorDetailSize = 0x80;
+
+// 0x14042c3f0 (slot 41): login-server failure -> Shutdown (slot 27) with the
+// matching message. For "already linked" (4) the detail
+// ALREADY_LINKED_ACCOUNT_NAME is masked (a***z), URL-escaped and passed on
+// as "accountName=%s".
+void GameClientOnLoginFailed(uint8_t* game, int code, uint8_t* details) {
+  using ShutdownFn = void (*)(uint8_t*, bool, int, const char*, const char*);
+  auto shutdown = [&](int error, uint64_t message, const char* extra) {
+    (*reinterpret_cast<ShutdownFn**>(game))[0xD8 / 8](game, true, error, reinterpret_cast<const char*>(message), extra);
+  };
+  if (code == 2) return shutdown(0x1C, 0x14206dd08, nullptr);  // "Login Server is locked at this time."
+  if (code != 4) {
+    if (code == 9) return shutdown(0x1F, 0x14206dce0, nullptr);  // "Account is not bound to third party."
+    return shutdown(0x1D, 0x14206dd90, nullptr);                 // "Unable to authenticate with Login Server."
+  }
+  soeutil::IString extra{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  if (details) {
+    for (int i = 0; i < game::Field<int>(details, 0x10) && extra.length == 0; ++i) {
+      auto* entry = game::Field<uint8_t*>(details, 8) + i * kLoginErrorDetailSize;
+      if (!GameStringEqualsNoCase(game::Field<const char*>(entry, 8), reinterpret_cast<const char*>(0x14206dd30))) continue;  // "ALREADY_LINKED_ACCOUNT_NAME"
+      soeutil::IString name{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringAssignString(&name, reinterpret_cast<soeutil::IString*>(entry + 0x40));
+      if (name.length > 3) {
+        for (int at = 1; at < name.length - 1; ++at) {
+          StringMakeWritable(&name, name.length + 1);
+          name.data[at] = '*';
+        }
+      }
+      soeutil::IString escaped{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      for (const char* c = name.data; *c; ++c) {
+        auto byte = static_cast<uint8_t>(*c);
+        bool plain = byte >= 0x21 && byte <= 0x7E && byte != '"' && byte != '#' && byte != '%' && byte != '<' && byte != '>';
+        if (plain)
+          StringAppendChar(&escaped, static_cast<char>(byte));
+        else
+          game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&escaped, reinterpret_cast<const char*>(0x142066928),
+                                                                                 static_cast<unsigned>(byte));  // "%%%02x"
+      }
+      soeutil::StringFormat(&extra, reinterpret_cast<const char*>(0x14206dd50), escaped.data);  // "accountName=%s"
+      escaped.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&escaped);
+      name.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&name);
+    }
+  }
+  shutdown(0x20, 0x14206dd60, extra.data);  // "Account is already linked to third party."
+  extra.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&extra);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1454,6 +1528,7 @@ REBUILD_FUNCTION(GameClient_SetChatText, 0x140468e00, GameClientSetChatText);
 REBUILD_FUNCTION(GameClient_DisconnectFromServer, 0x1403e7a50, GameClientDisconnectFromServer);
 REBUILD_FUNCTION(GameClient_RefreshJobBrowser, 0x14046fa20, GameClientRefreshJobBrowser);
 REBUILD_FUNCTION(GameClient_ConnectToGateway, 0x14046e660, GameClientConnectToGateway);
+REBUILD_FUNCTION(GameClient_OnLoginFailed, 0x14042c3f0, GameClientOnLoginFailed);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
