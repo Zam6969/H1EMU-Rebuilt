@@ -8,6 +8,7 @@
 #include "core/hook.h"
 #include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
+#include "soeutil/String.h"
 
 namespace rebuild::csc {
 namespace {
@@ -203,8 +204,99 @@ int WrapPacket(const uint8_t* data, int length, PacketBytes* out, int cipherType
   return 1;
 }
 
+bool EndsWithWrapMagic(const uint8_t* data, int length) {
+  return length >= 0x11 && *reinterpret_cast<const uint64_t*>(data + (length - 0x10)) == kWrapMagic0 &&
+         *reinterpret_cast<const uint64_t*>(data + (length - 8)) == kWrapMagic1;
+}
+
+// 0x1415f95d0: PacketUtils::UnwrapPacket(data, length, &outLength, cipher).
+// Unwrapped packets pass through; footer type 0 strips the footer, type 1
+// decrypts in place with `cipher` (slot 6 ready, slot 5 Decode).
+bool UnwrapPacket(uint8_t* data, int length, int* outLength, uint8_t* cipher) {
+  if (!EndsWithWrapMagic(data, length)) {
+    *outLength = length;
+    return true;
+  }
+  int payload = length - 0x11;
+  uint8_t type = data[payload];
+  if (type == 0) {
+    *outLength = payload;
+    return true;
+  }
+  if (type == 1 && cipher) {
+    void** vtable = *reinterpret_cast<void***>(cipher);
+    if (reinterpret_cast<bool (*)(uint8_t*)>(vtable[0x30 / 8])(cipher)) {
+      int decoded = 0;
+      if (reinterpret_cast<int (*)(uint8_t*, uint8_t*, int, int*)>(vtable[0x28 / 8])(cipher, data, payload, &decoded) == 1) {
+        *outLength = decoded;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// 0x1415f8ec0 (CryptoBaseApi slot 20): Send(data, length, reliable). With the
+// session cipher active (+0xD38) it defers to slot 21; otherwise packets that
+// already carry the wrap magic are re-wrapped with the second cipher (+0xD30).
+bool CryptoBaseApiSend(uint8_t* api, const uint8_t* data, int length, bool reliable) {
+  if (game::Field<bool>(api, 0xD38)) {
+    using SendFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+    return reinterpret_cast<SendFn>((*reinterpret_cast<void***>(api))[0xA8 / 8])(api, data, length, reliable);
+  }
+  if (!game::Field<void*>(api, 0x2C0)) return false;  // no UdpConnection
+  soeutil::ByteArray8k wrapped{reinterpret_cast<void**>(soeutil::kVtByteArray8k), nullptr, 0, 0, {}};
+  uint8_t* cipher = game::Field<uint8_t*>(api, 0xD30);
+  if (cipher && EndsWithWrapMagic(data, length)) {
+    WrapPacket(data, length, reinterpret_cast<PacketBytes*>(&wrapped), 0, cipher);
+    length = wrapped.size;
+    data = length != 0 ? wrapped.data : nullptr;
+  }
+  bool sent = game::Call<bool (*)(uint8_t*, const uint8_t*, int, bool)>(0x1415f4920)(api, data, length, reliable);
+  soeutil::ByteArrayDestroy(&wrapped);
+  return sent;
+}
+
+// 0x1415f9330 (CryptoBaseApi, UdpConnectionHandler sub-object at +0x80,
+// slot 1): decrypt / unwrap an incoming packet, then BaseApi::OnRoutePacket.
+// A packet that fails to decode is hex-dumped (first 128 bytes) to the log.
+void CryptoBaseApiOnRoutePacket(uint8_t* handler, void* connection, uint8_t* data, int length) {
+  int routed = length;
+  bool ok = true;
+  uint8_t* secondCipher = game::Field<uint8_t*>(handler, 0xCB0);
+  if (game::Field<bool>(handler, 0xCB8)) {
+    uint8_t* session = game::Field<uint8_t*>(handler, 0xCA8);
+    using DecodeFn = int (*)(uint8_t*, uint8_t*, int, int*);
+    if (reinterpret_cast<DecodeFn>((*reinterpret_cast<void***>(session))[0x28 / 8])(session, data, length, &routed) != 1)
+      ok = false;
+    else if (secondCipher && EndsWithWrapMagic(data, routed))
+      ok = game::Call<bool (*)(uint8_t*, int, int*, uint8_t*)>(0x1415f95d0)(data, routed, &routed, secondCipher);
+  } else if (EndsWithWrapMagic(data, length)) {
+    ok = game::Call<bool (*)(uint8_t*, int, int*, uint8_t*)>(0x1415f95d0)(data, length, &routed, secondCipher);
+  }
+  if (!ok) {
+    soeutil::StringFixed<4096> text;
+    text.vtable = reinterpret_cast<void**>(0x14204b038);
+    text.data = soeutil::EmptyStringData();
+    text.length = 0;
+    text.capacity = 0;
+    soeutil::StringFormat(&text, reinterpret_cast<const char*>(0x1424b30a0), length);  // "...Failed to decode a packet (%d bytes):"
+    game::Call<void (*)(const uint8_t*, int, soeutil::IString*)>(0x14165b970)(data, length < 0x80 ? length : 0x80, &text);
+    const char* channel = game::Field<const char*>(game::Field<uint8_t*>(handler, 0x250), 0x250);
+    game::Call<void (*)(const char*, const char*, const char*)>(0x1402baba0)(channel, reinterpret_cast<const char*>(0x142046fb8),
+                                                                           text.data);  // "%s"
+    text.vtable = reinterpret_cast<void**>(0x14204b018);  // IStringFixed<char,4096>
+    soeutil::StringRelease(&text);
+    return;
+  }
+  game::Call<void (*)(uint8_t*, void*, uint8_t*, int)>(0x1415f4b90)(handler, connection, data, routed);
+}
+
 REBUILD_FUNCTION(CryptoBaseApi_SetSessionKey, 0x1415f8d00, CryptoBaseApiSetSessionKey);
 REBUILD_FUNCTION(PacketUtils_WrapPacket, 0x1415f96b0, WrapPacket);
+REBUILD_FUNCTION(PacketUtils_UnwrapPacket, 0x1415f95d0, UnwrapPacket);
+REBUILD_FUNCTION(CryptoBaseApi_Send, 0x1415f8ec0, CryptoBaseApiSend);
+REBUILD_FUNCTION(CryptoBaseApi_OnRoutePacket, 0x1415f9330, CryptoBaseApiOnRoutePacket);
 REBUILD_FUNCTION(CryptoBaseApi_EncodeSecure, 0x1415f8e70, CryptoBaseApiEncodeSecure);
 
 }  // namespace rebuild::csc
