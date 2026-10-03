@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <utility>
 #include <intrin.h>
 
 #include "core/game.h"
@@ -3305,6 +3306,403 @@ void GameClientShutdownSystems(uint8_t* game) {
   }
 }
 
+// 0x1403e42c0 (slot 37): ShutdownGame - save UI state ("GuiOnSave"), then
+// destroy the client-owned game systems (+0x387F0..+0x3B948) and their
+// globals, flush the world, and finish with the display and window
+// (slot 79 via tail call).
+void GameClientShutdownGame(uint8_t* game) {
+  auto Global = [](uint64_t address) -> void*& { return *reinterpret_cast<void**>(address); };
+  auto Member = [&](int offset) -> void*& { return game::Field<void*>(game, offset); };
+  auto StateSlot = [&](int offset) -> void*& { return game::Field<void*>(game::Field<uint8_t*>(game, 0x314A8), offset); };
+  auto DeleteVirtualSlot = [](void* object, int slot) {
+    if (object) (*reinterpret_cast<void (***)(void*, int)>(object))[slot](object, 1);
+  };
+  auto FreeSized = [](void* object, size_t size) {
+    if (object) game::Call<void (*)(void*, size_t)>(0x140d0fb84)(object, size);
+  };
+  auto DestroyAndFree = [&](void* object, uint64_t destructor, size_t size) {
+    if (!object) return;
+    game::Call<void (*)(void*)>(destructor)(object);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(object, size);
+  };
+  auto noArgs = [](uint64_t address) { game::Call<void (*)()>(address)(); };
+  auto vcall = [](void* object, int offset) { (*reinterpret_cast<void (***)(void*)>(object))[offset / 8](object); };
+  vcall(game, 0x120);
+  if (void* loader = Member(0x3D3C8)) game::Call<void (*)(void*)>(0x14135c6b0)(loader);
+  game::Call<void (*)(uint8_t*)>(0x1403e7870)(game);
+  DestroyAndFree(Global(0x142b19b18), 0x141901250, 0xc0);
+  Global(0x142b19b18) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b20), 0);
+  Global(0x142b19b20) = nullptr;
+  Global(0x142b19b28) = nullptr;
+  if (void* display = Member(0x38890)) game::Call<void (*)(void*)>(0x1404da8b0)(display);
+  *reinterpret_cast<uint8_t*>(0x142b1885b) = 1;
+  DeleteVirtualSlot(Member(0x38a40), 0);
+  Member(0x38a40) = nullptr;
+  vcall(game, 0x110);
+  DeleteVirtualSlot(Member(0x388e0), 0);
+  Member(0x388e0) = nullptr;
+  noArgs(0x1406810d0);
+  if (void* ui = Global(0x143c45470)) {
+    const char* onSave = reinterpret_cast<const char*>(0x14206c330);  // "GuiOnSave"
+    if (game::Call<bool (*)(void*, const char*)>(0x14048b2d0)(ui, onSave))
+      game::Call<bool (*)(void*, const char*, void*, void*)>(0x140488cc0)(Global(0x143c45470), onSave, nullptr, nullptr);
+  }
+  if (Member(0x389A8)) {
+    for (int offset : {0x38B40, 0x38B48, 0x38B50})
+      if (void* layer = Member(offset)) game::Call<void (*)(void*, void*)>(0x14068b010)(Member(0x389A8), layer);
+  }
+  DeleteVirtualSlot(Member(0x3b800), 0);
+  Member(0x3b800) = nullptr;
+  // Shared-pointer release of state+0x969E8 {object, control {strong, weak}}.
+  if (auto* shared = static_cast<uint8_t*>(std::exchange(StateSlot(0x969e8), nullptr))) {
+    auto* control = game::Field<long*>(shared, 8);
+    bool lastStrong = _InterlockedDecrement(control) == 0;
+    if (_InterlockedExchangeAdd(control + 1, -1) == 1 && control) game::Call<void (*)(void*, size_t)>(0x140d0fb84)(control, 0x10);
+    if (lastStrong) (*reinterpret_cast<void (***)(void*)>(shared))[1](shared);
+  }
+  DeleteVirtualSlot(StateSlot(0x969e0), 0);
+  StateSlot(0x969e0) = nullptr;
+  DestroyAndFree(Member(0x38920), 0x140980860, 0x4a8);
+  Member(0x38920) = nullptr;
+  DeleteVirtualSlot(Member(0x3b7c0), 0);
+  Member(0x3b7c0) = nullptr;
+  DestroyAndFree(Member(0x38928), 0x140a9c070, 0x50);
+  Member(0x38928) = nullptr;
+  DeleteVirtualSlot(Member(0x38b40), 0);
+  Member(0x38b40) = nullptr;
+  DeleteVirtualSlot(Member(0x38b48), 0);
+  Member(0x38b48) = nullptr;
+  DeleteVirtualSlot(Member(0x38b50), 0);
+  Member(0x38b50) = nullptr;
+  DestroyAndFree(Member(0x38b68), 0x1409375d0, 0x40);
+  Member(0x38b68) = nullptr;
+  DeleteVirtualSlot(Member(0x389a8), 0);
+  Member(0x389a8) = nullptr;
+  DeleteVirtualSlot(Member(0x38958), 0);
+  Member(0x38958) = nullptr;
+  DeleteVirtualSlot(Member(0x38938), 0);
+  Member(0x38938) = nullptr;
+  DeleteVirtualSlot(Member(0x38940), 1);
+  Member(0x38940) = nullptr;
+  if (auto* timers = static_cast<uint8_t*>(Member(0x31498))) {  // +0x31498 is left set, as in the original
+    auto* name = reinterpret_cast<soeutil::IString*>(timers + 0x58);
+    name->vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(name);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(timers, 0xA8);
+  }
+  DestroyAndFree(Global(0x142b19b30), 0x14076d9c0, 0x170);
+  Global(0x142b19b30) = nullptr;
+  DestroyAndFree(Member(0x38a10), 0x140995130, 0xd90);
+  Member(0x38a10) = nullptr;
+  DestroyAndFree(Member(0x38a18), 0x140997600, 0x910);
+  Member(0x38a18) = nullptr;
+  DeleteVirtualSlot(Member(0x38a70), 2);
+  Member(0x38a70) = nullptr;
+  DeleteVirtualSlot(Member(0x38a20), 0);
+  Member(0x38a20) = nullptr;
+  DeleteVirtualSlot(Global(0x142b197a0), 0);
+  Global(0x142b197a0) = nullptr;
+  if (auto* list = static_cast<uint64_t*>(Member(0x38A00))) {
+    *list = 0x142068b98;
+    game::Call<void (*)(void*)>(0x140453920)(list);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(list, 0x20);
+  }
+  Member(0x38a00) = nullptr;
+  DeleteVirtualSlot(Member(0x389f0), 5);
+  Member(0x389f0) = nullptr;
+  DeleteVirtualSlot(Member(0x388a8), 8);
+  Member(0x388a8) = nullptr;
+  DestroyAndFree(Member(0x38de0), 0x140917e20, 0x30);
+  Member(0x38de0) = nullptr;
+  DeleteVirtualSlot(Member(0x38828), 1);
+  DeleteVirtualSlot(Member(0x38828), 0);
+  Member(0x38828) = nullptr;
+  DestroyAndFree(Member(0x38860), 0x140719190, 0x1bc8);
+  Member(0x38860) = nullptr;
+  Global(0x142b19b38) = nullptr;
+  DeleteVirtualSlot(Member(0x38868), 0);
+  Member(0x38868) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b40), 0);
+  Global(0x142b19b40) = nullptr;
+  DeleteVirtualSlot(Member(0x389c0), 0);
+  Member(0x389c0) = nullptr;
+  game::Call<void (*)(uint8_t*)>(0x1403d4c60)(game + 0x390F8);
+  DeleteVirtualSlot(Member(0x389c8), 0);
+  Member(0x389c8) = nullptr;
+  Global(0x142b19b48) = nullptr;
+  Global(0x142b19b50) = nullptr;
+  DestroyAndFree(Member(0x389b0), 0x141875700, 0x504b0);
+  Member(0x389b0) = nullptr;
+  DestroyAndFree(Member(0x389b8), 0x141875540, 0x504b0);
+  Member(0x389b8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b58), 0);
+  Global(0x142b19b58) = nullptr;
+  DeleteVirtualSlot(Member(0x38968), 0);
+  Member(0x38968) = nullptr;
+  DeleteVirtualSlot(Member(0x38960), 0);
+  Member(0x38960) = nullptr;
+  DeleteVirtualSlot(Member(0x38910), 0);
+  Member(0x38910) = nullptr;
+  DestroyAndFree(Member(0x38918), 0x14094bd00, 0x170);
+  Member(0x38918) = nullptr;
+  DestroyAndFree(Member(0x38930), 0x140983f00, 0x78);
+  Member(0x38930) = nullptr;
+  DeleteVirtualSlot(Member(0x389d0), 1);
+  Member(0x389d0) = nullptr;
+  DeleteVirtualSlot(Member(0x389d8), 0);
+  Member(0x389d8) = nullptr;
+  DeleteVirtualSlot(Member(0x38948), 0);
+  Member(0x38948) = nullptr;
+  DestroyAndFree(Member(0x38950), 0x1406452e0, 1);
+  Member(0x38950) = nullptr;
+  DeleteVirtualSlot(Member(0x389e0), 0);
+  Member(0x389e0) = nullptr;
+  DestroyAndFree(Member(0x389e8), 0x141700c80, 0x300);
+  Member(0x389e8) = nullptr;
+  DeleteVirtualSlot(Member(0x38a60), 0);
+  Member(0x38a60) = nullptr;
+  Global(0x142b19b60) = nullptr;
+  Global(0x142b19b68) = Member(0x38A60);
+  DeleteVirtualSlot(Global(0x142b19b70), 0);
+  Global(0x142b19b70) = nullptr;
+  game::Call<void (*)(uint8_t*)>(0x14049d100)(game);
+  if (auto* ui = static_cast<uint8_t*>(Global(0x143c45470))) {
+    game::Field<void*>(ui, 0x10) = nullptr;
+    game::Field<void*>(ui, 8) = nullptr;
+  }
+  DestroyAndFree(Member(0x38dd8), 0x140487cd0, 8);
+  Member(0x38dd8) = nullptr;
+  if (auto* camera = game::Call<uint8_t* (*)(uint8_t*)>(0x1402f39f0)(game + 0x42E80)) {
+    if (void* view = game::Field<void*>(camera, 0x88)) vcall(view, 0x130);
+  }
+  if (void* terrain = Member(0x3B6F8)) game::Call<void (*)(void*)>(0x141868440)(terrain);
+  DeleteVirtualSlot(Member(0x3b6f8), 0);
+  Member(0x3b6f8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b78), 0);
+  Global(0x142b19b78) = nullptr;
+  Global(0x142b19b80) = nullptr;
+  DeleteVirtualSlot(Member(0x38850), 0);
+  Member(0x38850) = nullptr;
+  if (auto* object = static_cast<uint8_t*>(Member(0x3B6F0))) DeleteVirtualSlot(object + 8, 0);  // via its secondary base
+  Member(0x3b6f0) = nullptr;
+  if (auto* manager = static_cast<uint8_t*>(Member(0x3B6B0))) {
+    game::Call<void (*)(void*)>(0x1403e3590)(manager);
+    game::Call<void (*)(void*)>(0x1403e3820)(manager + 0x340);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(manager, 0x358);
+  }
+  Member(0x3b6b0) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b88), 0);
+  Global(0x142b19b88) = nullptr;
+  Global(0x142b19b90) = nullptr;
+  Member(0x38dd0) = nullptr;
+  DeleteVirtualSlot(Member(0x388b8), 1);
+  Member(0x388b8) = nullptr;
+  DeleteVirtualSlot(Member(0x388d0), 1);
+  Member(0x388d0) = nullptr;
+  DeleteVirtualSlot(Member(0x388c0), 1);
+  Member(0x388c0) = nullptr;
+  DeleteVirtualSlot(Member(0x38b80), 0);
+  Member(0x38b80) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b98), 0);
+  Global(0x142b19b98) = nullptr;
+  DeleteVirtualSlot(StateSlot(0xf80), 2);
+  StateSlot(0xf80) = nullptr;
+  Global(0x142b19ba0) = nullptr;
+  if (auto* stream = static_cast<uint8_t*>(Member(0x38C40))) {
+    game::Call<void (*)(void*)>(0x14030bf90)(stream + 8);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(stream, 0x2038);
+  }
+  Member(0x38c40) = nullptr;
+  DeleteVirtualSlot(StateSlot(0x96c10), 1);
+  StateSlot(0x96c10) = nullptr;
+  DeleteVirtualSlot(Member(0x388d8), 0);
+  Member(0x388d8) = nullptr;
+  DeleteVirtualSlot(Member(0x388e8), 0);
+  Member(0x388e8) = nullptr;
+  DestroyAndFree(Member(0x388f0), 0x141701dc0, 0x578);
+  Member(0x388f0) = nullptr;
+  DeleteVirtualSlot(Member(0x388f8), 0);
+  Member(0x388f8) = nullptr;
+  FreeSized(Member(0x38900), 1);
+  Member(0x38900) = nullptr;
+  DeleteVirtualSlot(Member(0x38970), 2);
+  Member(0x38970) = nullptr;
+  DeleteVirtualSlot(Member(0x38978), 2);
+  Member(0x38978) = nullptr;
+  DeleteVirtualSlot(Member(0x38908), 0);
+  Member(0x38908) = nullptr;
+  Global(0x142b19ba8) = nullptr;
+  DeleteVirtualSlot(Member(0x38b78), 0);
+  Member(0x38b78) = nullptr;
+  DestroyAndFree(Member(0x389f8), 0x141712030, 0x220);
+  Member(0x389f8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b10), 0);
+  Global(0x142b19b10) = nullptr;
+  DestroyAndFree(Global(0x142b19bb0), 0x14077aa20, 0x270);
+  Global(0x142b19bb0) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bb8), 0);
+  Global(0x142b19bb8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bc0), 0);
+  Global(0x142b19bc0) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bc8), 0);
+  Global(0x142b19bc8) = nullptr;
+  DeleteVirtualSlot(Member(0x38a08), 0);
+  Member(0x38a08) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bd0), 0);
+  Global(0x142b19bd0) = nullptr;
+  DestroyAndFree(Member(0x38a28), 0x141713ba0, 0x78);
+  Member(0x38a28) = nullptr;
+  DestroyAndFree(Member(0x38a30), 0x140999590, 0x1b8);
+  Member(0x38a30) = nullptr;
+  DeleteVirtualSlot(Member(0x38a98), 0);
+  Member(0x38a98) = nullptr;
+  DeleteVirtualSlot(Member(0x38a68), 0);
+  Member(0x38a68) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bd8), 0);
+  Global(0x142b19bd8) = nullptr;
+  DeleteVirtualSlot(Member(0x38a80), 0);
+  Member(0x38a80) = nullptr;
+  DeleteVirtualSlot(Member(0x38a88), 0);
+  Member(0x38a88) = nullptr;
+  if (auto* object = static_cast<uint64_t*>(Member(0x38A90))) {
+    *object = 0x142068b38;
+    game::Call<void (*)(void*)>(0x14044d220)(object);
+    game::Call<void (*)(void*)>(0x1403a7eb0)(reinterpret_cast<uint8_t*>(object) + 0x228);
+    *object = 0x142068b08;
+    game::Call<void (*)(void*)>(0x14044d220)(object);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(object, 0x850);
+  }
+  Member(0x38a90) = nullptr;
+  Global(0x142b19be0) = nullptr;
+  Global(0x142b19be8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19bf0), 0);
+  Global(0x142b19bf0) = nullptr;
+  DestroyAndFree(Global(0x142b19bf8), 0x1408d7400, 0x130);
+  Global(0x142b19bf8) = nullptr;
+  Member(0x38aa8) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c00), 0);
+  Global(0x142b19c00) = nullptr;
+  DestroyAndFree(Member(0x38aa0), 0x140a3ded0, 0xc8);
+  Member(0x38aa0) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c08), 0);
+  Global(0x142b19c08) = nullptr;
+  Global(0x142b19c10) = nullptr;
+  Global(0x142b19c18) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19b00), 2);
+  Global(0x142b19b00) = nullptr;
+  DeleteVirtualSlot(Member(0x38ab0), 0);
+  Member(0x38ab0) = nullptr;
+  DeleteVirtualSlot(Member(0x38ac8), 0);
+  Member(0x38ac8) = nullptr;
+  Global(0x142b19c20) = nullptr;
+  DestroyAndFree(Member(0x38ad0), 0x140cf9630, 0x228);
+  Member(0x38ad0) = nullptr;
+  Global(0x142b19c28) = nullptr;
+  DeleteVirtualSlot(Member(0x38a50), 0);
+  Member(0x38a50) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c30), 0);
+  Global(0x142b19c30) = nullptr;
+  DeleteVirtualSlot(Member(0x38a58), 0);
+  Member(0x38a58) = nullptr;
+  DestroyAndFree(Member(0x3b718), 0x1418b9d30, 8);
+  Member(0x3b718) = nullptr;
+  DestroyAndFree(Member(0x3b710), 0x1418b9ba0, 0x20);
+  Member(0x3b710) = nullptr;
+  DeleteVirtualSlot(Member(0x3b720), 0);
+  Member(0x3b720) = nullptr;
+  DestroyAndFree(Member(0x3b728), 0x1416ca4c0, 0x58);
+  Member(0x3b728) = nullptr;
+  Member(0x387f0) = nullptr;
+  Member(0x387f8) = nullptr;
+  noArgs(0x140aa47c0);
+  Global(0x142b19798) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c38), 0);
+  Global(0x142b19c38) = nullptr;
+  Member(0x3b6b8) = nullptr;
+  DestroyAndFree(Member(0x3b780), 0x14098ee50, 0xcd8);
+  Member(0x3b780) = nullptr;
+  DestroyAndFree(Global(0x142b19c40), 0x1407e9fb0, 0x90);
+  Global(0x142b19c40) = nullptr;
+  DestroyAndFree(Member(0x38e30), 0x140331760, 0xe98);
+  Member(0x38e30) = nullptr;
+  DeleteVirtualSlot(Member(0x38a48), 0);
+  Member(0x38a48) = nullptr;
+  DeleteVirtualSlot(Member(0x3b708), 0);
+  Member(0x3b708) = nullptr;
+  DestroyAndFree(Global(0x142b19c48), 0x1407dbbf0, 0x250);
+  Global(0x142b19c48) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c50), 0);
+  Global(0x142b19c50) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c58), 0);
+  Global(0x142b19c58) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19c60), 0);
+  Global(0x142b19c60) = nullptr;
+  DestroyAndFree(Global(0x142b19c68), 0x140ae7b60, 0x2d8);
+  Global(0x142b19c68) = nullptr;
+  DestroyAndFree(Member(0x3b938), 0x1407e8510, 0x360);
+  Member(0x3b938) = nullptr;
+  noArgs(0x1403e41c0);
+  DestroyAndFree(Global(0x142b19c78), 0x140643210, 0x78);
+  Global(0x142b19c78) = nullptr;
+  DeleteVirtualSlot(StateSlot(0x96a10), 0);
+  StateSlot(0x96a10) = nullptr;
+  Global(0x142b19c80) = nullptr;
+  Global(0x142b19c88) = nullptr;
+  DeleteVirtualSlot(Member(0x38ae8), 1);
+  Member(0x38ae8) = nullptr;
+  DestroyAndFree(Global(0x142b19c90), 0x141392930, 0x70);
+  Global(0x142b19c90) = nullptr;
+  DeleteVirtualSlot(Member(0x38b58), 0);
+  Member(0x38b58) = nullptr;
+  DeleteVirtualSlot(Member(0x38b60), 0);
+  Member(0x38b60) = nullptr;
+  DeleteVirtualSlot(Member(0x3b948), 0);
+  Member(0x3b948) = nullptr;
+  DestroyAndFree(Member(0x3b940), 0x1406f8840, 0x68);
+  Member(0x3b940) = nullptr;
+  DestroyAndFree(Member(0x38af0), 0x1407c5440, 0x503c8);
+  Member(0x38af0) = nullptr;
+  if (void* display = Member(0x38890)) game::Call<void (*)(void*)>(0x1404da8b0)(display);
+  DestroyAndFree(Member(0x38be0), 0x1415f9be0, 0x60);
+  Member(0x38be0) = nullptr;
+  if (auto* world = static_cast<uint8_t*>(Member(0x3D3E0))) world[0x3B648] = 1;
+  game::Call<void (*)(uint8_t*)>(0x14043d9b0)(game);
+  noArgs(0x1414ff070);
+  noArgs(0x1414d5e90);
+  if (void* terrain = Member(0x3B6F8)) game::Call<void (*)(void*)>(0x141868540)(terrain);
+  game::Call<void (*)(int)>(0x141295ba0)(4000);
+  if (auto* world = static_cast<uint8_t*>(Member(0x3D3E0))) world[0x3B648] = 0;
+  vcall(game, 0x268);
+  DeleteVirtualSlot(Global(0x143bd4830), 0);
+  Global(0x143bd4830) = nullptr;
+  if (void* profiler = std::exchange(Global(0x143c73100), nullptr)) {
+    game::Call<void (*)(void*)>(0x14141df30)(profiler);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(profiler, 0xC8);
+  }
+  noArgs(0x140956b30);
+  noArgs(0x140cc0520);
+  noArgs(0x140cc7bc0);
+  noArgs(0x140cc8f90);
+  Global(0x142b19c98) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19ca0), 0);
+  Global(0x142b19ca0) = nullptr;
+  DeleteVirtualSlot(Member(0x3d3d0), 0);
+  Member(0x3d3d0) = nullptr;
+  DeleteVirtualSlot(Member(0x38898), 0);
+  Member(0x38898) = nullptr;
+  Global(0x142b19c18) = nullptr;
+  if (auto* display = static_cast<uint8_t*>(Member(0x38890))) DeleteVirtualSlot(display + 8, 0);  // via its secondary base
+  Member(0x38890) = nullptr;
+  Global(0x142b19788) = nullptr;
+  DeleteVirtualSlot(Global(0x142b19a30), 0);
+  Global(0x142b19a30) = nullptr;
+  Global(0x142b19ca8) = nullptr;
+  DeleteVirtualSlot(Member(0x388e0), 0);
+  Member(0x388e0) = nullptr;
+  vcall(game, 0x278);  // tail call
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -3365,6 +3763,7 @@ REBUILD_FUNCTION(GameClient_DrawStatusOverlay, 0x1403e7ea0, GameClientDrawStatus
 REBUILD_FUNCTION(GameClient_CreateAssetSystem, 0x1403db810, GameClientCreateAssetSystem);
 REBUILD_FUNCTION(GameClient_Update, 0x14043c0e0, GameClientUpdate);
 REBUILD_FUNCTION(GameClient_ShutdownSystems, 0x1403e57f0, GameClientShutdownSystems);
+REBUILD_FUNCTION(GameClient_ShutdownGame, 0x1403e42c0, GameClientShutdownGame);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
