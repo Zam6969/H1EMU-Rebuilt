@@ -166,7 +166,7 @@ soeutil::ByteStream* QueuedDataPacketExStream(QueuedDataPacketEx* self) { return
 
 // Intrusive list of queued packets at connection+0x10 (vtable 0x1420dd230).
 struct PacketListNode {
-  void** vtable;
+  QueuedPacket* packet;
   PacketListNode* next;  // +0x08
   PacketListNode* prev;  // +0x10
 };
@@ -178,6 +178,18 @@ struct PacketList {
   int padding;
 };
 static_assert(sizeof(PacketList) == 0x20);
+
+void PacketListUnlink(PacketList* list, PacketListNode* node) {
+  if (node->prev)
+    node->prev->next = node->next;
+  else
+    list->head = node->next;
+  if (node->next)
+    node->next->prev = node->prev;
+  else
+    list->tail = node->prev;
+  --list->count;
+}
 
 bool ThreadAllocatorActive() { return *reinterpret_cast<uint64_t*>(0x143e09638) != 0; }
 
@@ -206,17 +218,70 @@ void PacketListDestroy(PacketList* list) {
   while (list->head) {
     PacketListNode* node = list->head;
     if (!node) continue;
-    if (node->prev)
-      node->prev->next = node->next;
-    else
-      list->head = node->next;
-    if (node->next)
-      node->next->prev = node->prev;
-    else
-      list->tail = node->prev;
-    --list->count;
+    PacketListUnlink(list, node);
     reinterpret_cast<void (*)(PacketList*, PacketListNode*)>(list->vtable[3])(list, node);
   }
+}
+
+// 0x14063be70: PacketList::Clear - unlink and free every node.
+void PacketListClear(PacketList* list) {
+  while (list->head) {
+    PacketListNode* node = list->head;
+    if (!node) continue;
+    PacketListUnlink(list, node);
+    reinterpret_cast<void (*)(PacketList*, PacketListNode*)>(list->vtable[3])(list, node);
+  }
+}
+
+PacketList* ConnectionPackets(GatewayConnection* self) { return reinterpret_cast<PacketList*>(&self->listVtable); }
+
+// 0x14063b9f0: send the queued packets in order until one fails; every sent
+// packet is reported to the packet recorder (*0x142b19b98, slot 9) and freed.
+bool GatewayConnectionFlushQueue(GatewayConnection* self) {
+  if (!self->flag) return true;
+  CRITICAL_SECTION* mutex = &self->mutex;
+  soeutil::MutexLock(mutex);
+  PacketList* list = ConnectionPackets(self);
+  bool ok = true;
+  for (PacketListNode* node = list->head; node && ok;) {
+    PacketListNode* next = node->next;
+    QueuedPacket* packet = node->packet;
+    void** vtable = packet->vtable;
+    ok = reinterpret_cast<bool (*)(QueuedPacket*)>(vtable[1])(packet);
+    if (ok) {
+      auto* stream = reinterpret_cast<soeutil::ByteStream* (*)(QueuedPacket*)>(vtable[3])(packet);
+      if (stream) {
+        void* recorder = *reinterpret_cast<void**>(0x142b19b98);
+        int mode = node->packet->mode;
+        int written = stream->writePos;
+        const uint8_t* bytes = stream->array->size != 0 ? stream->array->data : nullptr;
+        int kind = reinterpret_cast<int (*)(QueuedPacket*)>(node->packet->vtable[2])(node->packet);
+        using RecordFn = void (*)(void*, int, const uint8_t*, int, bool, bool);
+        reinterpret_cast<RecordFn>((*static_cast<void***>(recorder))[0x48 / 8])(recorder, kind, bytes, written, mode != 0,
+                                                                              mode == 2);
+      }
+      if (node->packet) reinterpret_cast<void (*)(QueuedPacket*, int)>(node->packet->vtable[0])(node->packet, 1);
+      PacketListUnlink(list, node);
+      reinterpret_cast<void (*)(PacketList*, PacketListNode*)>(list->vtable[3])(list, node);
+    }
+    node = next;
+  }
+  self->flag = list->count != 0;
+  if (mutex) soeutil::MutexUnlock(mutex);
+  return ok;
+}
+
+// 0x14063b8f0: install a session key (type, key bytes, extra) on the gateway api.
+bool GatewayConnectionSetSessionKey(GatewayConnection* self, int type, const void* keyBytes, int extra) {
+  alignas(8) uint8_t bytes[0x60];  // Crypto::ArraySecure<unsigned char,64,1>
+  alignas(8) uint8_t key[0x70];    // Crypto::CryptoKey
+  game::Call<void (*)(uint8_t*)>(0x1415f9ac0)(bytes);
+  game::Call<void (*)(uint8_t*, const void*)>(0x1415f9d50)(bytes, keyBytes);
+  game::Call<void (*)(uint8_t*, uint8_t*, int, int)>(0x1415f8850)(key, bytes, type, extra);
+  bool ok = game::Call<bool (*)(uint8_t*, uint8_t*)>(0x1415f8d00)(self->api, key);
+  game::Call<void (*)(uint8_t*)>(0x1415f8930)(key);
+  game::Call<void (*)(uint8_t*)>(0x1415f9be0)(bytes);
+  return ok;
 }
 
 // 0x14063b710: PacketList scalar deleting destructor.
@@ -303,6 +368,9 @@ REBUILD_FUNCTION_TOO_SMALL(GatewayQueuedPacket_StreamNone, 0x14063bc80, QueuedPa
 REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Stream, 0x14063bc90, QueuedDataPacketExStream);
 REBUILD_FUNCTION(GatewayPacketList_AllocateNode, 0x14063b8c0, PacketListAllocateNode);
 REBUILD_FUNCTION(GatewayPacketList_FreeNode, 0x14063bba0, PacketListFreeNode);
+REBUILD_FUNCTION(GatewayPacketList_Clear, 0x14063be70, PacketListClear);
+REBUILD_FUNCTION(GatewayConnection_FlushQueue, 0x14063b9f0, GatewayConnectionFlushQueue);
+REBUILD_FUNCTION(GatewayConnection_SetSessionKey, 0x14063b8f0, GatewayConnectionSetSessionKey);
 REBUILD_FUNCTION_TOO_SMALL(GatewayPacketList_AlwaysTrue, 0x14063be00, PacketListAlwaysTrue);
 REBUILD_FUNCTION(GatewayConnection_GetReliableStats, 0x14063bbe0, GatewayConnectionGetReliableStats);
 REBUILD_FUNCTION(GatewayConnection_Value1C0, 0x14063bbf0, GatewayConnectionValue1C0);
