@@ -77,9 +77,9 @@ carry RTTI; most engine classes were built without it.
 | ClientServerCore | `BaseApi` connection API | Connect(addresses, timeout, autoReconnect) with SoeUtil::Random address shuffle, internal Connect (address rotation, EstablishConnection), OnTerminated (reason, full stats log, OnDisconnect/OnFailed, release), IsConnected / IsConnecting, Send (raw + LogicalPacket), OnConnectComplete, Disconnect, Reconnect, GiveTime (auto-reconnect), WaitForConnect / WaitForDisconnect / WaitForFlush, guarded UdpConnection disconnect |
 | ClientServerCore | `BaseUdpManager` | SetInifileSection, SetLogChannel (+ BaseApi forwarder), ServiceStart (ini settings, UdpManager creation, socket errors, thread start), ServiceStop, GiveTime (event queuing, 30 s ini reload of UdpParams); UdpManager::SetHandler |
 | ClientServerCore | RPC plumbing | RpcRouter ctor/dtor/RemoveHandler, handler table Clear/Remove, ByteStream::Put, RpcHandlerTable ctor, 11 u16 id serializers (LE + big-endian template instances), BasePacket dtor, ByteStream dtor |
-| ClientServerCore | lifetime + accessors | BaseApi field init, metrics group registration, address-list splitter (SoeUtil List<IString>), Array<IString>::RemoveRange, ~BaseUdpManager, ~RpcManagerHandler, ~UdpConnectionHandler, BaseApi SetServer, reliable-channel stats (resend ratios), cached connection counters |
+| ClientServerCore | lifetime + accessors | BaseApi constructor (shared manager: RpcRouter, rate trackers, strings, address list), BaseApi field init, metrics group registration, address-list splitter (SoeUtil List<IString>), Array<IString>::RemoveRange, ~BaseUdpManager, ~RpcManagerHandler, ~UdpConnectionHandler, BaseApi SetServer, reliable-channel stats (resend ratios), cached connection counters |
 | ClientServerCore | `BaseApi` diagnostics | DumpStats (manager / connection / reliable channel log dump), ReportMetrics (Udp rate / size / pending / event-queue metrics) |
-| ClientServerCrypto | `CryptoBaseApi` | cipher factory (types 1-3), ArraySecure key storage ctor / assign / HasKey, destructor (session + secure ciphers), SetSessionKey (cipher factory + init), EncodeSecure; CryptoKey ctor / IsValid |
+| ClientServerCrypto | `CryptoBaseApi` | both constructors (shared / own manager), cipher factory (types 1-3), ArraySecure key storage ctor / assign / HasKey, destructor (session + secure ciphers), SetSessionKey (cipher factory + init), EncodeSecure; CryptoKey ctor / IsValid |
 | Crypto | `CipherRC4` (type 3) + `Cipher` base | complete: RC4 key schedule + keystream, ctor, dtor, Init (per-direction states), Encode / Decode, size / type / ready queries, Rekey; Cipher base dtor |
 | Crypto | `CipherAES` (type 1) | complete class: ctor / dtor (key wipe), Init (enc + dec key schedules), padded ECB Encode / Decode, block counters + NeedsRekey limits, size / type / ready queries (AES block + key-schedule primitives still called by address) |
 | Crypto | `CipherCCM` (type 2) | ctor / dtor, 13-byte nonce builder + Array<uchar,13> dtor, block counter, Init (PRNG seed + CCM key), size / type / ready / key-size queries, NeedsRekey (Encode / Decode with nonce + replay check still original) |
@@ -98,7 +98,7 @@ carry RTTI; most engine classes were built without it.
 | Game | `Login::ExternalLoginUdpApi` unserializers | all 10: ServerUpdate, LoginReply, ForcedDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, TunnelAppPacketServerToClient (packet layouts static_assert'd) + their Read functions: LoginReply, CharacterLogin/Delete/Transfer/SelectInfo, TunnelApp, server list, and the member readers: IString::Read, byte arrays, EntityDetails, ClientGameServerData, account-feature HashListMap, error details |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 572 functions (555 hooked, 17 too small to hook).
+Total: 575 functions (558 hooked, 17 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,

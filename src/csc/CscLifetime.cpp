@@ -390,6 +390,72 @@ void RpcRouterRemoveHandler(uint8_t* router, unsigned id) {
 // 0x1415f6d40: ByteStream::Put(data, count) (clamped).
 void StreamWriteBytes(soeutil::ByteStream* stream, const void* data, int count) { soeutil::StreamPut(stream, data, count); }
 
+// 0x1415f3420: BaseApi(manager, defaultPort, rpcIdEncoding) - shares an
+// existing BaseUdpManager.
+uint8_t* BaseApiConstruct(uint8_t* api, uint8_t* manager, int defaultPort, int rpcIdEncoding) {
+  game::Call<void (*)(uint8_t*)>(0x1415f2dc0)(api);  // handler bases
+  game::Field<uintptr_t>(api, 0x00) = 0x1424b03a8;  // BaseApi vtables
+  game::Field<uintptr_t>(api, 0x80) = 0x1424b0458;
+  game::Field<uintptr_t>(api, 0x88) = 0x1424b0490;
+  game::Call<void (*)(uint8_t*, int)>(0x1415f6720)(api + 0x90, rpcIdEncoding);  // RpcRouter
+  game::Field<uint64_t>(api, 0x2C8) = 0;
+  game::Field<uint64_t>(api, 0x2E8) = 0;
+  auto initString = [api](size_t offset, uintptr_t vtable) {
+    game::Field<const char*>(api, offset + 8) = soeutil::EmptyStringData();
+    game::Field<uint64_t>(api, offset + 0x10) = 0;
+    game::Field<uintptr_t>(api, offset) = vtable;
+  };
+  initString(0x300, 0x142049d00);  // StringFixed<64> last disconnect reason
+  // SoeGems::TRateTracker<128> receive (+0x368) and send (+0x780) statistics.
+  const size_t trackers[] = {0x368, 0x780};
+  for (size_t tracker : trackers) {
+    game::Field<uintptr_t>(api, tracker) = 0x14204b310;
+    game::Field<int>(api, tracker + 0x414) = 1000;
+    std::memset(api + tracker + 8, 0, 0x400);
+    game::Field<uint64_t>(api, tracker + 0x408) = 0;
+    game::Field<int>(api, tracker + 0x410) = 0;
+  }
+  initString(0xBA0, 0x14204a378);  // StringFixed<32>
+  game::Field<uintptr_t>(api, 0xBE0) = 0x1424b0380;  // List<IString> server addresses
+  game::Field<int>(api, 0xBF8) = 0;
+  game::Field<uint64_t>(api, 0xBE8) = 0;
+  game::Field<uint64_t>(api, 0xBF0) = 0;
+  initString(0xC08, 0x142049e08);  // StringFixed<256> current address
+  game::Field<uint8_t*>(api, 0x2D0) = manager;
+  game::Field<bool>(api, 0x2D8) = false;  // manager not owned
+  game::Field<int>(api, 0x2DC) = defaultPort;
+  BaseApiInitFields(api);
+  return api;
+}
+
+void SetCryptoVtables(uint8_t* api) {
+  game::Field<uintptr_t>(api, 0x00) = 0x1424b2f88;  // CryptoBaseApi vtables
+  game::Field<uintptr_t>(api, 0x80) = 0x1424b3048;
+  game::Field<uintptr_t>(api, 0x88) = 0x1424b3080;
+  game::Field<void*>(api, 0xD28) = nullptr;  // session cipher
+  game::Field<void*>(api, 0xD30) = nullptr;  // secure cipher
+  game::Field<bool>(api, 0xD38) = false;
+}
+
+// 0x1415f8b10: CryptoBaseApi(manager, defaultPort) on a shared manager.
+uint8_t* CryptoBaseApiConstruct(uint8_t* api, uint8_t* manager, int defaultPort) {
+  BaseApiConstruct(api, manager, defaultPort, 1);
+  SetCryptoVtables(api);
+  return api;
+}
+
+// 0x1415f8b70: CryptoBaseApi(name, threaded, compression, flag, port, params)
+// with its own BaseUdpManager (ini section "CryptoBaseApi").
+uint8_t* CryptoBaseApiConstructOwnManager(uint8_t* api, const char* name, bool threaded, bool compression, bool flag,
+                                          int port, void* params) {
+  using BaseFn = void (*)(uint8_t*, const char*, bool, bool, bool, int, void*, int);
+  game::Call<BaseFn>(0x1415f35d0)(api, name, threaded, compression, flag, port, params, 1);
+  SetCryptoVtables(api);
+  game::Call<void (*)(void*, const char*)>(0x1415f5780)(game::Field<void*>(api, 0x2D0),
+                                                        reinterpret_cast<const char*>(0x1424b3090));  // "CryptoBaseApi"
+  return api;
+}
+
 REBUILD_FUNCTION(UdpCompressionHandler_Destroy, 0x1415f2e30, UdpCompressionHandlerDestroy);
 REBUILD_FUNCTION(UdpCompressionHandler_GetStats, 0x1415f2ef0, UdpCompressionHandlerGetStats);
 REBUILD_FUNCTION(UdpCompressionHandler_ClearStats, 0x1415f2f50, UdpCompressionHandlerClearStats);
@@ -408,6 +474,9 @@ REBUILD_FUNCTION(ClientServerCore_RpcTableRemove, 0x1415f6f20, RpcTableRemove);
 REBUILD_FUNCTION(ClientServerCore_RpcTableClear, 0x1415f6b40, RpcTableClear);
 REBUILD_FUNCTION(ClientServerCore_RpcRouterRemoveHandler, 0x1415f6ff0, RpcRouterRemoveHandler);
 REBUILD_FUNCTION(SoeUtil_ByteStream_Put, 0x1415f6d40, StreamWriteBytes);
+REBUILD_FUNCTION(BaseApi_Construct, 0x1415f3420, BaseApiConstruct);
+REBUILD_FUNCTION(CryptoBaseApi_Construct, 0x1415f8b10, CryptoBaseApiConstruct);
+REBUILD_FUNCTION(CryptoBaseApi_ConstructOwnManager, 0x1415f8b70, CryptoBaseApiConstructOwnManager);
 REBUILD_FUNCTION(BaseApi_ConnectionValue1C4, 0x1415f4340, BaseApiConnectionValue1C4);
 
 }  // namespace rebuild::csc
