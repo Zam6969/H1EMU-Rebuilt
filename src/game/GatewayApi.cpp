@@ -10,6 +10,7 @@
 #include "core/hook.h"
 #include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
+#include "soeutil/String.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -54,6 +55,14 @@ static_assert(offsetof(PacketChannelIsRoutable, flag) == 0x11);
 constexpr uintptr_t kVtPacketLoginReply = 0x1424be238;
 constexpr uintptr_t kVtPacketChannelIsRoutable = 0x1424be268;
 constexpr uintptr_t kVtPacketLogout = 0x1424be248;
+constexpr uintptr_t kVtPacketForcedLogout = 0x1424be258;
+constexpr uintptr_t kVtStringFixed64 = 0x142049d00;
+constexpr uintptr_t kVtIStringFixed64 = 0x142049ce0;
+
+struct PacketForcedLogout : GatewayPacket {
+  soeutil::StringFixed<64> reason;
+};
+static_assert(offsetof(PacketForcedLogout, reason) == 0x10);
 constexpr int kOpcodeLogout = 3;
 
 // ClientServerCore::BaseApi vtable slots used here.
@@ -201,6 +210,41 @@ void GatewayOnLoginReply(uint8_t* api, const PacketLoginReply* packet) {
   }
 }
 
+// 0x14162bd80: unserialize PacketForcedLogout (int32 length + reason text).
+void GatewayDispatchForcedLogout(uint8_t* api, const uint8_t* data, int length, const MemberFn* handler) {
+  PacketForcedLogout packet;
+  packet.vtable = reinterpret_cast<void**>(kVtPacketForcedLogout);
+  packet.reason.vtable = reinterpret_cast<void**>(kVtStringFixed64);
+  packet.reason.data = soeutil::EmptyStringData();
+  packet.reason.length = 0;
+  packet.reason.capacity = 0;
+  Reader in{data, data + length};
+  ReadHeader(in, packet);
+  int textLength = 0;
+  bool ok;
+  if (in.cursor + 4 > in.end) {
+    in.failed = true;
+    in.cursor = in.end;
+    ok = true;  // a zero-length string is still read below
+  } else {
+    textLength = *reinterpret_cast<const int*>(in.cursor);
+    in.cursor += 4;
+    ok = textLength >= 0;
+  }
+  bool dispatched = false;
+  if (ok && textLength <= static_cast<int>(in.end - in.cursor)) {
+    soeutil::StringAssignN(&packet.reason, reinterpret_cast<const char*>(in.cursor), textLength);
+    if (!in.failed) {
+      reinterpret_cast<void (*)(uint8_t*, GatewayPacket*)>(handler->function)(api + handler->thisAdjust, &packet);
+      dispatched = true;
+    }
+  }
+  if (!dispatched) LogUnserializeFailed(api, length);
+  // ~StringFixed<64> (inlined): back to the IStringFixed vtable, drop the buffer.
+  packet.reason.vtable = reinterpret_cast<void**>(kVtIStringFixed64);
+  soeutil::StringRelease(&packet.reason);
+}
+
 // 0x14162bca0: unserialize PacketChannelIsRoutable and call the handler.
 void GatewayDispatchChannelIsRoutable(uint8_t* api, const uint8_t* data, int length, const MemberFn* handler) {
   PacketChannelIsRoutable packet{};
@@ -325,6 +369,7 @@ REBUILD_FUNCTION(Gateway_OnDisconnect, 0x14162d8e0, GatewayOnDisconnect);
 REBUILD_FUNCTION(Gateway_OnFailed, 0x14162d940, GatewayOnFailed);
 REBUILD_FUNCTION(Gateway_OnLoginReply, 0x14162d340, GatewayOnLoginReply);
 REBUILD_FUNCTION(Gateway_DispatchLoginReply, 0x14162bed0, GatewayDispatchLoginReply);
+REBUILD_FUNCTION(Gateway_DispatchForcedLogout, 0x14162bd80, GatewayDispatchForcedLogout);
 REBUILD_FUNCTION(Gateway_DispatchChannelIsRoutable, 0x14162bca0, GatewayDispatchChannelIsRoutable);
 REBUILD_FUNCTION(Gateway_OnChannelIsRoutable, 0x14162d2c0, GatewayOnChannelIsRoutable);
 REBUILD_FUNCTION(Gateway_OnConnectionIsNotRoutable, 0x14162d300, GatewayOnConnectionIsNotRoutable);
