@@ -5251,6 +5251,482 @@ void GameClientWriteCrashInfo(uint8_t* game) {
   soeutil::StringRelease(&osName);
 }
 
+
+// StringFixed<64> built the game's way for input lookups (IStringFixed vtable
+// while assigning, then the StringFixed<64> vtable).
+void InitInputName(soeutil::StringFixed<64>& text, const char* value) {
+  soeutil::InitFixed(text, reinterpret_cast<void**>(0x142049ce0));
+  soeutil::StringAssign(&text, value);
+  text.vtable = reinterpret_cast<void**>(0x142049d00);
+}
+void ReleaseInputName(soeutil::StringFixed<64>& text) {
+  text.vtable = reinterpret_cast<void**>(0x142049ce0);
+  soeutil::StringRelease(&text);
+}
+
+// Input binding state for (category, action) from the controls at +0x388A0
+// (0x14060c080); the binding's +0xE0 bit 0 means "pressed this frame".
+uint8_t* InputBinding(uint8_t* game, const char* category, const char* action) {
+  soeutil::StringFixed<64> actionName;
+  InitInputName(actionName, action);
+  soeutil::StringFixed<64> categoryName;
+  InitInputName(categoryName, category);
+  auto* binding = game::Call<uint8_t* (*)(void*, soeutil::IString*, soeutil::IString*, bool, void*, bool)>(0x14060c080)(
+      game::Field<void*>(game, 0x388A0), &categoryName, &actionName, true, nullptr, true);
+  ReleaseInputName(categoryName);
+  ReleaseInputName(actionName);
+  return binding;
+}
+
+// Same lookup, releasing the names through the StringFixed<64> destructor
+// (0x1402baa30) as some call sites do.
+uint8_t* InputBindingDestructed(uint8_t* game, const char* category, const char* action) {
+  soeutil::StringFixed<64> actionName;
+  InitInputName(actionName, action);
+  soeutil::StringFixed<64> categoryName;
+  InitInputName(categoryName, category);
+  auto* binding = game::Call<uint8_t* (*)(void*, soeutil::IString*, soeutil::IString*, bool, void*, bool)>(0x14060c080)(
+      game::Field<void*>(game, 0x388A0), &categoryName, &actionName, true, nullptr, true);
+  game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&categoryName);
+  game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&actionName);
+  return binding;
+}
+
+// 0x140433680 (slot 90): HandleInputActions - poll the "Generic" input
+// actions (HUD toggles, group invites, quick chat, minimap zoom, escape,
+// map/inventory/builder toggles, ...) and run their UI scripts / events.
+void GameClientHandleInputActions(uint8_t* game) {
+  const char* generic = reinterpret_cast<const char*>(0x14206ec50);  // "Generic"
+  auto pressed = [&](uint64_t action) { return (InputBinding(game, generic, reinterpret_cast<const char*>(action))[0xE0] & 1) != 0; };
+  auto runScript = [](uint64_t command) {
+    game::Call<bool (*)(void*, const char*, void*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(command), nullptr, nullptr);
+  };
+  auto fireConsoleEvent = [](uint64_t name) {
+    if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+      const char* text = reinterpret_cast<const char*>(name);
+      soeutil::IString event{soeutil::IStringVtable(), const_cast<char*>(text), static_cast<int>(std::strlen(text)), -1};
+      game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(console, &event, nullptr, nullptr);
+      event.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&event);
+    }
+  };
+  auto fireAssignedEvent = [](uint64_t name) {
+    if (!*reinterpret_cast<void**>(0x143bd4830)) return;
+    soeutil::IString event{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    game::Call<void (*)(soeutil::IString*, const char*, int)>(0x1402ee880)(&event, reinterpret_cast<const char*>(name), -1);
+    game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(*reinterpret_cast<void**>(0x143bd4830), &event, nullptr, nullptr);
+    event.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&event);
+  };
+  auto player = [&] { return game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+  int inputSettingA = game::Field<int>(game::Field<uint8_t*>(game, 0x31418), 0x8044);
+  int inputSettingB = game::Field<int>(game::Field<uint8_t*>(game, 0x31418), 0x8048);
+  bool genericActive;
+  {
+    soeutil::StringFixed<64> category;
+    InitInputName(category, generic);
+    genericActive = game::Call<bool (*)(void*, soeutil::IString*)>(0x140611910)(game::Field<void*>(game, 0x388A0), &category);
+    ReleaseInputName(category);
+  }
+  if (!genericActive) goto finish;
+  {
+    auto* recorder = *reinterpret_cast<uint8_t**>(0x142b19b98);
+    bool connected = recorder && game::Field<void*>(recorder, 8) &&
+                     game::Call<bool (*)(void*)>(0x14063bdd0)(game::Field<void*>(recorder, 8));
+    void* ui = game::Field<void*>(game, 0x38AC8);
+    bool focused = GetForegroundWindow() == game::Field<HWND>(game, 0x387F0) &&
+                   !game::Call<void* (*)(void*, int)>(0x140cf41c0)(ui, game::Call<int (*)(void*)>(0x140cf3dc0)(ui));
+    if (!focused) goto unfocused;
+    if (!connected) goto offline;
+    if (pressed(0x14206ec58)) {  // "ToggleHudIndicators"
+      runScript(0x14206ec70);    // "HudHandler:ToggleHUDIndicators"
+      fireConsoleEvent(0x14206ec90);  // "EVENT_TOGGLE_HUD_INDICATORS"
+    }
+    for (auto [action, accept] : {std::pair<uint64_t, bool>{0x14206ecb0, true}, {0x14206ed00, false}}) {  // Accept/DeclineGroupInvite
+      if (!pressed(action)) continue;
+      if (uint8_t* self = player()) game::Call<void (*)(uint8_t*, bool)>(0x1405f9190)(self + 0x9418, accept);
+      runScript(0x14206ecc8);         // "GameEvents:HideGroupInvite"
+      fireConsoleEvent(0x14206ece8);  // "EVENT_HIDE_GROUP_INVITE"
+    }
+    {  // VoiceMacro: toggles the quick-chat menu; while open, QuickChat1..10 pick a macro.
+      bool voiceMacro;
+      {
+        soeutil::StringFixed<64> actionName;
+        InitInputName(actionName, reinterpret_cast<const char*>(0x14206ed18));  // "VoiceMacro"
+        soeutil::StringFixed<64> categoryName;
+        InitInputName(categoryName, generic);
+        auto* binding = game::Call<uint8_t* (*)(void*, soeutil::IString*, soeutil::IString*, bool, void*, bool)>(0x14060c080)(
+            game::Field<void*>(game, 0x388A0), &categoryName, &actionName, true, nullptr, true);
+        uint8_t state = binding[0xE0];
+        game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&categoryName);  // StringFixed<64> destructor
+        game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&actionName);
+        voiceMacro = (state & 1) != 0;
+      }
+      if (voiceMacro) {
+        if (game[0x3884B])
+          game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);  // close
+        else
+          game::Call<void (*)(uint8_t*)>(0x1404704a0)(game);  // open
+      }
+      if (game[0x3884B]) {
+        const char* quickChat = reinterpret_cast<const char*>(0x14206ed38);  // "QuickChat"
+        soeutil::IString name{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+        for (int macro = 1; macro <= 10; ++macro) {
+          soeutil::StringFormat(&name, reinterpret_cast<const char*>(0x14206ed28), macro);  // "QuickChat%d"
+          bool chosen;
+          {
+            soeutil::StringFixed<64> actionName;
+            InitInputName(actionName, name.data);
+            soeutil::StringFixed<64> categoryName;
+            InitInputName(categoryName, quickChat);
+            auto* binding = game::Call<uint8_t* (*)(void*, soeutil::IString*, soeutil::IString*, bool, void*, bool)>(0x14060c080)(
+                game::Field<void*>(game, 0x388A0), &categoryName, &actionName, true, nullptr, true);
+            chosen = (binding[0xE0] & 1) != 0;
+            ReleaseInputName(categoryName);
+            game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&actionName);
+          }
+          if (!chosen) continue;
+          {
+            soeutil::StringFixed<64> actionName;
+            InitInputName(actionName, name.data);
+            soeutil::StringFixed<64> categoryName;
+            InitInputName(categoryName, quickChat);
+            game::Call<void (*)(void*, soeutil::IString*, soeutil::IString*)>(0x14060aef0)(game::Field<void*>(game, 0x388A0), &categoryName,
+                                                                                         &actionName);
+            game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&categoryName);
+            game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&actionName);
+          }
+          game::Call<void (*)(void*, int)>(0x140949db0)(game::Field<void*>(game, 0x38958), macro);
+          soeutil::IString handler{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
+          if (game::Call<FindHandlerFn>(0x14048a5c0)(UiRoot(), reinterpret_cast<const char*>(0x14206e460), &handler)) {  // "ChatHandler"
+            game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&handler, reinterpret_cast<const char*>(0x14206ed48));  // ":OnVoiceChatMacroSelect"
+            ScriptArgs args{reinterpret_cast<void**>(0x14206c548), nullptr, nullptr};
+            if (auto* slot = game::Call<int* (*)(ScriptArgs*, int)>(0x140418710)(&args, 0)) *slot = 0;
+            game::Call<void (*)(void*, int)>(0x14046d7b0)(args.begin, macro);
+            game::Call<bool (*)(void*, const char*, ScriptArgs*, void*)>(0x140488cc0)(UiRoot(), handler.data, &args, nullptr);
+            game::Call<void (*)(ScriptArgs*)>(0x1403a06c0)(&args);
+          }
+          game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);
+          handler.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&handler);
+          break;
+        }
+        name.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&name);
+      }
+    }
+    {  // Minimap zoom (held or tapped) scales the map zoom at +0x38B58 (+0xEDC).
+      float step = *reinterpret_cast<float*>(0x14207283c);
+      auto zoom = [&](uint8_t* binding, uint64_t heldScale, uint64_t tapScale) {
+        auto* map = game::Field<uint8_t*>(game, 0x38B58);
+        if (!map || !binding) return;
+        float value = game::Field<float>(map, 0xEDC);
+        using TestFn = bool (*)(uint8_t*, float);
+        if ((game::Field<unsigned>(binding, 0xE0) >> 1) & 1 && game::Call<TestFn>(0x140428200)(binding, step) &&
+            game::Call<TestFn>(0x140428130)(binding, step)) {
+          value *= *reinterpret_cast<float*>(heldScale);
+        } else if (binding[0xC8] && !game::Call<TestFn>(0x140428130)(binding, step)) {
+          value *= *reinterpret_cast<float*>(tapScale);
+        } else {
+          return;
+        }
+        game::Call<void (*)(void*, float)>(0x14067cc50)(game::Field<void*>(game, 0x38B58), value);
+      };
+      zoom(InputBinding(game, generic, reinterpret_cast<const char*>(0x14206ed60)), 0x14207285c, 0x142072864);  // "IncrementMinimapZoom"
+      zoom(InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ed78)), 0x142072880, 0x142072870);  // "DecrementMinimapZoom"
+    }
+  offline:
+    if (pressed(0x14206ed90)) {       // "CancelZoneQueue"
+      runScript(0x14206eda0);         // "ServerQueueHandler:CancelQueue"
+      fireAssignedEvent(0x14206edc0);  // "EVENT_CANCEL_SERVER_QUEUE"
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ede0))[0xE0] & 1) {  // "StartCommandText"
+      game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);
+      game::Call<void (*)(uint8_t*)>(0x140471350)(game);
+    }
+  unfocused:
+    {
+      // Mouse position (+0x3D538/+0x3D53C, valid when +0x3D541) relative to the
+      // screen size read from +0x31418 drives two corner "hot spots".
+      float farEdge = *reinterpret_cast<float*>(0x14207284c);
+      float nearEdge = *reinterpret_cast<float*>(0x142072844);
+      auto mouseX = [&] { return static_cast<float>(game::Field<int>(game, 0x3D538)); };
+      auto mouseY = [&] { return static_cast<float>(game::Field<int>(game, 0x3D53C)); };
+      if (!game::Call<bool (*)(void*)>(0x140cf5530)(game::Field<void*>(game, 0x38AC8))) {
+        uint8_t* binding = InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206edf8));  // "ToggleDebugConsole"
+        bool toggle = (binding[0xE0] & 1) ||
+                      (game[0x3D541] && mouseX() > static_cast<float>(inputSettingA) * farEdge && mouseY() > static_cast<float>(inputSettingB) * farEdge);
+        if (toggle) {
+          game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);
+          game::Call<void (*)(uint8_t*)>(0x140474b50)(game);
+        }
+      }
+      uint8_t* escapeBinding = InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ee0c));  // "Escape"
+      bool escape = (escapeBinding[0xE0] & 1) ||
+                    (game[0x3D541] && mouseX() > static_cast<float>(inputSettingA) * nearEdge && mouseX() < static_cast<float>(inputSettingA) * farEdge &&
+                     mouseY() > static_cast<float>(inputSettingB) * nearEdge && mouseY() < static_cast<float>(inputSettingB) * farEdge);
+      if (escape) {
+        bool closedMenu = false;
+        if (game::Call<bool (*)(uint8_t*)>(0x14040d960)(game) && game[0x3884B]) {
+          game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);
+          closedMenu = true;
+        }
+        void* mode = game::Field<void*>(game, 0x388A8);
+        if (mode && (*reinterpret_cast<int (***)(void*)>(mode))[0](mode) == 0x1F) {
+          auto& shown = *reinterpret_cast<uint8_t*>(0x142b19e39);
+          if (!shown) {
+            game::Call<void (*)()>(0x140355520)();
+            shown = 1;
+          }
+          game::Call<void (*)(void*, bool)>(0x140770140)(*reinterpret_cast<void**>(0x142b19ad0), true);
+        } else if (!closedMenu) {
+          void* current = game::Field<void*>(game, 0x388A8);  // not null-checked in the original
+          if ((*reinterpret_cast<bool (***)(void*)>(current))[0xA8 / 8](current)) {
+            fireAssignedEvent(0x14206ee18);  // "EVENT_ON_ESCAPE"
+            if (!game[0x38EB2]) {
+              soeutil::StringFixed<256> state;
+              soeutil::InitFixed(state, reinterpret_cast<void**>(0x142049e08));
+              game::Call<void (*)(uint8_t*, soeutil::IString*)>(0x1403f5ff0)(game, &state);
+              ScriptArgs args{reinterpret_cast<void**>(0x14206c548), nullptr, nullptr};
+              void* value = game::Call<void* (*)(ScriptArgs*, int)>(0x1403b4810)(&args, 0);
+              game::Call<void (*)(void*, const char*)>(0x14046be30)(value, state.data);
+              game::Call<bool (*)(void*, const char*, ScriptArgs*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(0x14206ee28), &args,
+                                                                                       nullptr);  // "GameEvents:OnEscape"
+              game::Call<void (*)(ScriptArgs*)>(0x1403a06c0)(&args);
+              game::Call<void (*)(soeutil::IString*)>(0x140305cf0)(&state);  // StringFixed<256> destructor
+            }
+          }
+        }
+      }
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x1420547f0))[0xE0] & 1) {  // "HideUi"
+      runScript(0x14206ee40);          // "GameEvents:OnHideUi"
+      fireAssignedEvent(0x14206ee58);  // "EVENT_TOGGLE_UI"
+    }
+    if (!game::Call<bool (*)(uint8_t*)>(0x14040d960)(game) && game::Call<bool (*)(void*)>(0x140cf5530)(game::Field<void*>(game, 0x38AC8)))
+      goto afterGameplay;
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ee68))[0xE0] & 1)  // "ToggleFullscreen"
+      game::Call<void (*)(uint8_t*)>(0x140474c40)(game);
+    if (!connected) goto afterGameplay;
+    {
+      float farEdge = *reinterpret_cast<float*>(0x14207284c);
+      float nearEdge = *reinterpret_cast<float*>(0x142072844);
+      uint8_t* binding = InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ee80));  // "OpenMap"
+      bool openMap = (binding[0xE0] & 1) || (game[0x3D541] && static_cast<float>(game::Field<int>(game, 0x3D538)) > static_cast<float>(inputSettingA) * farEdge &&
+                                             static_cast<float>(game::Field<int>(game, 0x3D53C)) < static_cast<float>(inputSettingB) * nearEdge);
+      void* mode = game::Field<void*>(game, 0x388A8);
+      if (openMap && (*reinterpret_cast<bool (***)(void*)>(mode))[0xA8 / 8](mode)) {  // mode not null-checked in the original
+        void* proxy = *reinterpret_cast<void**>(0x142b19b38);
+        if (game::Call<void* (*)(void*)>(0x14071e830)(proxy)) {
+          void* character = game::Call<void* (*)(void*)>(0x14071e830)(*reinterpret_cast<void**>(0x142b19b38));
+          game::Call<void (*)(void*)>(0x140920360)(character);
+          if (game::Call<bool (*)(void*)>(0x140427f00)(*reinterpret_cast<void**>(0x142b19780)) ||
+              (!game[0x38EB2] && game::Call<bool (*)(void*)>(0x14091d9a0)(character))) {
+            fireAssignedEvent(0x14206db50);  // "EVENT_SET_MENU_STATE"
+            runScript(0x14206ee88);          // "GameEvents:OnMapToggle"
+            fireAssignedEvent(0x14206eea0);  // "EVENT_TOGGLE_MAP"
+            if (uint8_t* self = player()) game::Call<void (*)(uint8_t*)>(0x140637570)(self);
+          }
+        }
+      }
+    }
+    {
+      auto* profile = *reinterpret_cast<uint8_t**>(0x142b19ba0);
+      auto* self = game::Call<uint8_t* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860));
+      if (profile && self) {
+        auto heldItem = [&] { return (*reinterpret_cast<uint8_t* (***)(void*)>(self))[0x5B8 / 8](self); };
+        uint8_t* binding = InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206eef0));  // "ToggleInventory"
+        bool toggle = (binding[0xE0] & 1) || (heldItem() && profile[0xB008]);
+        if (toggle) {
+          uint8_t* vehicle = game::Field<uint8_t*>(self, 0x3920);
+          if (vehicle && game::Field<int>(vehicle, 0x2C) == 2 && game::Call<void* (*)(void*)>(0x14050f340)(self) &&
+              game::Call<void* (*)(void*)>(0x14050c160)(game::Call<void* (*)(void*)>(0x14050f340)(self)) == self)
+            game::Call<void (*)(void*)>(0x1406375e0)(profile);
+          if (game::Call<bool (*)(void*)>(0x140519500)(self) && !game::Call<void* (*)(void*)>(0x14050f300)(self) &&
+              !(heldItem()[0x38] & 0x10)) {  // held item not null-checked in the original
+            profile[0xB008] = 1;
+          } else {
+            if (game[0x38EB2] && heldItem()) {
+              heldItem();
+              *reinterpret_cast<uint8_t*>(0x142a00d50) = 0;
+            }
+            void* mode = game::Field<void*>(game, 0x388A8);
+            if ((*reinterpret_cast<bool (***)(void*)>(mode))[0xA8 / 8](mode)) {
+              runScript(0x14206eeb8);          // "GameEvents:OnInventoryToggle"
+              fireAssignedEvent(0x14206eed8);  // "EVENT_TOGGLE_INVENTORY"
+              profile[0xB008] = 0;
+              if (uint8_t* p = player()) game::Call<void (*)(uint8_t*)>(0x140637560)(p);
+            }
+          }
+        }
+      } else {
+        runScript(0x14206eeb8);          // "GameEvents:OnInventoryToggle"
+        fireAssignedEvent(0x14206eed8);  // "EVENT_TOGGLE_INVENTORY"
+      }
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ef00))[0xE0] & 1) {  // "ToggleBuilder"
+      if (void* builder = *reinterpret_cast<void**>(0x142b19c98)) {
+        void* target = (*reinterpret_cast<void* (***)(void*)>(builder))[0x28 / 8](builder);
+        if (game::Call<int (*)(void*)>(0x1403f6080)(target) == 1) {
+          runScript(0x14206ef10);          // "GameEvents:OnBuilderToggle"
+          fireAssignedEvent(0x14206ef30);  // "EVENT_TOGGLE_BUILDER"
+        }
+      }
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ef48))[0xE0] & 1) {  // "ToggleWeaponStance"
+      if (void* character = game::Call<void* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860)))
+        (*reinterpret_cast<void (***)(void*)>(character))[0x460 / 8](character);
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206ef60))[0xE0] & 1) {  // "ToggleHUDResources"
+      game::Call<void (*)(void*, const char*, void*, void*)>(0x140cf39b0)(game::Field<void*>(game, 0x38AC8),
+                                                                          reinterpret_cast<const char*>(0x14206ef78), nullptr, nullptr);  // "ToggleResources"
+      fireAssignedEvent(0x14206ef88);  // "EVENT_TOGGLE_RESOURCES"
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206efa0))[0xE0] & 1) {  // "ToggleUI"
+      bool hidden = !game[0x38EB3];
+      game[0x38EB3] = hidden;
+      if (game[0x38EB2]) game::Call<void (*)(void*, bool)>(0x140954630)(*reinterpret_cast<void**>(0x143bd4830), hidden);
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206efb0))[0xE0] & 1)  // "ToggleVideoCapture"
+      runScript(0x14206efc8);  // "VideoHandler:ToggleVideoCapture"
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206efe8))[0xE0] & 1)  // "PointAndReport"
+      game::Call<void (*)(uint8_t*)>(0x1404318e0)(game);
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206eff8))[0xE0] & 1)  // "PointAndInvite"
+      game::Call<void (*)(uint8_t*)>(0x1404316e0)(game);
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f008))[0xE0] & 1) {  // "ToggleMuteAll"
+      auto* options = *reinterpret_cast<uint8_t**>(0x142b199f0);
+      uint8_t muted = options[0x2E9A];
+      game::Call<void (*)(void*, bool)>(0x140ab51f0)(options, !muted);
+      if (!muted)
+        game::Call<void (*)(uint8_t*)>(0x14042ae90)(game);
+      else
+        game::Call<void (*)(uint8_t*)>(0x140466000)(game);
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f018))[0xE0] & 1)  // "ToggleInstantActionTimer"
+      runScript(0x14206f038);  // "GameEvents:OnInstantActionToggle"
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f060))[0xE0] & 1)  // "ToggleVehicleManagementView"
+      runScript(0x14206f080);  // "HudHandler:ToggleVehicleManagementView"
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f0a8))[0xE0] & 1)  // "CycleChatTabs"
+      game::Call<void (*)(uint8_t*)>(0x1403e2b30)(game);
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f0b8))[0xE0] & 1) {  // "CycleMainWindowTabs"
+      game::Call<void (*)(void*, const char*, void*, void*)>(0x140cf39b0)(game::Field<void*>(game, 0x38AC8),
+                                                                          reinterpret_cast<const char*>(0x14206f0b8), nullptr, nullptr);
+      fireAssignedEvent(0x14206f0d0);  // "EVENT_CYCLE_WINDOW_TABS"
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f0e8))[0xE0] & 1) {  // "StartChatText"
+      game::Call<void (*)(uint8_t*)>(0x14040dfc0)(game);
+      game::Call<void (*)(uint8_t*, int)>(0x140471070)(game, 0);
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f0f8))[0xE0] & 1) {  // "AutoJoinSquad"
+      if (!game::Call<bool (*)(uint8_t*)>(0x1405f7000)(player() + 0x9418)) {  // player not null-checked in the original
+        game::Call<void (*)(uint8_t*)>(0x1405f8bb0)(player() + 0x9418);
+      } else if (void* squads = *reinterpret_cast<void**>(0x142b19c70)) {
+        game::Call<void (*)(void*)>(0x140a885e0)(squads);
+      }
+    }
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f108))[0xE0] & 1) {  // "Reply"
+      if (void* chat = game::Field<void*>(game, 0x388B8)) game::Call<void (*)(void*)>(0x1409a7880)(chat);
+    }
+    InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f110));  // "TogglePerformance" (result unused)
+    if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f128))[0xE0] & 1) {  // "ToggleNightVision"
+      void* character = game::Call<void* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860));  // not null-checked
+      if (void* vision = (*reinterpret_cast<void* (***)(void*)>(character))[0x288 / 8](character))
+        game::Call<void (*)(void*, uint32_t)>(0x140931e10)(vision, 0x2be7f704);
+    }
+    {  // Render distance +/- step, clamped, pushed to the renderer, options and console.
+      float step = *reinterpret_cast<float*>(0x1420728c4);
+      auto setRenderDistance = [&](float value) {
+        auto* render = *reinterpret_cast<void**>(0x142b19788);
+        float current = game::Call<float (*)(void*)>(0x1404d5900)(render);
+        if (!(value < current || value > current)) return;  // ucomiss/je: equal or unordered skips
+        game::Call<void (*)(void*, float)>(0x1404da040)(render, value);
+        if (void* options = *reinterpret_cast<void**>(0x142b199f0)) game::Call<void (*)(void*, float)>(0x140ab5850)(options, value);
+        if (*reinterpret_cast<void**>(0x143bd4830)) {
+          soeutil::IString event{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          game::Call<void (*)(soeutil::IString*, const char*, int)>(0x1402ee880)(&event, reinterpret_cast<const char*>(0x14206f158), -1);  // "EVENT_RENDER_DISTANCE_CHANGED"
+          game::Call<void (*)(void*, soeutil::IString*, float*)>(0x1403584f0)(*reinterpret_cast<void**>(0x143bd4830), &event, &value);
+          event.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&event);
+        }
+      };
+      if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f140))[0xE0] & 1) {  // "IncreaseRenderDistance"
+        if (void* render = *reinterpret_cast<void**>(0x142b19788)) {
+          float value = game::Call<float (*)(void*)>(0x1404d5900)(render) + step;
+          float maximum = *reinterpret_cast<float*>(0x142188038);
+          if (value > maximum) value = maximum;
+          setRenderDistance(value);
+        }
+      }
+      if (InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f178))[0xE0] & 1) {  // "DecreaseRenderDistance"
+        if (void* render = *reinterpret_cast<void**>(0x142b19788)) {
+          float value = game::Call<float (*)(void*)>(0x1404d5900)(render) - step;
+          float minimum = *reinterpret_cast<float*>(0x14218803c);
+          if (!(value >= minimum)) value = minimum;
+          setRenderDistance(value);
+        }
+      }
+    }
+    game::Call<void (*)(uint8_t*)>(0x14043beb0)(game);
+    {  // Proximity voice chat: the first held channel key (table at 0x142a007c0) picks the channel.
+      uint8_t* self = player();
+      uint8_t* voice = self ? game::Field<uint8_t*>(self, 0x99F0) : nullptr;
+      if (!voice || !voice[0x1B8]) goto afterGameplay;
+      struct VoiceChannelKey {
+        const char* action;
+        int channel;
+      };
+      void* channel = nullptr;
+      for (auto* key = reinterpret_cast<VoiceChannelKey*>(0x142a007c0); key->action; ++key) {
+        uint8_t* binding = InputBindingDestructed(game, generic, key->action);
+        if (!binding[0xC8] || channel) continue;
+        if ((binding[0xE0] & 1) && key->channel == 1 && (*reinterpret_cast<uint8_t**>(0x142b199f0))[0x2EBD]) {
+          soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          void* strings = *reinterpret_cast<void**>(0x142b19798);
+          (*reinterpret_cast<void (***)(void*, const char*, soeutil::IString*)>(strings))[0x18 / 8](
+              strings, reinterpret_cast<const char*>(0x14206f190), &text);  // "UserOptionProximityChatDisabled"
+          void* chat = *reinterpret_cast<void**>(0x142b19b88);
+          int color = game::Call<int (*)()>(0x1416dfd10)();
+          int style = game::Call<int (*)()>(0x1416dfdf0)();
+          (*reinterpret_cast<void (***)(void*, const char*, int, int, int, bool, void*, bool)>(chat))[0x28 / 8](chat, text.data, 0, style, color,
+                                                                                                             false, nullptr, true);
+          text.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&text);
+        }
+        channel = game::Call<void* (*)(void*, int)>(0x14075f3d0)(voice, key->channel);
+      }
+      uint8_t* custom = InputBindingDestructed(game, generic, reinterpret_cast<const char*>(0x14206f1b0));  // "VoiceChatCustom"
+      if (custom[0xC8] && !channel) channel = game::Call<void* (*)(void*, void*)>(0x14075f3f0)(voice, voice + 0x120);
+      if (channel) {
+        game::Call<void (*)(void*, void*)>(0x140766ed0)(voice, channel);
+        game::Call<void (*)(void*, bool)>(0x1407663f0)(voice, false);
+      } else if ((*reinterpret_cast<uint8_t**>(0x142b199f0))[0x3286]) {
+        game::Call<void (*)(void*, bool)>(0x1407663f0)(voice, true);
+      }
+    }
+  afterGameplay:;
+  }
+finish:;
+  if ((*reinterpret_cast<bool (***)(uint8_t*)>(game))[0x90 / 8](game) || (player() && player()[0x109D9])) {
+    bool demoActive;
+    {
+      soeutil::StringFixed<64> demo;
+      InitInputName(demo, reinterpret_cast<const char*>(0x14206f1c0));  // "Demo"
+      demoActive = game::Call<bool (*)(void*, soeutil::IString*)>(0x140611910)(game::Field<void*>(game, 0x388A0), &demo);
+      game::Call<void (*)(soeutil::IString*)>(0x1402baa30)(&demo);
+    }
+    if (demoActive && (game::Field<unsigned>(InputBindingDestructed(game, reinterpret_cast<const char*>(0x14206f1c0),
+                                                                    reinterpret_cast<const char*>(0x14206f1c8)),  // "ReviveMe"
+                                             0xE0) >> 1) & 1)
+      (*reinterpret_cast<void (***)(uint8_t*, const char*)>(game))[0x158 / 8](game, reinterpret_cast<const char*>(0x14206f1d8));
+  }
+  game::Field<uint16_t>(game, 0x3D541) = 0;
+  {
+    void* overlay = *reinterpret_cast<void**>(0x142b19b10);
+    game[0x38DEC] = (!overlay || !game::Call<bool (*)(void*)>(0x14065c150)(overlay)) && GetForegroundWindow() == game::Field<HWND>(game, 0x387F0);
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -5315,6 +5791,7 @@ REBUILD_FUNCTION(GameClient_ShutdownGame, 0x1403e42c0, GameClientShutdownGame);
 REBUILD_FUNCTION(GameClient_GiveTime, 0x1403fa350, GameClientGiveTime);
 REBUILD_FUNCTION(GameClient_CreateAppServices, 0x1403d8a00, GameClientCreateAppServices);
 REBUILD_FUNCTION(GameClient_WriteCrashInfo, 0x14042c8a0, GameClientWriteCrashInfo);
+REBUILD_FUNCTION(GameClient_HandleInputActions, 0x140433680, GameClientHandleInputActions);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
