@@ -3805,8 +3805,7 @@ void GameClientGiveTime(uint8_t* game) {
         }
         game::Call<void (*)(uint8_t*)>(0x140477d40)(game);
       }
-      void* login = game::Field<void*>(game, 0x38B80);
-      game::Call<void (*)(void*, uint8_t*, int, int)>(0x140738550)(login, game + 0x31608, game::Field<int>(game, 0x31DF4), game::Field<int>(game, 0x31DF8));
+      game::Call<void (*)(void*, uint8_t*, int, int)>(0x140738550)(login(), game + 0x31608, game::Field<int>(game, 0x31DF4), game::Field<int>(game, 0x31DF8));
       game::Call<void (*)(void*, uint8_t*)>(0x1407385d0)(game::Field<void*>(game, 0x38B80), game + 0x31A28);
       game::Call<void (*)(void*, const char*, int)>(0x140736260)(game::Field<void*>(game, 0x38B80), reinterpret_cast<const char*>(0x14206d368), 3);
       if (void* splash = *reinterpret_cast<void**>(0x142b19b08)) {
@@ -4839,6 +4838,419 @@ bool GameClientCreateAppServices(uint8_t* game) {
   return true;
 }
 
+// Runs one crash-report entry; a fault inside it skips just that entry (the
+// original wraps each entry in try/catch(...) for the same reason).
+template <class Entry>
+void GuardedCrashEntry(Entry&& entry) {
+  __try {
+    entry();
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+}
+
+// 0x14042c8a0 (slot 117): WriteCrashInfo - add ~130 key/value entries about
+// the client, character, renderer, animation and machine to the crash report
+// writer at +0xA8.
+void GameClientWriteCrashInfo(uint8_t* game) {
+  void* writer = game + 0xA8;
+  auto* client = *reinterpret_cast<uint8_t**>(0x142b19780);
+  const char* percentS = reinterpret_cast<const char*>(0x142046fb8);  // "%s"
+  auto key = [](uint64_t text) { return reinterpret_cast<const char*>(text); };
+  using PrintfFn = void (*)(void*, const char*, const char*, ...);
+  auto printfEntry = [&](uint64_t name, const char* format, auto... args) {
+    game::Call<PrintfFn>(0x140316650)(writer, key(name), format, args...);
+  };
+  using ValueFn = void (*)(void*, const char*, const void*);
+  auto valueEntry = [&](uint64_t writerFn, uint64_t name, const void* value) { game::Call<ValueFn>(writerFn)(writer, key(name), value); };
+  auto textEntry = [&](uint64_t name, const char* text) { valueEntry(0x14035c750, name, &text); };
+  auto intEntry = [&](uint64_t name, int value) { valueEntry(0x14035c3f0, name, &value); };
+  // StringFixed<64> copy of a C string, written with "%s".
+  auto copiedTextEntry = [&](uint64_t name, const char* text) {
+    soeutil::StringFixed<64> copy;
+    soeutil::InitFixed(copy, reinterpret_cast<void**>(0x142049d00));
+    if (text && *text) soeutil::StringAssign(&copy, text);
+    GuardedCrashEntry([&] { printfEntry(name, percentS, copy.data); });
+    copy.vtable = reinterpret_cast<void**>(0x142049ce0);
+    soeutil::StringRelease(&copy);
+  };
+
+  if (void* splash = *reinterpret_cast<void**>(0x142b19b08)) game::Call<void (*)(void*)>(0x141342530)(splash);
+  copiedTextEntry(0x14204a000, *reinterpret_cast<const char**>(0x1429fbd88));  // "Version"
+  GuardedCrashEntry([&] {
+    uint64_t guid = game::Field<uint64_t>(client, 0x38BF0);
+    valueEntry(0x14035cc30, 0x14206f5a0, &guid);  // "Player GUID"
+  });
+  GuardedCrashEntry([&] { valueEntry(0x14035cb60, 0x14206f5b0, client + 0x31DE8); });  // "StationId"
+  copiedTextEntry(0x14206f5c0, game::Call<const char* (*)(uint8_t*, int)>(0x1403d5850)(client, game::Field<int>(game, 0x314A8)));  // "Client State"
+  {
+    uint64_t now;
+    int64_t elapsed = static_cast<int64_t>(*game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&now) - game::Field<uint64_t>(client, 0x38810));
+    int seconds = static_cast<int>(elapsed > 0x7fffffff ? 0x7fffffff : elapsed) / 1000;
+    soeutil::StringFixed<64> text;
+    soeutil::InitFixed(text, reinterpret_cast<void**>(0x142049d00));
+    soeutil::StringFormat(&text, reinterpret_cast<const char*>(0x142047028), seconds);
+    GuardedCrashEntry([&] { printfEntry(0x14206f5d0, percentS, text.data); });  // "AppRuntime Seconds"
+    text.vtable = reinterpret_cast<void**>(0x142049ce0);
+    soeutil::StringRelease(&text);
+  }
+  GuardedCrashEntry([&] { textEntry(0x14206f5e8, game::Field<const char*>(game, 0x42DF8)); });            // "Last Scaleform Url Requested"
+  GuardedCrashEntry([&] { valueEntry(0x14035c3f0, 0x14206f608, reinterpret_cast<void*>(0x142b176c0)); });  // "Last critical error"
+  GuardedCrashEntry([&] { textEntry(0x14206f620, *reinterpret_cast<const char**>(0x1429fbed8)); });       // "Last Critical error Meassage"
+  GuardedCrashEntry([&] {
+    textEntry(0x14206f640, game::Call<const char* (*)(int)>(0x140499ef0)(*reinterpret_cast<int*>(0x142b176c4)));  // "Shutdown Reason"
+  });
+  if (void* player = *reinterpret_cast<void**>(0x142b19ba0)) {
+    GuardedCrashEntry([&] { intEntry(0x14206f650, game::Field<int>(game::Call<uint8_t* (*)(void*)>(0x1403f5110)(player), 4)); });  // "Active profile ID"
+  }
+  GuardedCrashEntry([&] { textEntry(0x14206f668, game::Field<const char*>(client, 0x38988)); });  // "Zone geometry"
+  {
+    soeutil::StringFixed<128> rulesets;
+    soeutil::InitFixed(rulesets, reinterpret_cast<void**>(0x142049da8));
+    soeutil::StringAssign(&rulesets, reinterpret_cast<const char*>(0x1420664f0));  // "Unknown"
+    rulesets.vtable = reinterpret_cast<void**>(0x142049dc8);
+    GuardedCrashEntry([&] {
+      if (void* manager = *reinterpret_cast<void**>(0x142b19b78)) game::Call<void (*)(void*, soeutil::IString*)>(0x1416ccd10)(manager, &rulesets);
+      printfEntry(0x14206f678, percentS, rulesets.data);  // "Rulesets"
+    });
+    rulesets.vtable = reinterpret_cast<void**>(0x142049da8);
+    soeutil::StringRelease(&rulesets);
+  }
+  if (void* scheduler = *reinterpret_cast<void**>(0x142b19790)) {
+    GuardedCrashEntry([&] { textEntry(0x14206f688, game::Call<const char* (*)(void*)>(0x141345780)(scheduler)); });  // "EventScheduler Current Event"
+  }
+  GuardedCrashEntry([&] { textEntry(0x14206f6a8, *reinterpret_cast<const char**>(0x142aaa1c8)); });               // "LastMaterialPaletteAssetName"
+  GuardedCrashEntry([&] { textEntry(0x14206f6c8, *reinterpret_cast<const char**>(0x142aaa1e0)); });               // "...TextureName"
+  GuardedCrashEntry([&] { valueEntry(0x14035c3f0, 0x14206f6f0, reinterpret_cast<void*>(0x142aaa210)); });          // "...TextureRefCount"
+  GuardedCrashEntry([&] {
+    uint64_t vtable = *reinterpret_cast<uint64_t*>(0x142aaa208);
+    valueEntry(0x14035cb60, 0x14206f718, &vtable);  // "...TextureVTable"
+  });
+  GuardedCrashEntry([&] { intEntry(0x14206f740, *reinterpret_cast<uint8_t*>(0x142aaa214)); });                    // "...TextureIsReady"
+  GuardedCrashEntry([&] { textEntry(0x14206f768, *reinterpret_cast<const char**>(0x142aaa1f8)); });               // "...TextureDebugState"
+  auto doubleEntry = [&](uint64_t name, double value) { valueEntry(0x14035c670, name, &value); };
+  auto flagEntry = [&](uint64_t name, bool set) {
+    if (set) valueEntry(0x14035c0b0, name, reinterpret_cast<const void*>(0x1420632f0));  // "true"
+  };
+  const char* vectorFormat = reinterpret_cast<const char*>(0x14206fc58);  // "%f,%f,%f,%f"
+  auto vectorEntry = [&](uint64_t name, const float* v) {
+    printfEntry(name, vectorFormat, static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2]), static_cast<double>(v[3]));
+  };
+  void* proxy = *reinterpret_cast<void**>(0x142b19b38);
+  auto self = [&] { return game::Call<uint8_t* (*)(void*)>(0x14071e830)(proxy); };
+  if (proxy && self()) {
+    uint8_t* character = self();
+    GuardedCrashEntry([&] {
+      textEntry(0x14206f7d0, game::Field<const char*>(game::Call<uint8_t* (*)(uint8_t*)>(0x1416cb000)(character + 0x738), 8));  // "Character name"
+    });
+    GuardedCrashEntry([&] { textEntry(0x14206f7e0, game::Field<const char*>(character, 0x1CE8)); });  // "Actor definition name"
+    GuardedCrashEntry([&] { textEntry(0x14206f808, game::Field<const char*>(character, 0x870)); });   // "Sub-text name"
+    uint8_t* identity = character + 0x630;
+    GuardedCrashEntry([&] {
+      uint64_t scratch[2];
+      void* guid = (*reinterpret_cast<void* (***)(void*, void*)>(identity))[0x68 / 8](identity, scratch);
+      valueEntry(0x14035cc30, 0x14206f828, guid);  // "Character GUID"
+    });
+    GuardedCrashEntry([&] {
+      uint64_t hash = game::Field<uint64_t>(character, 0x1D0);
+      intEntry(0x14206f838, static_cast<int>(static_cast<uint32_t>(hash >> 32) ^ static_cast<uint32_t>(hash)));  // "Character hash key"
+    });
+    GuardedCrashEntry([&] { intEntry(0x14206f850, game::Field<int>(character, 0x1AC8)); });  // "Model ID"
+    GuardedCrashEntry([&] { doubleEntry(0x14206f860, game::Call<float (*)(uint8_t*)>(0x1403f5ea0)(character)); });  // "Expected speed"
+    GuardedCrashEntry([&] {
+      uint64_t now;
+      int64_t elapsed =
+          static_cast<int64_t>(*game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&now) - game::Field<uint64_t>(client, 0x38810));
+      intEntry(0x14206f5d0, static_cast<int>(elapsed > 0x7fffffff ? 0x7fffffff : elapsed) / 1000);  // "AppRuntime Seconds"
+    });
+    GuardedCrashEntry([&] { flagEntry(0x14206f870, (character[0x1AD8] >> 6) & 1); });  // "Player IsStunned"
+    GuardedCrashEntry([&] {
+      void* combat = character + 0x320;
+      flagEntry(0x14206f8a8, (*reinterpret_cast<bool (***)(void*)>(combat))[0xA8 / 8](combat));  // "Player IsKnockedOut"
+    });
+    GuardedCrashEntry([&] { flagEntry(0x14206f8e8, (game::Field<unsigned>(character, 0x1AD8) >> 9) & 1); });   // "Player IsKnockedBack"
+    GuardedCrashEntry([&] { flagEntry(0x14206f928, (game::Field<unsigned>(character, 0x1AD8) >> 16) & 1); });  // "Player IsPull"
+    GuardedCrashEntry([&] { flagEntry(0x14206f958, (game::Field<unsigned>(character, 0x1AD8) >> 8) & 1); });   // "Player IsNonattackable"
+    GuardedCrashEntry([&] { flagEntry(0x14206f998, character[0x8CA] >= 0x80); });        // "Player IsFalling"
+    GuardedCrashEntry([&] { flagEntry(0x14206f9d0, (character[0x8CA] & 1) != 0); });     // "Player IsIgnoringCollision"
+    GuardedCrashEntry([&] { flagEntry(0x14206fa20, (character[0x8CA] & 0x40) != 0); });  // "Player IsJumping"
+    GuardedCrashEntry([&] { flagEntry(0x14206fa58, (character[0x8CA] & 8) != 0); });     // "Player IsJuking"
+    GuardedCrashEntry([&] { flagEntry(0x14206fa88, (character[0x8CB] & 0x40) != 0); });  // "Player IsInWater"
+    GuardedCrashEntry([&] { flagEntry(0x14206fac0, (character[0x8CB] & 0x20) != 0); });  // "Player IsSwimming"
+    GuardedCrashEntry([&] { flagEntry(0x14206fb00, game::Call<bool (*)(uint8_t*)>(0x140519500)(character)); });  // "Player IsMoving"
+    GuardedCrashEntry([&] { intEntry(0x14206fb30, game::Field<int>(character, 0x1AC4)); });               // "Gender"
+    GuardedCrashEntry([&] { textEntry(0x14206fb38, game::Field<const char*>(character, 0x1A00)); });     // "GetModelCustomizationName"
+    GuardedCrashEntry([&] { textEntry(0x14206fb60, game::Field<const char*>(character, 0x19B8)); });     // "GetHairModelName"
+    GuardedCrashEntry([&] { textEntry(0x14206fb80, game::Field<const char*>(character, 0x19D0)); });     // "GetHeadModelName"
+    for (auto [slot, name] : {std::pair<int, uint64_t>{0xA8, 0x14206fba0}, {0xB0, 0x14206fbc0}}) {  // skin tone, face paint
+      soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      GuardedCrashEntry([&] {
+        auto* result = (*reinterpret_cast<soeutil::IString* (***)(void*, soeutil::IString*)>(identity))[slot / 8](identity, &text);
+        textEntry(name, result->data);
+      });
+      text.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&text);
+    }
+    GuardedCrashEntry([&] {
+      int terrain = game::Field<int>(character, 0x3C8);
+      valueEntry(0x14035ca90, 0x14206fbe0, &terrain);  // "TerrainObjectId"
+    });
+    GuardedCrashEntry([&] { doubleEntry(0x14206fbf0, game::Call<float (*)(uint8_t*)>(0x14050dd30)(character)); });  // "Heading"
+    GuardedCrashEntry([&] { doubleEntry(0x14206fbf8, game::Field<float>(character, 0x1A84)); });                    // "GetVerticalVelocity"
+    GuardedCrashEntry([&] { doubleEntry(0x14206fc10, game::Field<float>(character, 0x1A80)); });                    // "GetVerticalOffset"
+    GuardedCrashEntry([&] { doubleEntry(0x14206fc28, game::Call<float (*)(uint8_t*)>(0x14050cc70)(character)); });  // "DistanceToGround"
+    GuardedCrashEntry([&] { doubleEntry(0x14206fc40, game::Field<float>(character, 0x1A88)); });                    // "GetPlayerBlendTimeSec"
+    GuardedCrashEntry([&] {
+      auto* position = (*reinterpret_cast<float* (***)(uint8_t*)>(character))[0x188 / 8](character);
+      vectorEntry(0x14206fc68, position);  // "GetPosition"
+    });
+    GuardedCrashEntry([&] {
+      alignas(16) float facing[4];
+      game::Call<void (*)(uint8_t*, float*)>(0x14050daa0)(character, facing);
+      vectorEntry(0x14206fc88, facing);  // "GetFacing"
+    });
+    GuardedCrashEntry([&] {
+      alignas(16) float look[4];
+      game::Call<void (*)(uint8_t*, float*)>(0x14050e2e0)(character, look);
+      vectorEntry(0x14206fc98, look);  // "GetLookDirection"
+    });
+    GuardedCrashEntry([&] { vectorEntry(0x14206fcb0, game::Call<float* (*)(uint8_t*)>(0x140511070)(character)); });  // "GetVelocity"
+    GuardedCrashEntry([&] { vectorEntry(0x14206fcc0, reinterpret_cast<float*>(character + 0xF80)); });              // "GetGroundNormal"
+    GuardedCrashEntry([&] { vectorEntry(0x14206fcd0, reinterpret_cast<float*>(character + 0xF90)); });              // "GetGroundPosition"
+  } else {
+    GuardedCrashEntry([&] { valueEntry(0x14035c250, 0x14206f7b8, reinterpret_cast<const void*>(0x14206f798)); });  // "Character Pointer", "ProxiedCharacter is nullptr!"
+    GuardedCrashEntry([&] { textEntry(0x14206f7d0, game::Field<const char*>(client, 0x38C08)); });                 // "Character name"
+  }
+
+  // Renderer / graphics device.
+  auto* display = *reinterpret_cast<uint8_t**>(0x142b19788);
+  if (!display) {
+    GuardedCrashEntry([&] { intEntry(0x14206fce8, 0); });  // "GraphicsDllWrapper is nullptr!"
+  } else {
+    GuardedCrashEntry([&] { intEntry(0x14206fd08, game::Field<int>(display, 0x314)); });                                 // "Render level"
+    GuardedCrashEntry([&] { intEntry(0x14206fd18, game::Call<int (*)(void*)>(0x1404d5aa0)(display)); });                // "Shadow quality"
+    GuardedCrashEntry([&] { intEntry(0x14206fd28, game::Call<int (*)(void*)>(0x1404d5d30)(display)); });                // "Width"
+    GuardedCrashEntry([&] { intEntry(0x14206fd30, game::Call<int (*)(void*)>(0x1404d5820)(display)); });                // "Height"
+    GuardedCrashEntry([&] { intEntry(0x14206fd38, game::Call<int (*)(void*)>(0x1404d5830)(display)); });                // "Hz"
+    GuardedCrashEntry([&] {
+      bool fullscreen = game::Call<bool (*)(void*)>(0x1404d6d30)(display);
+      textEntry(0x14206da18, reinterpret_cast<const char*>(fullscreen ? 0x1420632f0 : 0x1420632f8));  // "Fullscreen", "true"/"false"
+    });
+    if (game::Field<void*>(display, 0x50)) {
+      GuardedCrashEntry([&] { vectorEntry(0x14206fd40, game::Call<float* (*)(void*)>(0x1404d5400)(display)); });  // "Camera position"
+      GuardedCrashEntry([&] { vectorEntry(0x14206fd50, reinterpret_cast<float*>(display + 0x250)); });           // "Camera orientation"
+      GuardedCrashEntry([&] {
+        float angle = game::Field<float>(display, 0x30C);
+        valueEntry(0x14035c590, 0x14206fd68, &angle);  // "ViewAngleHorz"
+      });
+    } else {
+      GuardedCrashEntry([&] { valueEntry(0x14035c180, 0x14206fd40, reinterpret_cast<const void*>(0x14206fd78)); });  // "Camera position", "nullptr"
+    }
+    uint8_t* engine = game::Field<uint8_t*>(display, 0x40);
+    void* device = nullptr;
+    if (!engine) {
+      GuardedCrashEntry([&] { intEntry(0x14206fd80, 0); });  // "Deep::Engine* is nullptr!"
+    } else {
+      device = game::Field<void*>(engine, 8);
+    }
+    if (!device) GuardedCrashEntry([&] { intEntry(0x14206fda0, 0); });  // "GraphicsDriver::DeviceInterface* is nullptr!"
+    auto* adapter = game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b19780), 0x38888);
+    auto adapterEntry = [&](uint64_t writerFn, uint64_t name, int offset) {
+      GuardedCrashEntry([&] { valueEntry(writerFn, name, adapter + offset); });
+    };
+    auto deviceIntEntry = [&](uint64_t writerFn, uint64_t name, int slot) {
+      GuardedCrashEntry([&] {
+        int value = (*reinterpret_cast<int (***)(void*)>(device))[slot / 8](device);
+        valueEntry(writerFn, name, &value);
+      });
+    };
+    if (adapter) {
+      adapterEntry(0x14035c4c0, 0x14206fdd0, 0x480);  // "DriverVersionHigh"
+      adapterEntry(0x14035c4c0, 0x14206fde8, 0x484);  // "DriverVersionLow"
+    }
+    if (device) {
+      deviceIntEntry(0x14035c4c0, 0x14206fe00, 0x328);  // "VendorID"
+      deviceIntEntry(0x14035c4c0, 0x14206fe10, 0x320);  // "DeviceID"
+    }
+    if (adapter) {
+      adapterEntry(0x14035c4c0, 0x14206fe20, 0x490);  // "SubsystemID"
+      adapterEntry(0x14035c4c0, 0x14206fe30, 0x494);  // "RevisionID"
+      adapterEntry(0x14035c9c0, 0x14206fe40, 0);      // "DriverName"
+      adapterEntry(0x14035c8f0, 0x14206fe50, 0x440);  // "DeviceName"
+      adapterEntry(0x14035c9c0, 0x14206fe60, 0x220);  // "DeviceDesc"
+      adapterEntry(0x14035c4c0, 0x14206fe70, 0x4B0);  // "DesktopFormat"
+      adapterEntry(0x14035c590, 0x14206fe80, 0x4A0);  // "MaxVertexShaderVersion"
+      adapterEntry(0x14035c590, 0x14206fe98, 0x4A4);  // "MaxPixelShaderVersion"
+      adapterEntry(0x14035cd00, 0x14206feb0, 0x517);  // "DX11Available"
+    }
+    if (device) {
+      deviceIntEntry(0x14035c3f0, 0x14206fec0, 0x148);  // "MaxMrts"
+      deviceIntEntry(0x14035c3f0, 0x14206fec8, 0x2F0);  // "GetTextureQuality"
+      deviceIntEntry(0x14035c3f0, 0x14206fee0, 0x2E8);  // "GetVideoMemoryAvailableAtStartup"
+    }
+    if (auto* world = *reinterpret_cast<uint8_t**>(0x142b19918)) {
+      auto worldActor = [&](int slot) { return (*reinterpret_cast<uint8_t* (***)(uint8_t*)>(world))[slot / 8](world); };
+      uint8_t* drawing = worldActor(0x1C0);
+      uint8_t* drawn = worldActor(0x1C8);
+      uint8_t* updating = worldActor(0x1D0);
+      // "%s @ x, y, z" with the actor position kept in a function-local static (thread-safe init).
+      auto actorEntry = [&](uint8_t* actor, uint64_t name, uint64_t guard, uint64_t storage) {
+        if (!actor || !game::Field<void*>(actor, 0x398)) return;
+        GuardedCrashEntry([&] {
+          auto* guardWord = reinterpret_cast<int*>(guard);
+          unsigned tlsIndex = *reinterpret_cast<unsigned*>(0x143c466a8);
+          auto* tls = reinterpret_cast<uint8_t**>(__readgsqword(0x58));
+          if (*guardWord > game::Field<int>(tls[tlsIndex], 0x10)) {
+            game::Call<void (*)(int*)>(0x140d100ac)(guardWord);  // _Init_thread_header
+            if (*guardWord == -1) {
+              std::memset(reinterpret_cast<void*>(storage), 0, 16);
+              game::Call<void (*)(int*)>(0x140d1004c)(guardWord);  // _Init_thread_footer
+            }
+          }
+          alignas(16) uint8_t scratch[16];
+          std::memcpy(reinterpret_cast<void*>(storage), game::Call<void* (*)(uint8_t*, void*)>(0x141443390)(actor, scratch), 16);
+          auto* position = reinterpret_cast<float*>(storage);
+          printfEntry(name, reinterpret_cast<const char*>(0x14206ff08), game::Field<const char*>(game::Field<uint8_t*>(actor, 0x398), 0x40),
+                      static_cast<double>(position[0]), static_cast<double>(position[1]), static_cast<double>(position[2]));  // "%s @ %f, %f, %f"
+        });
+      };
+      actorEntry(drawing, 0x14206ff18, 0x142b19d40, 0x142b19d30);   // "Last Actor Drawing"
+      actorEntry(drawn, 0x14206ff30, 0x142b19d60, 0x142b19d50);     // "Last Actor Drawn"
+      actorEntry(updating, 0x14206ff48, 0x142b19d80, 0x142b19d70);  // "Last Actor Updating"
+    }
+  }
+
+  // Morpheme animation runtime.
+  if (auto* morpheme = *reinterpret_cast<uint8_t**>(0x142b19d88)) {
+    GuardedCrashEntry([&] { intEntry(0x14206ff60, (*reinterpret_cast<int (***)(void*)>(morpheme))[1](morpheme)); });  // "Morpheme PersistantMemoryUsage"
+    unsigned used = 0;
+    unsigned total = 0;
+    auto usageEntry = [&](uint64_t name) {
+      float percent = total ? static_cast<float>(used) / static_cast<float>(total) * *reinterpret_cast<float*>(0x1425ba0a0) : 0.0f;
+      printfEntry(name, reinterpret_cast<const char*>(0x14206ff80), used, total, static_cast<double>(percent));  // "Used=%u Total=%u (%.2f%%)"
+    };
+    GuardedCrashEntry([&] {
+      total = 0;
+      used = (*reinterpret_cast<unsigned (***)(void*, unsigned*)>(morpheme))[2](morpheme, &total);
+      usageEntry(0x14206ffa0);  // "Morpheme TemporaryMemoryUsage Watermark"
+    });
+    GuardedCrashEntry([&] {
+      game::Call<void (*)(void*, unsigned*, unsigned*)>(0x1413a0b20)(*reinterpret_cast<void**>(0x142b19a90), &used, &total);
+      usageEntry(0x14206ffc8);  // "Morpheme PhysicsManager TempMemoryUsage Watermark"
+    });
+    GuardedCrashEntry([&] { valueEntry(0x14035c820, 0x142070000, morpheme + 0xA478); });  // "Morpheme Last Removed"
+    auto* network = game::Call<uint8_t* (*)(uint8_t*)>(0x14139e0b0)(morpheme);
+    auto* definition = network ? game::Field<uint8_t*>(network, 0x10) : nullptr;
+    if (definition) {
+      GuardedCrashEntry([&] { textEntry(0x142070018, game::Field<const char*>(definition, 0x18)); });  // "Morpheme Last Network Updated"
+      // Active requests: a request list {vtable 0x14206f580, head +8, +0x10, count +0x18, pool +0x20}.
+      alignas(16) uint8_t requests[0x1000] = {};
+      game::Field<uint64_t>(requests, 0) = 0x14206f580;
+      game::Call<void (*)(void*)>(0x1403946b0)(requests + 0x20);
+      alignas(16) uint8_t collector[0x20] = {};
+      game::Field<uint64_t>(collector, 0) = 0x1420637e0;
+      game::Call<void (*)(void*, void*)>(0x1403b3830)(collector, requests);
+      game::Call<void (*)(void*, void*)>(0x141398100)(network, collector);
+      using NameFn = soeutil::IString* (*)(void*, soeutil::IString*);
+      for (auto* node = game::Field<uint8_t*>(requests, 8); node; node = game::Field<uint8_t*>(node, 8)) {
+        soeutil::IString name;
+        GuardedCrashEntry([&] {
+          printfEntry(0x142070038, percentS, game::Call<NameFn>(0x140474ab0)(node, &name)->data);  // "Morpheme Active Request"
+        });
+        name.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&name);
+      }
+      auto netVtable = [&] { return *reinterpret_cast<void***>(network); };
+      int nodeCount = reinterpret_cast<int (*)(void*)>(netVtable()[0x68 / 8])(network);
+      for (int i = 0; i < nodeCount; ++i) {
+        GuardedCrashEntry([&] {
+          const char* nodeName = reinterpret_cast<const char* (*)(void*, int)>(netVtable()[0x70 / 8])(network, i);
+          printfEntry(0x142070050, percentS, nodeName);  // "Morpheme Active Node"
+        });
+      }
+      int variableCount = game::Call<int (*)(uint8_t*)>(0x141381230)(network);
+      auto variableType = [&](uint64_t id) { return game::Call<int (*)(uint8_t*, uint64_t)>(0x141381280)(network, id); };
+      for (int i = 0; i < variableCount; ++i) {
+        uint64_t id = 0;
+        game::Call<void (*)(uint8_t*, uint64_t*, int)>(0x141381260)(network, &id, i);
+        const char* variable = reinterpret_cast<const char*>(0x142070070);  // "Morpheme Variable"
+        if (variableType(id) == 0) {
+          soeutil::IString name;
+          GuardedCrashEntry([&] {
+            const char* text = game::Call<NameFn>(0x140474ab0)(&id, &name)->data;
+            float value = reinterpret_cast<float (*)(void*, uint64_t, float, int)>(netVtable()[0xE8 / 8])(network, id, 0.0f, 0);
+            game::Call<PrintfFn>(0x140316650)(writer, variable, reinterpret_cast<const char*>(0x142070068), text, static_cast<double>(value));  // "%s = %f"
+          });
+          name.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&name);
+        } else if (variableType(id) == 3) {
+          soeutil::IString name;
+          GuardedCrashEntry([&] {
+            alignas(16) float value[4];
+            reinterpret_cast<void (*)(void*, float*, uint64_t, const void*)>(netVtable()[0xF8 / 8])(network, value, id,
+                                                                                                  reinterpret_cast<const void*>(0x142b06ac0));
+            const char* text = game::Call<NameFn>(0x140474ab0)(&id, &name)->data;
+            game::Call<PrintfFn>(0x140316650)(writer, variable, reinterpret_cast<const char*>(0x142070088), text, static_cast<double>(value[0]),
+                                              static_cast<double>(value[1]), static_cast<double>(value[2]));  // "%s = %f %f %f"
+          });
+          name.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&name);
+        } else if (variableType(id) == 4) {
+          soeutil::IString name;
+          GuardedCrashEntry([&] {
+            alignas(16) float fallback[4];
+            std::memcpy(fallback, reinterpret_cast<const void*>(0x142b06ac0), sizeof(fallback));
+            alignas(16) float value[4];
+            reinterpret_cast<void (*)(void*, float*, uint64_t, const float*)>(netVtable()[0x108 / 8])(network, value, id, fallback);
+            const char* text = game::Call<NameFn>(0x140474ab0)(&id, &name)->data;
+            game::Call<PrintfFn>(0x140316650)(writer, variable, reinterpret_cast<const char*>(0x142070098), text, static_cast<double>(value[0]),
+                                              static_cast<double>(value[1]), static_cast<double>(value[2]),
+                                              static_cast<double>(value[3]));  // "%s = %f %f %f %f"
+          });
+          name.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&name);
+        }
+      }
+      game::Call<void (*)(void*)>(0x1403a7370)(requests);  // request list destructor
+    }
+  }
+
+  // Machine information.
+  uint64_t memory[6];
+  if (game::Call<bool (*)(uint64_t*)>(0x141341e10)(memory)) {
+    const char* totalAvail = reinterpret_cast<const char*>(0x1420700b0);  // "Total %I64d, Avail %I64d"
+    GuardedCrashEntry([&] { printfEntry(0x1420700d0, totalAvail, memory[0], memory[1]); });  // "Physical Memory"
+    GuardedCrashEntry([&] { printfEntry(0x1420700e0, totalAvail, memory[4], memory[5]); });  // "Virtual Memory"
+    GuardedCrashEntry([&] { printfEntry(0x1420700f0, totalAvail, memory[2], memory[3]); });  // "Page File"
+  }
+  soeutil::IString osName{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  soeutil::IString osVersion{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  game::Call<void (*)(soeutil::IString*)>(0x14032e460)(&osName);
+  game::Call<void (*)(soeutil::IString*)>(0x14032e590)(&osVersion);
+  GuardedCrashEntry([&] { printfEntry(0x142070110, reinterpret_cast<const char*>(0x142070100), osName.data, osVersion.data); });  // "%s Version %s"
+  GuardedCrashEntry([&] {
+    uint8_t is64Bit = game::Call<uint8_t (*)(uint8_t*)>(0x14047ba80)(client);
+    valueEntry(0x14035cd00, 0x142070118, &is64Bit);  // "64-bit Processor"
+  });
+  soeutil::StringFixed<64> processor;
+  soeutil::InitFixed(processor, reinterpret_cast<void**>(0x142049d00));
+  game::Call<void (*)(soeutil::IString*)>(0x141349700)(&processor);
+  GuardedCrashEntry([&] { textEntry(0x142070130, processor.data); });  // "Processor"
+  soeutil::StringFixed<64> systemName;
+  soeutil::InitFixed(systemName, reinterpret_cast<void**>(0x142049d00));
+  if (game::Call<bool (*)(soeutil::IString*)>(0x14032e0c0)(&systemName))
+    GuardedCrashEntry([&] { textEntry(0x142070140, systemName.data); });  // "System Name"
+  else
+    GuardedCrashEntry([&] { valueEntry(0x14035c180, 0x142070140, reinterpret_cast<const void*>(0x1420664f0)); });  // "Unknown"
+  systemName.vtable = reinterpret_cast<void**>(0x142049ce0);
+  soeutil::StringRelease(&systemName);
+  processor.vtable = reinterpret_cast<void**>(0x142049ce0);
+  soeutil::StringRelease(&processor);
+  osVersion.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&osVersion);
+  osName.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&osName);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -4902,6 +5314,7 @@ REBUILD_FUNCTION(GameClient_ShutdownSystems, 0x1403e57f0, GameClientShutdownSyst
 REBUILD_FUNCTION(GameClient_ShutdownGame, 0x1403e42c0, GameClientShutdownGame);
 REBUILD_FUNCTION(GameClient_GiveTime, 0x1403fa350, GameClientGiveTime);
 REBUILD_FUNCTION(GameClient_CreateAppServices, 0x1403d8a00, GameClientCreateAppServices);
+REBUILD_FUNCTION(GameClient_WriteCrashInfo, 0x14042c8a0, GameClientWriteCrashInfo);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
