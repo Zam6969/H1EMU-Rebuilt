@@ -170,6 +170,29 @@ struct IdListPacket {
 };
 static_assert(offsetof(IdListPacket, mode) == 0x28 && sizeof(IdListPacket) == 0x30);
 
+struct Packet35 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int id;      // -1 by default
+  bool flag;   // true by default
+  int value;   // +0x18
+  int padding2;
+};
+static_assert(offsetof(Packet35, value) == 0x18 && sizeof(Packet35) == 0x20);
+
+struct Packet43 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int stringId;  // +0x10, used when text is empty
+  int padding2;
+  soeutil::IString text;  // +0x18
+  int value;              // +0x30
+  int kind;               // +0x34, 3 by default
+};
+static_assert(offsetof(Packet43, text) == 0x18 && offsetof(Packet43, kind) == 0x34 && sizeof(Packet43) == 0x38);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -911,13 +934,48 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x35: {
+      Packet35 packet{reinterpret_cast<void**>(0x142063cb8), 0x35, 0, -1, true, 0};
+      if (!data) break;
+      PacketReader reader{data, length, data, data + length, 0};
+      game::Call<void (*)(Packet35*, PacketReader*)>(0x140373140)(&packet, &reader);
+      if (static_cast<uint8_t>(reader.failed)) break;  // trailing bytes are not checked here
+      if (void* owner = Member(game, 0x7105)) {
+        if (void* target = game::Call<void* (*)(void*, int)>(0x141864220)(owner, packet.id))
+          game::Call<void (*)(void*, bool, int)>(0x14183b040)(target, packet.flag, packet.value);
+      }
+      break;
+    }
+    case 0x43: {  // localized message: by string id, or by literal text
+      Packet43 packet{reinterpret_cast<void**>(0x142063d28), 0x43, 0, 0, 0,
+                      {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0}, 0, 3};
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(Packet43*, PacketReader*)>(0x1403732b0)(&packet, &reader);
+        if (!static_cast<uint8_t>(reader.failed)) {
+          soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
+          void** vtable = *reinterpret_cast<void***>(strings);
+          if (packet.text.length != 0)
+            reinterpret_cast<bool (*)(void*, const char*, soeutil::IString*)>(vtable[3])(strings, packet.text.data, &text);
+          else
+            reinterpret_cast<bool (*)(void*, int, soeutil::IString*)>(vtable[2])(strings, packet.stringId, &text);
+          void* extra = game::Call<void* (*)(Packet43*)>(0x1403f7190)(&packet);
+          game::Call<void (*)(uint8_t*, const char*, int, void*)>(0x1404706a0)(game, text.data, packet.value, extra);
+          text.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&text);
+        }
+      }
+      game::Call<void (*)(Packet43*)>(0x1403b0ed0)(&packet);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x35:
-    case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
+    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
+    case 0x3E: case 0x3F: case 0x40: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
     case 0x78: case 0x7D: case 0x99:
    
     case 0xDE: case 0xE3:
