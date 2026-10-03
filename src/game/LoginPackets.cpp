@@ -146,13 +146,146 @@ struct PacketServerListReply : LoginPacket {
 };
 static_assert(offsetof(PacketServerListReply, servers) == 0x10);
 
-template <typename Packet>
-bool ReadWith(uintptr_t readFn, Packet* packet, LoginReader* reader) {
-  game::Call<void (*)(Packet*, LoginReader*)>(readFn)(packet, reader);
-  return static_cast<uint8_t>(reader->failed) == 0;
+// Inline read primitives: a short read zeroes the field, pins the cursor at
+// the end and sets the failed flag.
+template <typename T>
+T ReadValue(LoginReader* in) {
+  if (in->end < in->cursor + sizeof(T)) {
+    in->cursor = in->end;
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    return T{};
+  }
+  T value = *reinterpret_cast<const T*>(in->cursor);
+  in->cursor += sizeof(T);
+  return value;
 }
 
+int ReadOpcode(LoginReader* in) { return ReadValue<int8_t>(in); }
+
+// int32 count + bytes into a SoeUtil byte array.
+void ReadByteArray(LoginReader* in, ByteArray* array) {
+  int count = 0;
+  if (in->end < in->cursor + 4) {
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    in->cursor = in->end;
+  } else {
+    count = *reinterpret_cast<const int*>(in->cursor);
+    in->cursor += 4;
+  }
+  if (array->size < count) {
+    game::Call<void (*)(ByteArray*, int)>(0x140339a70)(array, count);  // Array::Resize
+  } else {
+    array->size = count;
+  }
+  int remaining = static_cast<int>(reinterpret_cast<uintptr_t>(in->end)) -
+                  static_cast<int>(reinterpret_cast<uintptr_t>(in->cursor));
+  if (count < 0 || remaining < count) {
+    in->cursor = in->end;
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+  } else if (count > 0) {
+    game::Call<void (*)(LoginReader*, void*, int)>(0x1403545d0)(in, array->data, count);  // ReadBytes
+  }
+}
+
+bool Succeeded(const LoginReader& in) { return static_cast<uint8_t>(in.failed) == 0; }
+
 }  // namespace
+
+// 0x141636c30: PacketCharacterDeleteReply::Read
+void ReadCharacterDeleteReply(PacketCharacterDeleteReply* packet, LoginReader* in) {
+  packet->opcode = ReadOpcode(in);
+  packet->characterId = ReadValue<uint64_t>(in);
+  packet->status = ReadValue<int>(in);
+  ReadByteArray(in, packet->payload);
+}
+
+// 0x141636d50: PacketCharacterLoginReply::Read
+void ReadCharacterLoginReply(PacketCharacterLoginReply* packet, LoginReader* in) {
+  packet->opcode = ReadOpcode(in);
+  packet->characterId = ReadValue<uint64_t>(in);
+  packet->serverId = ReadValue<uint64_t>(in);
+  packet->status = ReadValue<int>(in);
+  ReadByteArray(in, packet->payload);
+}
+
+// 0x141636f40: PacketCharacterTransferServerReply::Read
+void ReadCharacterTransferReply(PacketCharacterTransferReply* packet, LoginReader* in) {
+  packet->opcode = ReadOpcode(in);
+  packet->characterId = ReadValue<uint64_t>(in);
+  packet->serverId = ReadValue<uint64_t>(in);
+  packet->status = ReadValue<int>(in);
+  ReadByteArray(in, packet->payload);
+}
+
+// 0x141637280: PacketTunnelAppPacketServerToClient::Read
+void ReadTunnelAppPacket(PacketTunnelAppPacketServerToClient* packet, LoginReader* in) {
+  packet->opcode = ReadOpcode(in);
+  packet->serverId = ReadValue<uint64_t>(in);
+  ReadByteArray(in, packet->payload);
+}
+
+// 0x141637090: PacketLoginReply::Read. The string / array members are read
+// by shared helpers.
+void ReadLoginReply(uint8_t* packet, LoginReader* in) {
+  *reinterpret_cast<int*>(packet + 0x08) = ReadOpcode(in);
+  *reinterpret_cast<bool*>(packet + 0x10) = ReadValue<uint8_t>(in) != 0;  // loggedIn
+  *reinterpret_cast<int*>(packet + 0x14) = ReadValue<int>(in);            // status
+  *reinterpret_cast<int*>(packet + 0x18) = ReadValue<int>(in);            // resultCode
+  *reinterpret_cast<bool*>(packet + 0x1C) = ReadValue<uint8_t>(in) != 0;  // isMember
+  *reinterpret_cast<bool*>(packet + 0x1D) = ReadValue<uint8_t>(in) != 0;  // isInternal
+  using ReadMemberFn = void (*)(LoginReader*, void*);
+  game::Call<ReadMemberFn>(0x140467f40)(in, packet + 0x20);                             // namespace string
+  game::Call<ReadMemberFn>(0x1416394c0)(in, *reinterpret_cast<void**>(packet + 0x50));  // account features
+  game::Call<ReadMemberFn>(0x14037afa0)(in, *reinterpret_cast<void**>(packet + 0x48));  // application payload
+  game::Call<ReadMemberFn>(0x141639760)(in, *reinterpret_cast<void**>(packet + 0x58));  // error details
+  game::Call<ReadMemberFn>(0x140467f40)(in, packet + 0x60);                             // ip country code
+}
+
+// 0x14163ab60: PacketCharacterSelectInfoReply::Read. Returns true on failure.
+bool ReadCharacterSelectInfoReply(const uint8_t* data, int length, PacketCharacterSelectInfoReply* packet) {
+  LoginReader in = MakeReader(data, length);
+  packet->opcode = ReadOpcode(&in);
+  packet->status = ReadValue<int>(&in);
+  packet->canBypassServerLock = ReadValue<uint8_t>(&in) != 0;
+  bool failed = Succeeded(in) == false;
+  PacketList* characters = packet->characters;
+  while (characters->head) {
+    game::Call<void (*)(PacketList*, void*)>(0x14163f100)(characters, characters->head);
+  }
+  const uint8_t* countEnd = in.cursor + 4;
+  if (in.end < countEnd) return true;
+  int count = *reinterpret_cast<const int*>(in.cursor);
+  in.cursor = countEnd;
+  for (int i = 0; i < count; ++i) {
+    if (failed) return true;
+    void* entity = game::Call<void* (*)(PacketList*)>(0x14163df40)(characters);  // AddNew
+    game::Call<void (*)(void*, LoginReader*)>(0x141636ad0)(entity, &in);         // EntityDetails::Read
+    failed = !Succeeded(in);
+  }
+  return failed;
+}
+
+// 0x140adbaf0: List<Login::ClientGameServerData>::Read (count + entries,
+// each followed by a bool).
+void ReadServerList(LoginReader* in, PacketList* servers) {
+  while (servers->head) {
+    game::Call<void (*)(PacketList*, void*)>(0x140adcbf0)(servers, servers->head);
+  }
+  const uint8_t* countEnd = in->cursor + 4;
+  if (in->end < countEnd) {
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    in->cursor = in->end;
+    return;
+  }
+  int count = *reinterpret_cast<const int*>(in->cursor);
+  in->cursor = countEnd;
+  for (int i = 0; i < count; ++i) {
+    if (!Succeeded(*in)) return;
+    auto* entry = game::Call<uint8_t* (*)(PacketList*)>(0x140adc5e0)(servers);  // AddNew
+    game::Call<void (*)(void*, LoginReader*)>(0x140adb760)(*reinterpret_cast<void**>(entry), in);
+    *reinterpret_cast<bool*>(entry + 8) = ReadValue<uint8_t>(in) != 0;
+  }
+}
 
 // 0x141633b30: PacketForcedDisconnect {header, int32 reason}.
 void LoginDispatchForcedDisconnect(uint8_t* api, const uint8_t* data, int length, Handler handler) {
@@ -213,7 +346,8 @@ void LoginDispatchCharacterLoginReply(uint8_t* api, const uint8_t* data, int len
   packet.payload = &packet.payloadStorage;
   InitByteArray(packet.payloadStorage);
   LoginReader reader = MakeReader(data, length);
-  if (ReadWith(0x141636d50, &packet, &reader)) handler(HandlerThis(api), &packet);
+  ReadCharacterLoginReply(&packet, &reader);
+  if (Succeeded(reader)) handler(HandlerThis(api), &packet);
   DestroyByteArray(packet.payloadStorage);
 }
 
@@ -227,7 +361,8 @@ void LoginDispatchCharacterDeleteReply(uint8_t* api, const uint8_t* data, int le
   packet.payload = &packet.payloadStorage;
   InitByteArray(packet.payloadStorage);
   LoginReader reader = MakeReader(data, length);
-  if (ReadWith(0x141636c30, &packet, &reader)) handler(HandlerThis(api), &packet);
+  ReadCharacterDeleteReply(&packet, &reader);
+  if (Succeeded(reader)) handler(HandlerThis(api), &packet);
   DestroyByteArray(packet.payloadStorage);
 }
 
@@ -242,7 +377,8 @@ void LoginDispatchCharacterTransferReply(uint8_t* api, const uint8_t* data, int 
   packet.status = 0;
   InitByteArray(packet.payloadStorage);
   LoginReader reader = MakeReader(data, length);
-  if (ReadWith(0x141636f40, &packet, &reader)) handler(HandlerThis(api), &packet);
+  ReadCharacterTransferReply(&packet, &reader);
+  if (Succeeded(reader)) handler(HandlerThis(api), &packet);
   DestroyByteArray(packet.payloadStorage);
 }
 
@@ -255,7 +391,8 @@ void LoginDispatchTunnelAppPacket(uint8_t* api, const uint8_t* data, int length,
   packet.payload = &packet.payloadStorage;
   InitByteArray(packet.payloadStorage);
   LoginReader reader = MakeReader(data, length);
-  if (ReadWith(0x141637280, &packet, &reader)) handler(HandlerThis(api), &packet);
+  ReadTunnelAppPacket(&packet, &reader);
+  if (Succeeded(reader)) handler(HandlerThis(api), &packet);
   DestroyByteArray(packet.payloadStorage);
 }
 
@@ -265,7 +402,7 @@ void LoginDispatchLoginReply(uint8_t* api, const uint8_t* data, int length, Hand
   alignas(8) uint8_t packet[0x1E0];
   game::Call<void (*)(void*)>(0x14163b9b0)(packet);
   LoginReader reader = MakeReader(data, length);
-  game::Call<void (*)(void*, LoginReader*)>(0x141637090)(packet, &reader);
+  ReadLoginReply(packet, &reader);
   if (static_cast<uint8_t>(reader.failed) == 0) handler(HandlerThis(api), packet);
   game::Call<void (*)(void*)>(0x14163c2f0)(packet);
 }
@@ -281,7 +418,7 @@ void LoginDispatchCharacterSelectInfoReply(uint8_t* api, const uint8_t* data, in
   packet.characters = &packet.characterStorage;
   InitByteArray(packet.unusedArray);
   packet.characterStorage = {reinterpret_cast<void**>(0x1424bfd18), nullptr, nullptr, 0, 0};
-  bool failed = game::Call<bool (*)(const uint8_t*, int, void*)>(0x14163ab60)(data, length, &packet);
+  bool failed = ReadCharacterSelectInfoReply(data, length, &packet);
   if (!failed) handler(HandlerThis(api), &packet);
   packet.characterStorage.vtable = reinterpret_cast<void**>(0x1424bfd18);
   while (packet.characterStorage.head) {
@@ -305,7 +442,7 @@ void LoginDispatchServerListReply(uint8_t* api, const uint8_t* data, int length,
     reader.cursor = reader.end;
   }
   reader.failed = headerOk ? 0 : 1;
-  game::Call<void (*)(LoginReader*, PacketList*)>(0x140adbaf0)(&reader, &packet.servers);
+  ReadServerList(&reader, &packet.servers);
   if (static_cast<uint8_t>(reader.failed) == 0) handler(HandlerThis(api), &packet);
   packet.servers.vtable = reinterpret_cast<void**>(0x1424bfd80);
   while (packet.servers.head) {
@@ -313,6 +450,13 @@ void LoginDispatchServerListReply(uint8_t* api, const uint8_t* data, int length,
   }
 }
 
+REBUILD_FUNCTION(Login_ReadCharacterDeleteReply, 0x141636c30, ReadCharacterDeleteReply);
+REBUILD_FUNCTION(Login_ReadCharacterLoginReply, 0x141636d50, ReadCharacterLoginReply);
+REBUILD_FUNCTION(Login_ReadCharacterTransferReply, 0x141636f40, ReadCharacterTransferReply);
+REBUILD_FUNCTION(Login_ReadTunnelAppPacket, 0x141637280, ReadTunnelAppPacket);
+REBUILD_FUNCTION(Login_ReadLoginReply, 0x141637090, ReadLoginReply);
+REBUILD_FUNCTION(Login_ReadCharacterSelectInfoReply, 0x14163ab60, ReadCharacterSelectInfoReply);
+REBUILD_FUNCTION(Login_ReadServerList, 0x140adbaf0, ReadServerList);
 REBUILD_FUNCTION(Login_DispatchForcedDisconnect, 0x141633b30, LoginDispatchForcedDisconnect);
 REBUILD_FUNCTION(Login_DispatchCharacterCreateReply, 0x141633080, LoginDispatchCharacterCreateReply);
 REBUILD_FUNCTION(Login_DispatchCharacterLoginReply, 0x1416334b0, LoginDispatchCharacterLoginReply);
