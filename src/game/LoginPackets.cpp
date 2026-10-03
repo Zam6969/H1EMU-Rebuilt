@@ -9,6 +9,7 @@
 #include "core/hook.h"
 #include "soeutil/Allocator.h"
 #include "soeutil/Memory.h"
+#include "soeutil/String.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -224,6 +225,192 @@ void ReadTunnelAppPacket(PacketTunnelAppPacketServerToClient* packet, LoginReade
   ReadByteArray(in, packet->payload);
 }
 
+// 0x14037afa0: Array<unsigned char>::Read (int32 count + bytes).
+void ReadByteArrayMember(LoginReader* in, ByteArray* array) { ReadByteArray(in, array); }
+
+// 0x140467f40: IString::Read (int32 length + chars).
+void ReadString(LoginReader* in, soeutil::IString* string) {
+  const uint8_t* end = in->end;
+  int length = 0;
+  bool ok = true;
+  if (end < in->cursor + 4) {
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    in->cursor = end;
+  } else {
+    length = *reinterpret_cast<const int*>(in->cursor);
+    in->cursor += 4;
+    ok = length >= 0;
+  }
+  if (ok && length <= static_cast<int>(reinterpret_cast<uintptr_t>(end)) -
+                          static_cast<int>(reinterpret_cast<uintptr_t>(in->cursor))) {
+    soeutil::StringAssignN(string, reinterpret_cast<const char*>(in->cursor), length);
+    in->cursor += length;
+    return;
+  }
+  *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+  in->cursor = end;
+}
+
+// 0x141637370: three consecutive u64 ids.
+void ReadIdTriple(uint64_t* ids, LoginReader* in) {
+  ids[0] = ReadValue<uint64_t>(in);
+  ids[1] = ReadValue<uint64_t>(in);
+  ids[2] = ReadValue<uint64_t>(in);
+}
+
+// Login::EntityDetails: three ids, status, payload bytes.
+struct EntityDetails {
+  uint64_t ids[3];
+  int status;
+  int padding;
+  ByteArray payload;
+};
+static_assert(offsetof(EntityDetails, status) == 0x18);
+static_assert(offsetof(EntityDetails, payload) == 0x20);
+
+// 0x141636ad0: EntityDetails::Read
+void ReadEntityDetails(EntityDetails* entity, LoginReader* in) {
+  ReadIdTriple(entity->ids, in);
+  entity->status = ReadValue<int>(in);
+  ReadByteArray(in, &entity->payload);
+}
+
+// 0x140adb760: Login::ClientGameServerData::Read (offsets into the 0x1200
+// byte server record; the string members are IStrings).
+void ReadServerData(uint8_t* server, LoginReader* in) {
+  *reinterpret_cast<uint64_t*>(server + 0x10) = ReadValue<uint64_t>(in);  // server id
+  server[0x11C8] = ReadValue<uint8_t>(in);                                // allowed access
+  ReadString(in, reinterpret_cast<soeutil::IString*>(server + 0x18));     // name
+  *reinterpret_cast<int*>(server + 0x78) = ReadValue<int>(in);
+  ReadString(in, reinterpret_cast<soeutil::IString*>(server + 0x80));
+  *reinterpret_cast<int*>(server + 0x1A0) = ReadValue<int>(in);
+  *reinterpret_cast<int*>(server + 0x1A4) = ReadValue<int>(in);
+  ReadString(in, reinterpret_cast<soeutil::IString*>(server + 0x1A8));
+  *reinterpret_cast<int*>(server + 0x11CC) = ReadValue<int>(in);
+  ReadString(in, reinterpret_cast<soeutil::IString*>(server + 0x11D0));
+  ReadString(in, reinterpret_cast<soeutil::IString*>(server + 0x11E8));
+}
+
+// Login::AccountFeature node in the reply's HashListMap<int, AccountFeature>.
+struct AccountFeatureNode {
+  int id;
+  bool active;
+  int unknown8;
+  int unknownC;
+  soeutil::StringFixed<32> name;  // +0x10
+  AccountFeatureNode* next;       // +0x50 (insertion-order list)
+  AccountFeatureNode* previous;   // +0x58
+  int key;                        // +0x60
+  int padding;
+  AccountFeatureNode* bucketNext;  // +0x68
+};
+static_assert(offsetof(AccountFeatureNode, name) == 0x10);
+static_assert(offsetof(AccountFeatureNode, next) == 0x50);
+static_assert(offsetof(AccountFeatureNode, key) == 0x60);
+static_assert(offsetof(AccountFeatureNode, bucketNext) == 0x68);
+
+struct AccountFeatureMap {
+  void** vtable;  // slot 4 allocates a node
+  void* unknown8;
+  AccountFeatureNode* head;
+  AccountFeatureNode* tail;
+  int count;
+  int padding;
+  AccountFeatureNode* buckets[32];
+};
+static_assert(offsetof(AccountFeatureMap, head) == 0x10);
+static_assert(offsetof(AccountFeatureMap, count) == 0x20);
+static_assert(offsetof(AccountFeatureMap, buckets) == 0x28);
+
+constexpr uintptr_t kVtStringFixed32 = 0x14204a378;
+
+// 0x1416394c0: HashListMap<int, AccountFeature>::Read (count, then key +
+// feature per entry; entries are appended and hashed by key & 31).
+void ReadAccountFeatures(LoginReader* in, AccountFeatureMap* map) {
+  while (map->head) {
+    if (map->head) game::Call<void (*)(AccountFeatureMap*)>(0x140732b50)(map);  // RemoveHead
+  }
+  const uint8_t* countEnd = in->cursor + 4;
+  if (in->end < countEnd) {
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    in->cursor = in->end;
+    return;
+  }
+  int count = *reinterpret_cast<const int*>(in->cursor);
+  in->cursor = countEnd;
+  for (int i = 0; i < count; ++i) {
+    if (!Succeeded(*in)) return;
+    int key = ReadValue<int>(in);
+    using AllocFn = AccountFeatureNode* (*)(AccountFeatureMap*);
+    AccountFeatureNode* node = reinterpret_cast<AllocFn>(map->vtable[4])(map);
+    if (node) {
+      node->id = 0;
+      node->active = false;
+      node->unknown8 = 0;
+      node->name.data = soeutil::EmptyStringData();
+      node->name.length = 0;
+      node->name.capacity = 0;
+      node->name.vtable = reinterpret_cast<void**>(kVtStringFixed32);
+      node->key = key;
+    }
+    node->previous = map->tail;
+    node->next = nullptr;
+    if (map->tail) {
+      map->tail->next = node;
+    } else {
+      map->head = node;
+    }
+    map->tail = node;
+    AccountFeatureNode*& bucket = map->buckets[node->key & 0x1F];
+    node->bucketNext = bucket;
+    bucket = node;
+    ++map->count;
+    game::Call<void (*)(AccountFeatureNode*, LoginReader*)>(0x141636a30)(node, in);  // AccountFeature::Read
+  }
+}
+
+// Login error detail: {name, value} strings, 0x80 bytes.
+struct ErrorDetail {
+  soeutil::StringFixed<32> name;
+  soeutil::StringFixed<32> value;
+};
+static_assert(sizeof(ErrorDetail) == 0x80);
+
+struct ErrorDetailArray {
+  void** vtable;
+  ErrorDetail* data;
+  int size;
+  int capacity;
+};
+
+// 0x141639760: Array<ErrorDetail>::Read (count, then name + value strings).
+void ReadErrorDetails(LoginReader* in, ErrorDetailArray* details) {
+  const uint8_t* end = in->end;
+  int count = 0;
+  bool ok = true;
+  if (end < in->cursor + 4) {
+    *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+    in->cursor = end;
+  } else {
+    count = *reinterpret_cast<const int*>(in->cursor);
+    in->cursor += 4;
+    ok = count >= 0;
+  }
+  if (ok && count <= static_cast<int>(reinterpret_cast<uintptr_t>(end)) -
+                         static_cast<int>(reinterpret_cast<uintptr_t>(in->cursor))) {
+    game::Call<void (*)(ErrorDetailArray*, int)>(0x14163f520)(details, count);  // Resize
+    for (int i = 0; i < count; ++i) {
+      if (!Succeeded(*in)) return;
+      ErrorDetail* detail = &details->data[i];
+      ReadString(in, &detail->name);
+      ReadString(in, &detail->value);
+    }
+    return;
+  }
+  *reinterpret_cast<uint8_t*>(&in->failed) = 1;
+  in->cursor = end;
+}
+
 // 0x141637090: PacketLoginReply::Read. The string / array members are read
 // by shared helpers.
 void ReadLoginReply(uint8_t* packet, LoginReader* in) {
@@ -233,12 +420,11 @@ void ReadLoginReply(uint8_t* packet, LoginReader* in) {
   *reinterpret_cast<int*>(packet + 0x18) = ReadValue<int>(in);            // resultCode
   *reinterpret_cast<bool*>(packet + 0x1C) = ReadValue<uint8_t>(in) != 0;  // isMember
   *reinterpret_cast<bool*>(packet + 0x1D) = ReadValue<uint8_t>(in) != 0;  // isInternal
-  using ReadMemberFn = void (*)(LoginReader*, void*);
-  game::Call<ReadMemberFn>(0x140467f40)(in, packet + 0x20);                             // namespace string
-  game::Call<ReadMemberFn>(0x1416394c0)(in, *reinterpret_cast<void**>(packet + 0x50));  // account features
-  game::Call<ReadMemberFn>(0x14037afa0)(in, *reinterpret_cast<void**>(packet + 0x48));  // application payload
-  game::Call<ReadMemberFn>(0x141639760)(in, *reinterpret_cast<void**>(packet + 0x58));  // error details
-  game::Call<ReadMemberFn>(0x140467f40)(in, packet + 0x60);                             // ip country code
+  ReadString(in, reinterpret_cast<soeutil::IString*>(packet + 0x20));                  // namespace string
+  ReadAccountFeatures(in, *reinterpret_cast<AccountFeatureMap**>(packet + 0x50));
+  ReadByteArray(in, *reinterpret_cast<ByteArray**>(packet + 0x48));                    // application payload
+  ReadErrorDetails(in, *reinterpret_cast<ErrorDetailArray**>(packet + 0x58));
+  ReadString(in, reinterpret_cast<soeutil::IString*>(packet + 0x60));                  // ip country code
 }
 
 // 0x14163ab60: PacketCharacterSelectInfoReply::Read. Returns true on failure.
@@ -259,7 +445,7 @@ bool ReadCharacterSelectInfoReply(const uint8_t* data, int length, PacketCharact
   for (int i = 0; i < count; ++i) {
     if (failed) return true;
     void* entity = game::Call<void* (*)(PacketList*)>(0x14163df40)(characters);  // AddNew
-    game::Call<void (*)(void*, LoginReader*)>(0x141636ad0)(entity, &in);         // EntityDetails::Read
+    ReadEntityDetails(static_cast<EntityDetails*>(entity), &in);
     failed = !Succeeded(in);
   }
   return failed;
@@ -282,7 +468,7 @@ void ReadServerList(LoginReader* in, PacketList* servers) {
   for (int i = 0; i < count; ++i) {
     if (!Succeeded(*in)) return;
     auto* entry = game::Call<uint8_t* (*)(PacketList*)>(0x140adc5e0)(servers);  // AddNew
-    game::Call<void (*)(void*, LoginReader*)>(0x140adb760)(*reinterpret_cast<void**>(entry), in);
+    ReadServerData(*reinterpret_cast<uint8_t**>(entry), in);
     *reinterpret_cast<bool*>(entry + 8) = ReadValue<uint8_t>(in) != 0;
   }
 }
@@ -454,6 +640,13 @@ REBUILD_FUNCTION(Login_ReadCharacterDeleteReply, 0x141636c30, ReadCharacterDelet
 REBUILD_FUNCTION(Login_ReadCharacterLoginReply, 0x141636d50, ReadCharacterLoginReply);
 REBUILD_FUNCTION(Login_ReadCharacterTransferReply, 0x141636f40, ReadCharacterTransferReply);
 REBUILD_FUNCTION(Login_ReadTunnelAppPacket, 0x141637280, ReadTunnelAppPacket);
+REBUILD_FUNCTION(SoeUtil_ReadByteArray, 0x14037afa0, ReadByteArrayMember);
+REBUILD_FUNCTION(SoeUtil_ReadString, 0x140467f40, ReadString);
+REBUILD_FUNCTION(Login_ReadIdTriple, 0x141637370, ReadIdTriple);
+REBUILD_FUNCTION(Login_ReadEntityDetails, 0x141636ad0, ReadEntityDetails);
+REBUILD_FUNCTION(Login_ReadServerData, 0x140adb760, ReadServerData);
+REBUILD_FUNCTION(Login_ReadAccountFeatures, 0x1416394c0, ReadAccountFeatures);
+REBUILD_FUNCTION(Login_ReadErrorDetails, 0x141639760, ReadErrorDetails);
 REBUILD_FUNCTION(Login_ReadLoginReply, 0x141637090, ReadLoginReply);
 REBUILD_FUNCTION(Login_ReadCharacterSelectInfoReply, 0x14163ab60, ReadCharacterSelectInfoReply);
 REBUILD_FUNCTION(Login_ReadServerList, 0x140adbaf0, ReadServerList);

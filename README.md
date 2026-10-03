@@ -83,9 +83,9 @@ carry RTTI; most engine classes were built without it.
 | Game | packet dispatch | Login::ExternalLoginUdpApi::HandlePacket (10 LoginUdp_11 replies), Gateway::ExternalGatewayApi::HandlePacket (opcode & 0x1F / channel >> 5: LoginReply, ForceDisconnect, TunnelPacket, ChannelIsRoutable, ConnectionIsNotRoutable) |
 | Game | `Gateway::ExternalGatewayApi` | SendPacket (header-only packets, queued in the DataQueue until login), Logout, OnConnect / OnDisconnect / OnFailed, OnLoginReply (flushes queued packets), LoginReply / ForcedLogout / ChannelIsRoutable unserializers, OnChannelIsRoutable, OnConnectionIsNotRoutable, OnForcedLogout, OnTunnelPacket (listener at +0x1058) |
 | Game | `Login::ExternalLoginUdpApi` handlers | all 10 reply handlers: LoginReply, ForceDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, ServerUpdate, TunnelAppPacketServerToClient (listener at +0x10) |
-| Game | `Login::ExternalLoginUdpApi` unserializers | 9 of 10: LoginReply, ForcedDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, TunnelAppPacketServerToClient (packet layouts static_assert'd) + their Read functions: LoginReply, CharacterLogin/Delete/Transfer/SelectInfo, TunnelApp, server list (entity / server-data / string member readers still called by address) |
+| Game | `Login::ExternalLoginUdpApi` unserializers | 9 of 10: LoginReply, ForcedDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, TunnelAppPacketServerToClient (packet layouts static_assert'd) + their Read functions: LoginReply, CharacterLogin/Delete/Transfer/SelectInfo, TunnelApp, server list, and the member readers: IString::Read, byte arrays, EntityDetails, ClientGameServerData, account-feature HashListMap, error details |
 
-Total: 388 functions (377 hooked, 11 too small to hook).
+Total: 395 functions (384 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
