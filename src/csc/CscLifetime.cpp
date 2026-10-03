@@ -8,6 +8,9 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Allocator.h"
+#include "soeutil/ByteStream.h"
+#include "soeutil/Memory.h"
 #include "soeutil/Mutex.h"
 #include "soeutil/String.h"
 #include "udp/UdpRefCount.h"
@@ -247,6 +250,146 @@ int SplitIntoStringList(const char* text, StringList* list, const char* delimite
   return count;
 }
 
+// SoeUtil::Random: global LCG under a mutex; returns [0, range).
+unsigned SoeUtilRandom(unsigned range) {
+  auto* mutex = reinterpret_cast<CRITICAL_SECTION*>(0x142b06bf0);
+  auto& seed = *reinterpret_cast<unsigned*>(0x142b06c38);
+  soeutil::MutexLock(mutex);
+  seed = seed * 0x7FF8A3ED + 0x2AA01D31;
+  unsigned value = range < 0x10000 ? ((seed >> 16) * range) >> 16 : seed % range;
+  soeutil::MutexUnlock(mutex);
+  return value;
+}
+
+void BaseApiConnect(uint8_t* api);  // BaseApi.cpp
+
+// 0x1415f3ea0 (slot 6): Connect(addresses, timeoutMs, autoReconnect).
+// `addresses` is a ';'-separated list; with more than one entry the order is
+// shuffled so clients spread across servers.
+void BaseApiConnectTo(uint8_t* api, const char* addresses, int timeoutMs, bool autoReconnect) {
+  auto* list = reinterpret_cast<StringList*>(api + 0xBE0);
+  const char* separator = reinterpret_cast<const char*>(0x14206c1c0);  // ";"
+  game::Call<void (*)(StringList*)>(0x140453600)(list);                // Clear
+  game::Field<void*>(api, 0xC00) = nullptr;                            // current address
+  SplitIntoStringList(addresses, list, separator, true, true);
+  if (list->count > 1) {
+    struct StringArray {
+      void** vtable;
+      soeutil::IString* data;
+      int size;
+      int capacity;
+    } entries{reinterpret_cast<void**>(0x1424b0578), nullptr, 0, 0};
+    game::Call<void (*)(const char*, StringArray*, const char*, bool, bool)>(0x1404a9860)(addresses, &entries, separator,
+                                                                                          true, true);
+    soeutil::IString shuffled{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    while (entries.size != 0) {
+      unsigned pick = SoeUtilRandom(static_cast<unsigned>(entries.size));
+      const char* tail = entries.size > 1 ? separator : reinterpret_cast<const char*>(0x142046fcb);  // ";" or ""
+      game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(
+          &shuffled, reinterpret_cast<const char*>(0x1425b5d14), entries.data[static_cast<int>(pick)].data, tail);  // "%s%s"
+      StringArrayRemoveRange(reinterpret_cast<uint8_t*>(&entries), static_cast<int>(pick), 1);
+    }
+    game::Call<void (*)(StringList*)>(0x140453600)(list);
+    SplitIntoStringList(shuffled.data, list, separator, true, true);
+    soeutil::StringRelease(&shuffled);
+    entries.vtable = reinterpret_cast<void**>(0x1424b0578);
+    for (int i = 0; i < entries.size; ++i) {
+      reinterpret_cast<void (*)(soeutil::IString*, int)>(entries.data[i].vtable[0])(&entries.data[i], 0);
+    }
+    entries.size = 0;
+    if (soeutil::ThreadAllocatorCount() == 0) {
+      soeutil::FreeArray(entries.data);
+    } else {
+      soeutil::MemoryFree(entries.data, 8);
+    }
+  }
+  game::Field<int>(api, 0x2F0) = timeoutMs;
+  game::Field<bool>(api, 0x2F8) = autoReconnect;
+  BaseApiConnect(api);
+  auto* manager = game::Field<uint8_t*>(api, 0x2D0);
+  if (manager && game::Field<bool>(manager, 0x288)) {
+    game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(
+        game::Field<void*>(manager, 0x250), reinterpret_cast<const char*>(0x1424b05a0),  // "BaseApi connect request ..."
+        manager + 0x209, game::Field<const char*>(api, 0xC10), game::Field<int>(api, 0x2F0),
+        static_cast<int>(game::Field<bool>(api, 0x2F8)));
+  }
+}
+
+// RPC handler node: {vtable (slot 0 = deleting dtor), bucketNext, id, .., listNext? (+0x18), listPrev (+0x20)}.
+struct RpcNode {
+  void** vtable;
+  RpcNode* bucketNext;
+  unsigned id;
+  unsigned padding;
+  RpcNode* previous;  // +0x18
+  RpcNode* next;      // +0x20
+};
+static_assert(offsetof(RpcNode, previous) == 0x18);
+
+// RPC handler table view used by the helpers below: {.., head +8, tail +0x10, count +0x18, buckets +0x20}.
+struct RpcTable {
+  void* unknown0;
+  RpcNode* head;
+  RpcNode* tail;
+  int count;
+  int padding;
+  RpcNode* buckets[64];
+};
+static_assert(offsetof(RpcTable, buckets) == 0x20);
+
+void UnlinkFromBucket(RpcTable* table, RpcNode* node) {
+  RpcNode** link = &table->buckets[node->id & 0x3F];
+  for (RpcNode* it = *link; it; it = it->bucketNext) {
+    if (it == node) {
+      *link = it->bucketNext;
+      it->bucketNext = nullptr;
+      it->id = 0;
+      break;
+    }
+    link = &it->bucketNext;
+  }
+}
+
+void UnlinkFromList(RpcTable* table, RpcNode* node) {
+  if (node->previous) node->previous->next = node->next; else table->head = node->next;
+  if (node->next) node->next->previous = node->previous; else table->tail = node->previous;
+  node->next = nullptr;
+  node->previous = nullptr;
+  --table->count;
+}
+
+// 0x1415f6f20: remove `node` from the table (bucket + ordered list); returns it.
+RpcNode* RpcTableRemove(RpcTable* table, RpcNode* node) {
+  UnlinkFromBucket(table, node);
+  UnlinkFromList(table, node);
+  return node;
+}
+
+// 0x1415f6b40: delete every handler (also RpcRouter's destructor body).
+void RpcTableClear(RpcTable* table) {
+  for (RpcNode* node = table->head; node;) {
+    RpcNode* next = node->next;
+    UnlinkFromBucket(table, node);
+    UnlinkFromList(table, node);
+    reinterpret_cast<void (*)(RpcNode*, int)>(node->vtable[0])(node, 1);
+    node = next;
+  }
+}
+
+// 0x1415f6ff0: RpcRouter::RemoveHandler(id)
+void RpcRouterRemoveHandler(uint8_t* router, unsigned id) {
+  for (auto* node = *reinterpret_cast<RpcNode**>(router + 0x30 + (id & 0x3F) * 8); node; node = node->bucketNext) {
+    if (node->id == id) {
+      RpcTableRemove(reinterpret_cast<RpcTable*>(router + 0x10), node);
+      reinterpret_cast<void (*)(RpcNode*, int)>(node->vtable[0])(node, 1);
+      return;
+    }
+  }
+}
+
+// 0x1415f6d40: ByteStream::Put(data, count) (clamped).
+void StreamWriteBytes(soeutil::ByteStream* stream, const void* data, int count) { soeutil::StreamPut(stream, data, count); }
+
 REBUILD_FUNCTION(UdpCompressionHandler_Destroy, 0x1415f2e30, UdpCompressionHandlerDestroy);
 REBUILD_FUNCTION(UdpCompressionHandler_GetStats, 0x1415f2ef0, UdpCompressionHandlerGetStats);
 REBUILD_FUNCTION(UdpCompressionHandler_ClearStats, 0x1415f2f50, UdpCompressionHandlerClearStats);
@@ -260,6 +403,11 @@ REBUILD_FUNCTION(BaseApi_InitFields, 0x1415f4870, BaseApiInitFields);
 REBUILD_FUNCTION(BaseApi_RegisterMetrics, 0x1415f5bf0, BaseApiRegisterMetrics);
 REBUILD_FUNCTION(SoeUtil_StringArray_RemoveRange, 0x1415f53c0, StringArrayRemoveRange);
 REBUILD_FUNCTION(SoeUtil_SplitIntoStringList, 0x1415f3130, SplitIntoStringList);
+REBUILD_FUNCTION(BaseApi_ConnectTo, 0x1415f3ea0, BaseApiConnectTo);
+REBUILD_FUNCTION(ClientServerCore_RpcTableRemove, 0x1415f6f20, RpcTableRemove);
+REBUILD_FUNCTION(ClientServerCore_RpcTableClear, 0x1415f6b40, RpcTableClear);
+REBUILD_FUNCTION(ClientServerCore_RpcRouterRemoveHandler, 0x1415f6ff0, RpcRouterRemoveHandler);
+REBUILD_FUNCTION(SoeUtil_ByteStream_Put, 0x1415f6d40, StreamWriteBytes);
 REBUILD_FUNCTION(BaseApi_ConnectionValue1C4, 0x1415f4340, BaseApiConnectionValue1C4);
 
 }  // namespace rebuild::csc
