@@ -82,11 +82,11 @@ void* NewReliableChannel(void* memory, int channel, UdpConnection* c, void* conf
 void ReliableChannelReliablePacket(void* channel, const uint8_t* data, int length) {
   game::Call<void (*)(void*, const uint8_t*, int)>(0x14034dab0)(channel, data, length);
 }
-void ReliableChannelAckPacket(void* channel, const uint8_t* data) {
-  game::Call<void (*)(void*, const uint8_t*)>(0x1403457e0)(channel, data);
+void ReliableChannelAckPacket(void* channel, const uint8_t* data, int length) {
+  game::Call<void (*)(void*, const uint8_t*, int)>(0x1403457e0)(channel, data, length);
 }
-void ReliableChannelAckAllPacket(void* channel, const uint8_t* data) {
-  game::Call<void (*)(void*, const uint8_t*)>(0x14034cb30)(channel, data);
+void ReliableChannelAckAllPacket(void* channel, const uint8_t* data, int length) {
+  game::Call<void (*)(void*, const uint8_t*, int)>(0x14034cb30)(channel, data, length);
 }
 void ConnectionProcessCorruptPacket(UdpConnection* c, const uint8_t* data, int length, int reason) {
   game::Call<void (*)(UdpConnection*, const uint8_t*, int, int)>(0x140345b80)(c, data, length, reason);
@@ -312,10 +312,10 @@ void ConnectionProcessCookedPacket(UdpConnection* c, const uint8_t* data, int le
       break;
     }
     case 0x11: case 0x12: case 0x13: case 0x14:
-      if (void* reliable = ReliableChannel(c, opcode - kAckFirst)) ReliableChannelAckPacket(reliable, data);
+      if (void* reliable = ReliableChannel(c, opcode - kAckFirst)) ReliableChannelAckPacket(reliable, data, length);
       break;
     case 0x15: case 0x16: case 0x17: case 0x18:
-      if (void* reliable = ReliableChannel(c, opcode - kAckAllFirst)) ReliableChannelAckAllPacket(reliable, data);
+      if (void* reliable = ReliableChannel(c, opcode - kAckAllFirst)) ReliableChannelAckAllPacket(reliable, data, length);
       break;
     case kGroup: {
       const uint8_t* end = data + length;

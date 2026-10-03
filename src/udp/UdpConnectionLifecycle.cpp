@@ -163,8 +163,8 @@ void SendTerminatePacket(UdpConnection* c, uint32_t connectCode, uint16_t reason
 }
 
 // 0x140346820. Sends whatever is waiting in the connection's multi-packet
-// buffer. A buffer holding a single sub-packet (00 19 <len> <packet>) is sent
-// as that packet alone, without the group header.
+// buffer. A buffer holding a single sub-packet (00 03 <len> <packet>) is sent
+// as that packet alone, without the multi header.
 void FlushChannels(UdpConnection* c) {
   auto& guard = ConnField<UdpPlatformGuardObject>(c, O::kStatusGuard);
   guard.Enter();
