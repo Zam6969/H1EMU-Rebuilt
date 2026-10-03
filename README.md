@@ -97,9 +97,10 @@ carry RTTI; most engine classes were built without it.
 | Game | `Login::ExternalLoginUdpApi` requests | Logout (+ transport disconnect), ServerListRequest (+ their UDP / XML senders), EntityDetails list + ErrorDetail array destructors, ErrorDetail array Resize/Clear/RemoveLast, entity list Clear, CharacterCreate / Login / Delete / SelectInfo request senders (UDP or alternate transport), their UDP send + serializers, Array<uchar>::Write, and the XML (BaseTcpApi) senders |
 | Game | `Login::ExternalLoginUdpApi` unserializers | all 10: ServerUpdate, LoginReply, ForcedDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, TunnelAppPacketServerToClient (packet layouts static_assert'd) + their Read functions: LoginReply, CharacterLogin/Delete/Transfer/SelectInfo, TunnelApp, server list, and the member readers: IString::Read, byte arrays, EntityDetails, ClientGameServerData, account-feature HashListMap, error details |
 | Game | zone connection wrapper | 14 accessors over the gateway api: stats, counters, character id, UdpConnection / UdpManager / params, IsConnecting / IsConnected / IsLoggedIn, session key, SetLoginPending, SetListener, Disconnect |
+| Game | zone client (gateway listener) | OnConnect, OnChannelIsRoutable, OnConnectionIsNotRoutable, OnTunnelData (zone packet entry: channel 2 = opcode 0x79 packets, opcode 0xF5 float, rest -> game packet handler), 4 no-op slots |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 593 functions (576 hooked, 17 too small to hook).
+Total: 601 functions (580 hooked, 21 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
