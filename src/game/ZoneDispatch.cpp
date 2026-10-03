@@ -1,4 +1,4 @@
-// The zone opcode dispatcher (0x1403fe210, ~16 KB, ~175 cases): routes each
+﻿// The zone opcode dispatcher (0x1403fe210, ~16 KB, ~175 cases): routes each
 // zone packet to the game subsystem that owns it. Rebuilt opcode by opcode -
 // cases not rebuilt yet are handed to the original function through its
 // trampoline, which runs its own copy of the common exit.
@@ -27,17 +27,52 @@ void Route(uintptr_t fn, void* object, const uint8_t* data, int length) {
   game::Call<RouteFn>(fn)(object, data, length);
 }
 
+bool RouteResult(uintptr_t fn, void* object, const uint8_t* data, int length) {
+  return game::Call<bool (*)(void*, const uint8_t*, int)>(fn)(object, data, length);
+}
+
 template <typename Ret>
 Ret VirtualRoute(void* object, size_t slot, const uint8_t* data, int length) {
   using Fn = Ret (*)(void*, const uint8_t*, int);
   return reinterpret_cast<Fn>((*static_cast<void***>(object))[slot])(object, data, length);
 }
 
+// Run a one-time initializer guarded by a static flag byte.
+void LazyInit(uintptr_t flag, uintptr_t init) {
+  auto* done = reinterpret_cast<bool*>(flag);
+  if (!*done) {
+    game::Call<void (*)()>(init)();
+    *done = true;
+  }
+}
+
+// Stack packet with one int field (opcode 0x32).
+struct ValuePacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  int value;
+  int padding2;
+};
+static_assert(offsetof(ValuePacket, value) == 0x10);
+
+constexpr size_t kLoginFailed = 0x38838;      // bool
+constexpr size_t kInitialDataDone = 0x3883B;  // bool, set by ZoneDoneSendingInitialData
+constexpr size_t kOpcode32Value = 0x38BEC;    // int (meaning not identified yet)
+
 // Common exit of every case: record the packet against the channel's slot.
 bool Finish(uint8_t* state, int channel, const uint8_t* data, int length, bool result) {
   uint8_t* record = state + (static_cast<int64_t>(channel) * 3 + 0x25B62) * 4;
   game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x1404685a0)(record, data, length);
   return result;
+}
+
+// Opcodes the built-in table has no case for go to the extension handler.
+bool OfferToExtension(uint8_t* state, uint8_t* header, const uint8_t* data, int length, int channel) {
+  void* extension = GlobalObject(0x142b19cc0);
+  using ExtensionFn = bool (*)(void*, uint8_t*, const uint8_t*, int);
+  bool result = extension && game::Call<ExtensionFn>(0x1407b28b0)(extension, header, data, length);
+  return Finish(state, channel, data, length, result);
 }
 
 }  // namespace
@@ -48,13 +83,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
   uint8_t* player = game::Field<uint8_t*>(state, kLocalPlayer);
   int opcode = *reinterpret_cast<int*>(header + 8);
   bool result = true;
-  if (static_cast<unsigned>(opcode - 3) > 0xF5) {
-    // Outside the built-in opcode range: offered to the extension handler.
-    void* extension = GlobalObject(0x142b19cc0);
-    using ExtensionFn = bool (*)(void*, uint8_t*, const uint8_t*, int);
-    result = extension && game::Call<ExtensionFn>(0x1407b28b0)(extension, header, data, length);
-    return Finish(state, channel, data, length, result);
-  }
+  if (static_cast<unsigned>(opcode - 3) > 0xF5) return OfferToExtension(state, header, data, length, channel);
   switch (opcode) {
     case 0x0C:
       result = VirtualRoute<bool>(Member(game, 0x711F), 1, data, length);
@@ -107,8 +136,358 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
     case 0xF8:
       if (player) Route(0x140576e00, player + 0xCA28, data, length);
       break;
-    default:
+    case 0x06:
+      Route(0x1409a2ad0, Member(game, 0x7117), data, length);
+      break;
+    case 0x09:
+      VirtualRoute<void>(game, 88, data, length);
+      break;
+    case 0x2D:
+      if (!player) break;
+      Route(0x140630ca0, player, data, length);
+      break;
+    case 0x2E:
+      Route(0x140402630, game, data, length);
+      result = false;
+      break;
+    case 0x38:
+      Route(0x14040c0f0, game, data, length);
+      break;
+    case 0x39:
+      Route(0x1404709a0, game, data, length);
+      break;
+    case 0x41:
+      VirtualRoute<void>(game, 97, data, length);
+      break;
+    case 0x42:
+      VirtualRoute<void>(game, 100, data, length);
+      break;
+    case 0x46:
+      if (!player) break;
+      Route(0x140630c80, player, data, length);
+      break;
+    case 0x47:
+      Route(0x1407d45b0, Member(game, 0x713B), data, length);
+      break;
+    case 0x49:
+      if (!player) break;
+      Route(0x140630d50, player, data, length);
+      break;
+    case 0x4B:
+      Route(0x140640db0, Member(game, 0x7129), data, length);
+      break;
+    case 0x59: case 0x5A:
+      if (!player) { result = false; break; }
+      Route(0x140630d40, player, data, length);
+      result = false;
+      break;
+    case 0x5E:
+      VirtualRoute<void>(Member(game, 0x7119), 6, data, length);
+      result = false;
+      break;
+    case 0x60:
+      Route(0x1407e1760, Member(game, 0x7140), data, length);
+      break;
+    case 0x66:
+      if (!player) { result = false; break; }
+      Route(0x1404cbaa0, player + 0x5658, data, length);
+      result = false;
+      break;
+    case 0x67:
+      if (!player) break;
+      Route(0x1404d0720, player + 0x97E8, data, length);
+      break;
+    case 0x68:
+      Route(0x140ae8fd0, GlobalObject(0x142b19c68), data, length);
+      result = false;
+      break;
+    case 0x6A:
+      if (!player) break;
+      Route(0x1407da3c0, game::Field<void*>(player, 0x99E8), data, length);
+      break;
+    case 0x6E:
+      if (!player) break;
+      Route(0x140630ae0, player, data, length);
+      break;
+    case 0x6F:
+      VirtualRoute<void>(game, 102, data, length);
+      break;
+    case 0x71:
+      if (!player) break;
+      Route(0x1406318b0, player, data, length);
+      break;
+    case 0x73:
+      Route(0x1404045d0, game, data, length);
+      break;
+    case 0x7B:
+      if (!Member(game, 0x7700)) { result = false; break; }
+      result = RouteResult(0x1407cf0f0, Member(game, 0x7700), data, length);
+      break;
+    case 0x7E:
+      result = RouteResult(0x1407e6e60, Member(game, 0x76E1), data, length);
+      break;
+    case 0x80:
+      if (!Member(game, 0x7128)) break;
+      Route(0x14093bdc0, Member(game, 0x7128), data, length);
+      break;
+    case 0x81:
+      VirtualRoute<void>(game, 96, data, length);
+      break;
+    case 0x82:
+      Route(0x140631b20, player, data, length);
+      break;
+    case 0x83:
+      VirtualRoute<void>(game, 101, data, length);
+      break;
+    case 0x85:
+      Route(0x1406545c0, GlobalObject(0x142b19c60), data, length);
+      break;
+    case 0x86:
+      Route(0x14040c7e0, game, data, length);
+      break;
+    case 0x87:
+      Route(0x140409d20, game, data, length);
+      break;
+    case 0x88:
+      if (!player) break;
+      Route(0x14059b070, player + 0xDD70, data, length);
+      break;
+    case 0x89:
+      Route(0x14040cd20, game, data, length);
+      break;
+    case 0x8A:
+      if (!player) break;
+      Route(0x1405a0090, player + 0xE758, data, length);
+      break;
+    case 0x8C:
+      Route(0x140a70700, game::Field<void*>(state, 0x96C08), data, length);
+      break;
+    case 0x8D:
+      Route(0x14040c830, game, data, length);
+      break;
+    case 0x8E:
+      if (!player) break;
+      Route(0x14058a4f0, player + 0x10160, data, length);
+      break;
+    case 0x90:
+      if (!Member(game, 0x711B)) break;
+      Route(0x1408da410, Member(game, 0x711B), data, length);
+      break;
+    case 0x92:
+      result = game::Call<bool (*)(void*, int, const uint8_t*, int)>(0x14071f500)(Member(game, 0x710C), 0, data, length);
+      break;
+    case 0x93:
+      VirtualRoute<void>(game, 92, data, length);
+      break;
+    case 0x94:
+      if (!Member(game, 0x711C)) break;
+      Route(0x1408e00b0, Member(game, 0x711C), data, length);
+      break;
+    case 0x95:
+      if (!player) break;
+      Route(0x1405819a0, player + 0xDA78, data, length);
+      break;
+    case 0x96:
+      if (!player) break;
+      Route(0x14058d390, player + 0xCBF8, data, length);
+      break;
+    case 0x9C:
+      Route(0x140408990, game, data, length);
+      break;
+    case 0x9E:
+      Route(0x14040a5a0, game, data, length);
+      break;
+    case 0x9F:
+      if (!player) break;
+      Route(0x140594400, player + 0xD568, data, length);
+      break;
+    case 0xA1:
+      Route(0x1403fd440, game, data, length);
+      break;
+    case 0xA2:
+      if (!player) break;
+      Route(0x140630bb0, player, data, length);
+      break;
+    case 0xA4:
+      if (!GlobalObject(0x142b19c50)) break;
+      Route(0x140648e60, GlobalObject(0x142b19c50), data, length);
+      break;
+    case 0xA5:
+      Route(0x140a91c40, Member(game, 0x716C), data, length);
+      break;
+    case 0xA6:
+      if (!player) break;
+      Route(0x140576410, player + 0xC8B8, data, length);
+      break;
+    case 0xA7:
+      game::Call<void (*)(const uint8_t*, int)>(0x140adc700)(data, length);
+      result = false;
+      break;
+    case 0xAC:
+      if (!player) break;
+      Route(0x14057dae0, player + 0xCB20, data, length);
+      break;
+    case 0xAD:
+      Route(0x140408ce0, game, data, length);
+      break;
+    case 0xB3:
+      if (!player) break;
+      Route(0x140578c30, player + 0xCA30, data, length);
+      break;
+    case 0xB4:
+      Route(0x140ab8610, GlobalObject(0x142b19a88), data, length);
+      break;
+    case 0xB7:
+      if (!GlobalObject(0x142b19c48)) break;
+      Route(0x1407dc2f0, GlobalObject(0x142b19c48), data, length);
+      break;
+    case 0xBC:
+      if (!GlobalObject(0x142b19a98)) { result = false; break; }
+      Route(0x140ac16d0, GlobalObject(0x142b19a98), data, length);
+      result = false;
+      break;
+    case 0xBD:
+      if (!GlobalObject(0x142b19a80)) { result = false; break; }
+      Route(0x140ac29e0, GlobalObject(0x142b19a80), data, length);
+      result = false;
+      break;
+    case 0xBE:
+      if (!GlobalObject(0x142b19948)) { result = false; break; }
+      Route(0x140799de0, GlobalObject(0x142b19948), data, length);
+      result = false;
+      break;
+    case 0xC0:
+      if (!player) break;
+      Route(0x1405863f0, player + 0x10159, data, length);
+      break;
+    case 0xC2:
+      if (!GlobalObject(0x142b19c98)) { result = false; break; }
+      Route(0x14076e110, GlobalObject(0x142b19c98), data, length);
+      result = false;
+      break;
+    case 0xC6:
+      Route(0x14066bde0, game::Field<void*>(state, 0x96C90), data, length);
+      break;
+    case 0xC7:
+      Route(0x1406709f0, game::Field<void*>(state, 0x96CA0), data, length);
+      break;
+    case 0xC8:
+      Route(0x14040be90, game, data, length);
+      break;
+    case 0xC9:
+      Route(0x1405ff9e0, static_cast<uint8_t*>(GlobalObject(0x142b19ba0)) + 0x106C8, data, length);
+      result = false;
+      break;
+    case 0xCD:
+      if (!player) break;
+      Route(0x1405d0160, player + 0xF838, data, length);
+      break;
+    case 0xCE:
+      Route(0x14040b8d0, game, data, length);
+      result = false;
+      break;
+    case 0xD0:
+      if (!player) break;
+      Route(0x14057ad40, player + 0xCA60, data, length);
+      break;
+    case 0xD2:
+      Route(0x140673900, game::Field<void*>(state, 0x96CB0), data, length);
+      break;
+    case 0xD4:
+      Route(0x14040aab0, game, data, length);
+      result = false;
+      break;
+    case 0xD9:
+      result = game::Call<bool (*)(void*, int, const uint8_t*, int)>(0x14071f410)(Member(game, 0x710C), 0, data, length);
+      break;
+    case 0xDA:
+      Route(0x1404090a0, game, data, length);
+      result = false;
+      break;
+    case 0xDD:
+      Route(0x1403fdea0, game, data, length);
+      result = false;
+      break;
+    case 0xE0:
+      Route(0x1404087c0, game, data, length);
+      result = false;
+      break;
+    case 0xE2:
+      VirtualRoute<void>(game, 94, data, length);
+      break;
+    case 0xE5:
+      Route(0x14040a620, game, data, length);
+      result = false;
+      break;
+    case 0xE7:
+      Route(0x14040a7b0, game, data, length);
+      break;
+    case 0xE8: case 0xE9:
+      Route(0x140ada6a0, GlobalObject(0x142b19868), data, length);
+      result = false;
+      break;
+    case 0xEA:
+      Route(0x140a9b9e0, GlobalObject(0x142b19870), data, length);
+      result = false;
+      break;
+    case 0x05:  // ZoneDoneSendingInitialData
+      game::Field<bool>(game, kInitialDataDone) = true;
+      game::Call<void (*)(const char*, const char*)>(0x1402bab70)(reinterpret_cast<const char*>(0x142054710),
+                                                                  reinterpret_cast<const char*>(0x14206dfa0));
+      if (player) game::Call<void (*)(uint8_t*)>(0x140631f60)(player);
+      result = false;
+      break;
+    case 0x32: {
+      ValuePacket packet{reinterpret_cast<void**>(0x142063c98), 0x32, 0, 0};
+      using ReadFn = bool (*)(ValuePacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038c4e0)(&packet, data, length, true)) game::Field<int>(game, kOpcode32Value) = packet.value;
+      break;
+    }
+    case 0x51:  // login to the game server failed
+      game::Field<bool>(game, kLoginFailed) = true;
+      {
+        using ShutdownFn = void (*)(uint8_t*, bool, int, const char*, void*);
+        reinterpret_cast<ShutdownFn>((*reinterpret_cast<void***>(game))[0xD8 / 8])(
+            game, true, 0xE, reinterpret_cast<const char*>(0x14206de30), nullptr);  // "...Forcing a shutdown."
+      }
+      result = false;
+      break;
+    case 0xBB:
+      Route(0x140abaff0, game::Call<void* (*)()>(0x140359330)(), data, length);
+      result = false;
+      break;
+    case 0xCA:
+      LazyInit(0x142b19e39, 0x140355520);
+      Route(0x1407747e0, GlobalObject(0x142b19ad0), data, length);
+      result = false;
+      break;
+    case 0xCF:
+      LazyInit(0x142b19e38, 0x1403557c0);
+      Route(0x140495ee0, GlobalObject(0x142b19ad8), data, length);
+      result = false;
+      break;
+    case 0xEB:
+      game::Call<void (*)(void*, int, const uint8_t*, int)>(0x140ae0f70)(game::Call<void* (*)()>(0x140ae0cc0)(), 0, data,
+                                                                       length);
+      result = false;
+      break;
+    case 0xEC:
+      if (!player) break;
+      Route(0x140662370, game::Field<void*>(state, 0x96BE8), data, length);
+      break;
+    case 0x76:
+      break;
+    case 0x63: case 0x70: case 0xC3:
+      result = false;
+      break;
+    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x25: case 0x2C: case 0x2F: case 0x30: case 0x33: case 0x35:
+    case 0x3D: case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
+    case 0x69: case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAA: case 0xAB: case 0xAE:
+    case 0xAF: case 0xB0: case 0xB1: case 0xB6: case 0xB9: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
+    case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3: case 0xE6: case 0xEE:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
+    default:  // no built-in case
+      return OfferToExtension(state, header, data, length, channel);
   }
   return Finish(state, channel, data, length, result);
 }
