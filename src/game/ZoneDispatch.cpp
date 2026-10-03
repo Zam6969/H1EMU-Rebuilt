@@ -272,6 +272,18 @@ struct Packet62 {
 };
 static_assert(offsetof(Packet62, expiredValue) == 0x14 && sizeof(Packet62) == 0x18);
 
+// Request object built on the stack for 0x14035d620 (vtable 0x142066940).
+struct RefreshRequest {
+  void** vtable;
+  int a;  // 0x70
+  int padding;
+  int b;  // 1
+  int padding2;
+  int c;  // 4
+  int padding3;
+};
+static_assert(offsetof(RefreshRequest, c) == 0x18);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1215,13 +1227,33 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<StringDtorFn>(0x14030c360)(&upsellText);
       break;
     }
+    case 0x40: {  // membership activated
+      ValuePacket packet{reinterpret_cast<void**>(0x142063d88), 0x40, 0, 0};
+      using ReadFn = bool (*)(ValuePacket*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038b970)(&packet, data, length, false)) break;
+      int member = packet.value;
+      game::Call<void (*)(uint8_t*, int)>(0x140638aa0)(player, member);  // not null-checked in the original
+      if (void* self = game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C)))
+        game::Call<void (*)(void*, bool, bool)>(0x140533f80)(self, member != 0, true);
+      UiArgs args{reinterpret_cast<void**>(0x14206c548), nullptr, nullptr};
+      if (auto* slot = game::Call<int* (*)(UiArgs*, int)>(0x140418710)(&args, 0)) *slot = 0;
+      game::Call<void (*)(void*, int)>(0x14046d7b0)(args.begin, member);
+      game::Call<void (*)(void*, const char*, UiArgs*, void*)>(0x140488cc0)(
+          *reinterpret_cast<void**>(0x143c45470), GameText(0x14206e178), &args, nullptr);  // "MembershipHandler:OnMembershipActivated"
+      RefreshRequest refresh{reinterpret_cast<void**>(0x142066940), 0x70, 0, 1, 0, 4, 0};
+      using RefreshFn = void (*)(void*, RefreshRequest*, int, bool);
+      game::Call<RefreshFn>(0x14035d620)(game::Field<void*>(GlobalObject(0x142b19b98), 8), &refresh, 0, true);
+      game::Call<RefreshFn>(0x14035d620)(game::Field<void*>(GlobalObject(0x142b19b98), 8), &refresh, 1, true);
+      game::Call<void (*)(UiArgs*)>(0x1403a06c0)(&args);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E: case 0x3F: case 0x40:
+    case 0x3E: case 0x3F:
     case 0x99:
    
     case 0xDE: case 0xE3:
