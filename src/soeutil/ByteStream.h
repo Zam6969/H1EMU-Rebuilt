@@ -49,6 +49,14 @@ inline void ByteArrayWrite(ByteArray8k* array, int position, const void* source,
   game::Call<void (*)(ByteArray8k*, int, const void*, int)>(0x14030d520)(array, position, source, count);
 }
 
+// Appends bytes, clamped to the room left under maxSize (inlined everywhere).
+inline void StreamPut(ByteStream* stream, const void* source, int count) {
+  int room = stream->maxSize - stream->array->size;
+  int n = room >= count ? count : room;
+  ByteArrayWrite(stream->array, stream->writePos, source, n);
+  stream->writePos += n;
+}
+
 // Stack stream plus the stream actually written to (pooled if a pool exists).
 struct ScopedByteStream {
   ByteStream local;
@@ -81,13 +89,7 @@ struct ScopedByteStream {
   ScopedByteStream(const ScopedByteStream&) = delete;
   ScopedByteStream& operator=(const ScopedByteStream&) = delete;
 
-  // Appends bytes, clamped to the room left under maxSize (as the game does).
-  void Put(const void* source, int count) {
-    int room = active->maxSize - active->array->size;
-    int n = room >= count ? count : room;
-    ByteArrayWrite(active->array, active->writePos, source, n);
-    active->writePos += n;
-  }
+  void Put(const void* source, int count) { StreamPut(active, source, count); }
 
   const uint8_t* Data() const { return active->array->size ? active->array->data : nullptr; }
   int Size() const { return active->array->size; }

@@ -4,6 +4,7 @@
 // API's packet-handler subobject at +0xD40.
 #include <cstddef>
 #include <cstdint>
+#include <intrin.h>
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -640,6 +641,48 @@ REBUILD_FUNCTION(Login_ReadCharacterDeleteReply, 0x141636c30, ReadCharacterDelet
 REBUILD_FUNCTION(Login_ReadCharacterLoginReply, 0x141636d50, ReadCharacterLoginReply);
 REBUILD_FUNCTION(Login_ReadCharacterTransferReply, 0x141636f40, ReadCharacterTransferReply);
 REBUILD_FUNCTION(Login_ReadTunnelAppPacket, 0x141637280, ReadTunnelAppPacket);
+// 0x141634020: PacketServerUpdate {header, ClientGameServerData (shared,
+// 0x1200 bytes), bool}. The trailing bool is read without touching the
+// failed flag, but a short read still skips the handler.
+struct PacketServerUpdate : LoginPacket {
+  uint8_t* server;  // ref-counted; {strong, weak} count block pointer at +8
+  bool flag;
+};
+static_assert(offsetof(PacketServerUpdate, server) == 0x10);
+static_assert(offsetof(PacketServerUpdate, flag) == 0x18);
+
+void LoginDispatchServerUpdate(uint8_t* api, const uint8_t* data, int length, Handler handler) {
+  PacketServerUpdate packet;
+  packet.opcode = 0xF;
+  packet.vtable = reinterpret_cast<void**>(0x1424bfdb8);
+  packet.flag = false;
+  void* memory = soeutil::Allocate(0x1200);
+  packet.server = memory ? game::Call<uint8_t* (*)(void*)>(0x14163f960)(memory) : nullptr;  // ClientGameServerData()
+  LoginReader reader{data, length, nullptr, data + length, 0};
+  if (data + 1 > reader.end) {
+    packet.opcode = 0;
+    reader.failed = 1;
+    reader.cursor = reader.end;
+  } else {
+    packet.opcode = static_cast<int8_t>(data[0]);
+    reader.cursor = data + 1;
+  }
+  ReadServerData(packet.server, &reader);
+  if (reader.cursor + 1 > reader.end) {
+    packet.flag = false;
+  } else {
+    packet.flag = *reader.cursor != 0;
+    if (static_cast<uint8_t>(reader.failed) == 0) handler(HandlerThis(api), &packet);
+  }
+  // Release the shared server record.
+  uint8_t* server = packet.server;
+  int* counts = *reinterpret_cast<int**>(server + 8);
+  bool lastStrong = _InterlockedDecrement(reinterpret_cast<volatile long*>(&counts[0])) == 0;
+  long weakBefore = _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(&counts[1]), -1);
+  if (weakBefore == 1 && counts) soeutil::Free(counts, 0x10);
+  if (lastStrong) (*reinterpret_cast<void (***)(uint8_t*)>(server))[1](server);
+}
+
 REBUILD_FUNCTION(SoeUtil_ReadByteArray, 0x14037afa0, ReadByteArrayMember);
 REBUILD_FUNCTION(SoeUtil_ReadString, 0x140467f40, ReadString);
 REBUILD_FUNCTION(Login_ReadIdTriple, 0x141637370, ReadIdTriple);
@@ -658,6 +701,7 @@ REBUILD_FUNCTION(Login_DispatchCharacterTransferReply, 0x141633990, LoginDispatc
 REBUILD_FUNCTION(Login_DispatchTunnelAppPacket, 0x141634280, LoginDispatchTunnelAppPacket);
 REBUILD_FUNCTION(Login_DispatchLoginReply, 0x141633c40, LoginDispatchLoginReply);
 REBUILD_FUNCTION(Login_DispatchCharacterSelectInfoReply, 0x141633720, LoginDispatchCharacterSelectInfoReply);
+REBUILD_FUNCTION(Login_DispatchServerUpdate, 0x141634020, LoginDispatchServerUpdate);
 REBUILD_FUNCTION(Login_DispatchServerListReply, 0x141633de0, LoginDispatchServerListReply);
 
 }  // namespace rebuild::game_net

@@ -57,6 +57,27 @@ constexpr uintptr_t kVtPacketChannelIsRoutable = 0x1424be268;
 constexpr uintptr_t kVtPacketLogout = 0x1424be248;
 constexpr uintptr_t kVtPacketForcedLogout = 0x1424be258;
 constexpr uintptr_t kVtStringFixed64 = 0x142049d00;
+constexpr uintptr_t kVtPacketLoginRequest = 0x1424be228;
+constexpr uintptr_t kVtGatewayBasePacket = 0x1424be218;
+constexpr uintptr_t kVtStringFixed32 = 0x14204a378;
+constexpr uintptr_t kVtIStringFixed32 = 0x14204a358;
+constexpr int kOpcodeLoginRequest = 1;
+
+struct PacketLoginRequest : GatewayPacket {
+  soeutil::StringFixed<32> ticket;      // +0x10
+  soeutil::StringFixed<32> clientProtocol;  // +0x50
+  soeutil::StringFixed<32> clientBuild;     // +0x90
+  uint64_t characterId;                 // +0xD0
+};
+static_assert(offsetof(PacketLoginRequest, clientProtocol) == 0x50);
+static_assert(offsetof(PacketLoginRequest, clientBuild) == 0x90);
+static_assert(offsetof(PacketLoginRequest, characterId) == 0xD0);
+
+// Login info stored by Init: character id and three strings.
+constexpr size_t kCharacterId = 0xFC0;
+constexpr size_t kTicket = 0xFC8;
+constexpr size_t kClientProtocol = 0xFF8;
+constexpr size_t kClientBuild = 0x1028;
 constexpr uintptr_t kVtIStringFixed64 = 0x142049ce0;
 
 struct PacketForcedLogout : GatewayPacket {
@@ -302,6 +323,77 @@ void GatewayOnTunnelPacket(uint8_t* api, const uint8_t* data, int length) {
                                             static_cast<int>(end - payload));
 }
 
+// 0x140467e80: IString::Write (int32 length + chars).
+void StreamWriteString(soeutil::ByteStream* stream, const soeutil::IString* string) {
+  int length = string->length;
+  soeutil::StreamPut(stream, &length, 4);
+  soeutil::StreamPut(stream, string->data, length);
+}
+
+// 0x14162c1e0: PacketLoginRequest::Serialize
+void SerializeLoginRequest(const PacketLoginRequest* packet, soeutil::ByteStream** stream) {
+  uint8_t header = static_cast<uint8_t>((packet->opcode & 0x1F) | (packet->channel << 5));
+  soeutil::StreamPut(*stream, &header, 1);
+  uint64_t characterId = packet->characterId;
+  soeutil::StreamPut(*stream, &characterId, 8);
+  StreamWriteString(*stream, &packet->ticket);
+  StreamWriteString(*stream, &packet->clientProtocol);
+  StreamWriteString(*stream, &packet->clientBuild);
+}
+
+void DestroyStringFixed32(soeutil::StringFixed<32>* string) {
+  string->vtable = reinterpret_cast<void**>(kVtIStringFixed32);
+  soeutil::StringRelease(string);
+  string->data = soeutil::EmptyStringData();
+  string->length = 0;
+  string->capacity = 0;
+  string->vtable = soeutil::IStringVtable();
+}
+
+// 0x14162cdd0: ~PacketLoginRequest
+void DestroyLoginRequest(PacketLoginRequest* packet) {
+  DestroyStringFixed32(&packet->clientBuild);
+  DestroyStringFixed32(&packet->clientProtocol);
+  DestroyStringFixed32(&packet->ticket);
+  packet->vtable = reinterpret_cast<void**>(kVtGatewayBasePacket);
+}
+
+void InitStringFixed32(soeutil::StringFixed<32>* string) {
+  string->vtable = reinterpret_cast<void**>(kVtStringFixed32);
+  string->data = soeutil::EmptyStringData();
+  string->length = 0;
+  string->capacity = 0;
+}
+
+// 0x14162d5d0: send the gateway login request now if connected, otherwise
+// remember to send it from OnConnect.
+void GatewaySendLoginRequest(uint8_t* api) {
+  if (!ApiSlot<bool (*)(uint8_t*)>(api, kApiIsConnected)(api)) {
+    game::Field<bool>(api, kLoginPending) = true;
+    return;
+  }
+  LogInfo(api, reinterpret_cast<const char*>(0x1424be498));  // "OnConnect, sending login packet."
+  PacketLoginRequest packet;
+  packet.opcode = kOpcodeLoginRequest;
+  packet.channel = 0;
+  packet.vtable = reinterpret_cast<void**>(kVtPacketLoginRequest);
+  InitStringFixed32(&packet.ticket);
+  InitStringFixed32(&packet.clientProtocol);
+  InitStringFixed32(&packet.clientBuild);
+  packet.characterId = game::Field<uint64_t>(api, kCharacterId);
+  soeutil::StringAssignString(&packet.ticket, reinterpret_cast<soeutil::IString*>(api + kTicket));
+  soeutil::StringAssignString(&packet.clientProtocol, reinterpret_cast<soeutil::IString*>(api + kClientProtocol));
+  soeutil::StringAssignString(&packet.clientBuild, reinterpret_cast<soeutil::IString*>(api + kClientBuild));
+  {
+    soeutil::ScopedByteStream stream;
+    SerializeLoginRequest(&packet, &stream.active);
+    using SendFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+    ApiSlot<SendFn>(api, kApiSendSlot)(api, stream.Data(), stream.Size(), true);
+    if (game::Field<bool>(api, 0x1063) && game::Field<void*>(api, 0xD28)) game::Field<bool>(api, 0xD38) = true;
+  }
+  DestroyLoginRequest(&packet);
+}
+
 // 0x14162c020: serialize a header-only packet and send it reliably, or queue
 // it until the gateway login completes.
 bool GatewaySendPacket(uint8_t* api, const GatewayPacket* packet) {
@@ -337,7 +429,7 @@ void GatewayLogout(uint8_t* api, int disconnectTimeoutMs, bool forceDisconnectOn
 void GatewayOnConnect(uint8_t* api) {
   game::Field<bool>(api, kGatewayLoggedIn) = false;
   if (game::Field<bool>(api, kLoginPending)) {
-    game::Call<void (*)(uint8_t*)>(0x14162d5d0)(api);  // SendLoginRequest
+    GatewaySendLoginRequest(api);
   }
   if (void* listener = Listener(api)) {
     ListenerCall<void (*)(void*, uint8_t*)>(listener, kOnConnect)(listener, api);
@@ -362,6 +454,10 @@ void GatewayOnFailed(uint8_t* api) {
   }
 }
 
+REBUILD_FUNCTION(SoeUtil_WriteString, 0x140467e80, StreamWriteString);
+REBUILD_FUNCTION(Gateway_SerializeLoginRequest, 0x14162c1e0, SerializeLoginRequest);
+REBUILD_FUNCTION(Gateway_DestroyLoginRequest, 0x14162cdd0, DestroyLoginRequest);
+REBUILD_FUNCTION(Gateway_SendLoginRequest, 0x14162d5d0, GatewaySendLoginRequest);
 REBUILD_FUNCTION(Gateway_SendPacket, 0x14162c020, GatewaySendPacket);
 REBUILD_FUNCTION(Gateway_Logout, 0x14162d7d0, GatewayLogout);
 REBUILD_FUNCTION(Gateway_OnConnect, 0x14162d8a0, GatewayOnConnect);
