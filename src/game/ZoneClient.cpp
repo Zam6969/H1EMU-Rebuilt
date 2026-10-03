@@ -188,8 +188,9 @@ struct ZoneArray {
   void** vtable;
   void* data;
   int count;
-  int padding;
+  int capacity;
 };
+static_assert(offsetof(ZoneArray, capacity) == 0x14);
 
 // 0x14063ce60: ZoneArray destructor.
 void ZoneArrayDestroy(ZoneArray* array) {
@@ -282,6 +283,36 @@ void* AllocateContainerStorage(size_t size) {
   return soeutil::MemoryAllocate(static_cast<int>(size), 8);
 }
 
+// 0x14063d460 (ZoneArray slot 1): storage for `count` 16-byte elements.
+// Growth over-allocates by 5/4; a shrink keeps the current block unless the
+// request is under 3/4 of it (then 6/5 of the request). `exact` sizes the
+// block to `count` (0 frees nothing and returns null).
+void* ZoneArrayReserve(ZoneArray* array, int count, int* capacityOut, bool exact) {
+  int capacity = array->capacity;
+  int newCapacity;
+  if (exact) {
+    if (capacity == count) {
+      *capacityOut = capacity;
+      return array->data;
+    }
+    if (count == 0) {
+      *capacityOut = 0;
+      return nullptr;
+    }
+    newCapacity = count;
+  } else if (count > capacity) {
+    newCapacity = (count * 5) / 4;
+  } else {
+    if ((count * 4) / 3 >= capacity) {
+      *capacityOut = capacity;
+      return array->data;
+    }
+    newCapacity = (count * 6) / 5;
+  }
+  *capacityOut = newCapacity;
+  return AllocateContainerStorage(static_cast<size_t>(newCapacity << 4));
+}
+
 // Vtable slot 3 of the three zone client containers: free one node.
 void ZoneContainerFreeNode(void*, void* node) { FreeContainerStorage(node); }  // 0x14063d750/770/790
 
@@ -334,6 +365,7 @@ REBUILD_FUNCTION(GatewayListener_DeletingDestructor, 0x14063d3b0, GatewayListene
 REBUILD_FUNCTION(ZoneClient_ArrayDeletingDestructor, 0x14063d1f0, ZoneArrayDeletingDestructor);
 REBUILD_FUNCTION(ZoneClient_ListDeletingDestructor, 0x14063d260, ZoneListDeletingDestructor);
 REBUILD_FUNCTION(ZoneClient_StreamListDeletingDestructor, 0x14063d2a0, ZoneStreamListDeletingDestructor);
+REBUILD_FUNCTION(ZoneClient_ArrayReserve, 0x14063d460, ZoneArrayReserve);
 REBUILD_FUNCTION(ZoneClient_ArrayFreeNode, 0x14063d750, ZoneContainerFreeNode);
 REBUILD_FUNCTION(ZoneClient_ListFreeNode, 0x14063d770, ZoneContainerFreeNode);
 REBUILD_FUNCTION(ZoneClient_StreamListFreeNode, 0x14063d790, ZoneContainerFreeNode);

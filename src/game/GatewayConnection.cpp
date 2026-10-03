@@ -354,6 +354,88 @@ bool GatewayConnectionSendReliable(GatewayConnection* self, const void* data, in
   return SendOrQueue(self, data, length, true);
 }
 
+void Record(int kind, const uint8_t* data, int length, bool reliable, bool secure) {
+  void* recorder = *reinterpret_cast<void**>(0x142b19b98);
+  using RecordFn = void (*)(void*, int, const uint8_t*, int, bool, bool);
+  reinterpret_cast<RecordFn>((*static_cast<void***>(recorder))[0x48 / 8])(recorder, kind, data, length, reliable, secure);
+}
+
+// 0x14063c180: SendTunnel(data, length, channel, reliable) - direct on the
+// owning thread (after flushing, recorded), otherwise queued.
+bool GatewayConnectionSendTunnel(GatewayConnection* self, const uint8_t* data, int length, int channel, bool reliable) {
+  if (CurrentThreadId() != self->ownerThread) {
+    QueuedDataPacketEx* packet = nullptr;
+    if (void* memory = soeutil::Allocate(sizeof(QueuedDataPacketEx)))
+      packet = QueuedDataPacketExConstruct(static_cast<QueuedDataPacketEx*>(memory), self->api, data, length, channel,
+                                           reliable);
+    GatewayConnectionEnqueue(self, packet);
+    return true;
+  }
+  if (!GatewayConnectionFlushQueue(self)) return false;
+  Record(channel, data, length, reliable, false);
+  using TunnelFn = bool (*)(uint8_t*, const uint8_t*, int, uint8_t, bool, bool);
+  return game::Call<TunnelFn>(0x14162dcc0)(self->api, data, length, static_cast<uint8_t>(channel), reliable, false);
+}
+
+// A tunnel message: header fields, a byte and an int, and a list of byte chunks.
+struct TunnelChunk {
+  const uint8_t* data;
+  int length;
+  int padding;
+  TunnelChunk* next;  // +0x10
+};
+struct TunnelMessage {
+  uint64_t unknown0;
+  int16_t headerShort;  // +0x08 (written as u16)
+  int16_t padding;
+  int headerInt;        // +0x0C
+  int flags;            // +0x10 (low byte written)
+  int padding2;
+  uint64_t unknown18;
+  TunnelChunk* chunks;  // +0x20
+  uint64_t unknown28;
+  int value;            // +0x30
+};
+static_assert(offsetof(TunnelMessage, headerInt) == 0x0C && offsetof(TunnelMessage, chunks) == 0x20);
+static_assert(offsetof(TunnelMessage, value) == 0x30);
+
+// 0x14063c730: write the message header (u16, u32).
+void TunnelMessageWriteHeader(const TunnelMessage* message, soeutil::ByteStream* stream) {
+  uint16_t shortValue = static_cast<uint16_t>(message->headerShort);
+  soeutil::StreamPut(stream, &shortValue, 2);
+  int intValue = message->headerInt;
+  soeutil::StreamPut(stream, &intValue, 4);
+}
+
+// 0x14063c3e0: serialize a tunnel message and send it on `channel`.
+bool GatewayConnectionSendTunnelMessage(GatewayConnection* self, const TunnelMessage* message, int channel,
+                                        bool reliable) {
+  soeutil::ByteStream stream;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.inlineArray.data = nullptr;
+  stream.inlineArray.size = 0;
+  stream.inlineArray.unknown14 = 0;
+  stream.unknown202C = 0;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  stream.writePos = 0;
+  stream.array = &stream.inlineArray;
+  game::Call<void (*)(const TunnelMessage*, soeutil::ByteStream*)>(0x14063c730)(message, &stream);
+  uint8_t flags = static_cast<uint8_t>(message->flags);
+  soeutil::StreamPut(&stream, &flags, 1);
+  int value = message->value;
+  soeutil::StreamPut(&stream, &value, 4);
+  for (const TunnelChunk* chunk = message->chunks; chunk; chunk = chunk->next) {
+    int length = chunk->length;
+    soeutil::StreamPut(&stream, &length, 4);
+    soeutil::StreamPut(&stream, chunk->data, chunk->length);
+  }
+  const uint8_t* bytes = stream.array->size != 0 ? stream.array->data : nullptr;
+  bool ok = game::Call<bool (*)(GatewayConnection*, const uint8_t*, int, int, bool)>(0x14063c180)(
+      self, bytes, stream.writePos, channel, reliable);
+  soeutil::ByteArrayDestroy(&stream.inlineArray);
+  return ok;
+}
+
 // 0x14063b8f0: install a session key (type, key bytes, extra) on the gateway api.
 bool GatewayConnectionSetSessionKey(GatewayConnection* self, int type, const void* keyBytes, int extra) {
   alignas(8) uint8_t bytes[0x60];  // Crypto::ArraySecure<unsigned char,64,1>
@@ -456,6 +538,9 @@ REBUILD_FUNCTION(GatewayPacketList_PushFront, 0x14063c2d0, PacketListPushFront);
 REBUILD_FUNCTION(GatewayQueuedDataPacket_Construct, 0x14063b3d0, QueuedDataPacketConstruct);
 REBUILD_FUNCTION(GatewayConnection_Enqueue, 0x14063b820, GatewayConnectionEnqueue);
 REBUILD_FUNCTION(GatewayConnection_Send, 0x14063c030, GatewayConnectionSend);
+REBUILD_FUNCTION(GatewayConnection_SendTunnel, 0x14063c180, GatewayConnectionSendTunnel);
+REBUILD_FUNCTION(GatewayConnection_SendTunnelMessage, 0x14063c3e0, GatewayConnectionSendTunnelMessage);
+REBUILD_FUNCTION(GatewayTunnelMessage_WriteHeader, 0x14063c730, TunnelMessageWriteHeader);
 REBUILD_FUNCTION(GatewayConnection_SendReliable, 0x14063c0e0, GatewayConnectionSendReliable);
 REBUILD_FUNCTION(GatewayConnection_FlushQueue, 0x14063b9f0, GatewayConnectionFlushQueue);
 REBUILD_FUNCTION(GatewayConnection_SetSessionKey, 0x14063b8f0, GatewayConnectionSetSessionKey);
