@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <intrin.h>
 
 #include "core/game.h"
@@ -2370,6 +2371,70 @@ bool GameClientInit(uint8_t* game, const char* commandLine) {
   return true;
 }
 
+// Empties a string the way the game does before rebuilding it.
+void StringClear(soeutil::IString* text) {
+  soeutil::StringRelease(text);
+  text->data = soeutil::EmptyStringData();
+  text->length = 0;
+  text->capacity = 0;
+}
+
+// The overlay words are spelled from the character table at 0x142a00318
+// ("sghoaicdmtenpr") so they do not appear as plain strings in the exe.
+char OverlayChar(int index) { return reinterpret_cast<const char*>(0x142a00318)[index]; }
+
+// 0x1403e7ea0 (slot 103): draw the status overlay - "godmode" (local player
+// flag bit 25 at +0x1AD8), "hidden" (bit 31), "spectator" (player bit at
+// +0x109DB unless suppressed by 0x142b176cc), and, while the +0x388A8 mode
+// is 0x29, the name of the entry for +0x38E50 from *0x142b19cd0.
+void GameClientDrawStatusOverlay(uint8_t* game) {
+  void* display = game::Field<void*>(game, 0x38890);
+  auto* self = game::Call<uint8_t* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860));
+  if (game[0x3D518] || !self || !display) return;
+  using DrawFn = void (*)(void*, const char*, float, float, uint32_t);
+  auto draw = [&](const char* text, float x, float y, uint32_t color) { game::Call<DrawFn>(0x1404d8ff0)(display, text, x, y, color); };
+  float margin = *reinterpret_cast<float*>(0x14207289c);
+  auto suppressed = [] { return game::Call<bool (*)()>(0x1406ed8b0)(); };
+  soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  auto spell = [&](std::initializer_list<int> letters) {
+    StringClear(&text);
+    for (int letter : letters) StringAppendChar(&text, OverlayChar(letter));
+  };
+  unsigned flags = game::Field<unsigned>(self, 0x1AD8);
+  if ((flags >> 25) & 1 && !suppressed()) {
+    spell({1, 3, 7, 8, 3, 7, 10});  // "godmode"
+    draw(text.data, margin, margin, 0xFEF00000);
+  }
+  flags = game::Field<unsigned>(self, 0x1AD8);
+  if ((flags >> 31) & 1 && !suppressed()) {
+    spell({2, 5, 7, 7, 10, 11});  // "hidden"
+    draw(text.data, *reinterpret_cast<float*>(0x1420728b4), margin, 0xFE00F000);
+  }
+  auto* player = game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80);
+  if (player && (player[0x109DB] & 1) && !*reinterpret_cast<uint8_t*>(0x142b176cc)) {
+    spell({0, 12});  // "sp", then the rest through the out-of-line append
+    static const int kRest[] = {10, 6, 9, 4, 9, 3, 13};  // "ectator"
+    for (int letter : kRest) game::Call<void (*)(soeutil::IString*, char)>(0x140313b40)(&text, OverlayChar(letter));
+    draw(text.data, *reinterpret_cast<float*>(0x1420728bc), margin, 0xFEF0F000);
+  }
+  if (void* mode = game::Field<void*>(game, 0x388A8)) {
+    if ((*reinterpret_cast<int (***)(void*)>(mode))[0](mode) == 0x29) {
+      uint64_t key = game::Field<uint64_t>(game, 0x38E50);
+      if (auto* table = *reinterpret_cast<uint8_t**>(0x142b19cd0)) {
+        if (auto* entry = game::Call<uint8_t* (*)(uint8_t*, uint64_t*)>(0x1403ea6f0)(table + 0x80, &key)) {
+          float width = static_cast<float>(game::Call<int (*)(void*)>(0x1404d5820)(game::Field<void*>(game, 0x38890)));
+          float height = static_cast<float>(game::Call<int (*)(void*)>(0x1404d5d30)(game::Field<void*>(game, 0x38890)));
+          StringClear(&text);
+          game::Call<void (*)(soeutil::IString*, void*)>(0x140306d10)(&text, entry + 8);
+          draw(text.data, height * *reinterpret_cast<float*>(0x142072824), width * *reinterpret_cast<float*>(0x142072868), 0xFEF0F000);
+        }
+      }
+    }
+  }
+  text.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&text);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -2426,6 +2491,7 @@ REBUILD_FUNCTION(GameClient_PresentJob, 0x140431ca0, GameClientPresentJob);
 REBUILD_FUNCTION(GameClient_Initialize, 0x140432650, GameClientInitialize);
 REBUILD_FUNCTION(GameClient_HandlePacket83, 0x14040cd70, GameClientHandlePacket83);
 REBUILD_FUNCTION(GameClient_Init, 0x14040ed60, GameClientInit);
+REBUILD_FUNCTION(GameClient_DrawStatusOverlay, 0x1403e7ea0, GameClientDrawStatusOverlay);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
