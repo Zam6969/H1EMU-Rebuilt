@@ -306,6 +306,74 @@ uint8_t* RefHolderDeletingDestructor(uint8_t* self, unsigned flags) {
   return self;
 }
 
+// 0x140473f60 (slot 27): fatal error / shutdown(showUi, code, message, extra).
+// Logs "%s" with the message ("Unknown error" if null) - through the error UI
+// path (0x1403243b0 then 0x1403e1d80) when showUi, else to the plain log.
+void GameClientShutdown(uint8_t* game, bool showUi, int code, const char* message, void* extra) {
+  if (void* timer = game::Field<void*>(game, 0x312D8)) game::Call<void (*)(void*, int)>(0x14032d190)(timer, 0);
+  const char* text = message ? message : reinterpret_cast<const char*>(0x14206d318);  // "Unknown error"
+  const char* format = reinterpret_cast<const char*>(0x142046fb8);                  // "%s"
+  if (showUi) {
+    game::Call<void (*)(void*, const char*, const char*)>(0x1403243b0)(nullptr, format, text);
+    game::Call<void (*)(int, const char*, void*, void*)>(0x1403e1d80)(code, message, nullptr, extra);
+  } else {
+    game::Call<void (*)(void*, const char*, const char*)>(0x1402bab70)(nullptr, format, text);
+  }
+  game::Field<bool>(game, 0x38839) = false;
+}
+
+// 0x1403dd800 (slot 86): create the zone client (0x2B8 bytes) for this
+// character (+0x38BF0) and gateway ticket (+0x316B0).
+uint8_t* GameClientCreateZoneClient(uint8_t* game, bool threaded, bool compression) {
+  void* memory = GameAllocate(0x2B8);
+  if (!memory) return nullptr;
+  uint64_t characterId = game::Field<uint64_t>(game, 0x38BF0);
+  using ConstructFn = uint8_t* (*)(void*, uint64_t*, const char*, bool, bool, int, void*, int);
+  return game::Call<ConstructFn>(0x14063cc10)(memory, &characterId, game::Field<const char*>(game, 0x316B0), threaded,
+                                              compression, 0, nullptr, 1);
+}
+
+// 0x1404677e0 (slot 67): SendMountRequest(&target, seat, flag) - logged to
+// "#ClientMountLog.txt", then request 0x71 through *(0x142b19b98)+8.
+void GameClientSendMountRequest(uint8_t* game, const uint64_t* target, int seat, bool flag) {
+  game::Call<void (*)(const char*, const char*, uint64_t, uint64_t)>(0x1402bab70)(
+      reinterpret_cast<const char*>(0x142070228), reinterpret_cast<const char*>(0x1420701f0),
+      game::Field<uint64_t>(game, 0x38BF0), *target);
+  struct MountRequest {
+    void** vtable;
+    int type;     // 0x71
+    int padding;
+    int version;  // 1
+    int padding2;
+    uint64_t target;
+    int seat;
+    bool unknown;
+    bool flag;
+  } request{reinterpret_cast<void**>(0x142065c58), 0x71, 0, 1, 0, *target, seat, false, flag};
+  static_assert(offsetof(MountRequest, seat) == 0x20 && offsetof(MountRequest, flag) == 0x25);
+  void* sender = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19b98), 8);
+  game::Call<void (*)(void*, MountRequest*, int, bool)>(0x14035f730)(sender, &request, 0, true);
+}
+
+// 0x1403e9c70 (slot 121): inside a profiler scope "Asset Handler"
+// (*0x142b06d58 slots 1/2), poll *0x142ae89a8 slot 4 with (+0xA8, 10, true).
+void AssetHandlerUpdate(uint8_t* self) {
+  void* profiler = *reinterpret_cast<void**>(0x142b06d58);
+  bool scoped = false;
+  if (profiler) {
+    using BeginFn = void (*)(void*, const char*, uint32_t, void*);
+    reinterpret_cast<BeginFn>((*static_cast<void***>(profiler))[1])(profiler, reinterpret_cast<const char*>(0x142064ac8),
+                                                                    0x5192A6FA, nullptr);  // "Asset Handler"
+    scoped = true;
+  }
+  if (void* assets = *reinterpret_cast<void**>(0x142ae89a8)) {
+    using PollFn = void (*)(void*, int, int, bool);
+    reinterpret_cast<PollFn>((*static_cast<void***>(assets))[0x20 / 8])(assets, game::Field<int>(self, 0xA8), 10, true);
+  }
+  profiler = *reinterpret_cast<void**>(0x142b06d58);
+  if (scoped && profiler) reinterpret_cast<void (*)(void*)>((*static_cast<void***>(profiler))[2])(profiler);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -324,6 +392,10 @@ REBUILD_FUNCTION(GameClient_Slot61, 0x1403fd270, GameClientSlot61);
 REBUILD_FUNCTION(GameClient_Slot51, 0x140467880, GameClientSlot51);
 REBUILD_FUNCTION(GameClient_Slot84, 0x140433600, GameClientSlot84);
 REBUILD_FUNCTION(GameClient_Slot119, 0x1403c1020, RefHolderDeletingDestructor);
+REBUILD_FUNCTION(GameClient_Shutdown, 0x140473f60, GameClientShutdown);
+REBUILD_FUNCTION(GameClient_CreateZoneClient, 0x1403dd800, GameClientCreateZoneClient);
+REBUILD_FUNCTION(GameClient_SendMountRequest, 0x1404677e0, GameClientSendMountRequest);
+REBUILD_FUNCTION(AssetHandler_Update, 0x1403e9c70, AssetHandlerUpdate);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
