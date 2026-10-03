@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 
 #include "core/game.h"
@@ -337,6 +338,14 @@ struct ClickToMovePacket {
   int padding3;
 };
 static_assert(offsetof(ClickToMovePacket, pathVtable) == 0x20 && offsetof(ClickToMovePacket, pointCount) == 0x38);
+
+constexpr size_t kPacketDESize = 0x200F8;  // ctor 0x14039f350 initialises up to +0x200F0
+
+// {vtable, game client} callback object handed to 0x141710d40.
+struct GameCallback {
+  void** vtable;
+  uint8_t* game;
+};
 
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
@@ -1554,12 +1563,31 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(void***)>(0x1403a7100)(&packet.pathVtable);
       break;
     }
+    case 0xDE: {
+      StringPacket packet{reinterpret_cast<void**>(0x1420642c8), 0xDE, 0,
+                          {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0}};
+      using ReadFn = bool (*)(StringPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038ac50)(&packet, data, length, false)) {
+        // The original keeps this 0x200F8-byte object in its own frame; it
+        // lives on the heap here so this function's frame stays small.
+        std::unique_ptr<uint8_t[]> document(new uint8_t[kPacketDESize]);
+        game::Call<void (*)(uint8_t*)>(0x14039f350)(document.get());
+        game::Call<void (*)(uint8_t*, PacketString*)>(0x1417116c0)(document.get(), &packet.text);
+        GameCallback callback{reinterpret_cast<void**>(0x14206dde0), game};
+        game::Call<void (*)(uint8_t*, void*, GameCallback*)>(0x141710d40)(document.get(), GlobalObject(0x142b197a0),
+                                                                           &callback);
+        game::Call<void (*)(uint8_t*)>(0x1417107a0)(document.get());
+      }
+      game::Call<void (*)(StringPacket*)>(0x1403b0540)(&packet);
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
