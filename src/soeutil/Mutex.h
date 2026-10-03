@@ -11,6 +11,7 @@ namespace rebuild::soeutil {
 inline void* const kMutexHandleMarker = reinterpret_cast<void*>(0x142b06ba8);
 
 CRITICAL_SECTION* MutexConstruct(CRITICAL_SECTION* mutex, DWORD spinCount, const char* name);  // 0x14032ee90
+void MutexDestroy(CRITICAL_SECTION* mutex);  // 0x14032f060
 void MutexLock(CRITICAL_SECTION* mutex);    // 0x14032f270
 void MutexUnlock(CRITICAL_SECTION* mutex);  // 0x14032f360
 

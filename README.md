@@ -67,16 +67,17 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `LogicalPacket` family | complete: Logical, Simple, Group (incl. AddPacket), Pooled, Fixed<128/256/512/1024> |
 | UdpLibrary | `UdpMisc` | Put/GetVariableValue, Random, NextPrime, CreateQuickLogicalPacket |
 | UdpLibrary | `UdpManager::Params` | constructor with all 5 role presets |
-| SoeUtil | `Mutex` | Construct (named, spin count), Lock, Unlock (critical section or Win32 mutex mode) |
+| SoeUtil | `Mutex` | Construct (named, spin count), Destroy, Lock, Unlock (critical section or Win32 mutex mode) |
 | SoeUtil | `Time` | TimeNow (QueryPerformanceCounter ms) |
 | SoeUtil | `ByteStream` | layout (Array<uchar,8192,1> + cap + cursor, 0x2038) and the inlined stack/pooled stream setup, Put, teardown |
 | SoeUtil | `Array` / read cursor | Array::Resize (grow, size = min(count, capacity)), ReadBytes |
 | SoeUtil | `IString` / `StringFixed<N>` | layout (copy-on-write shared buffer with share count at data-4, inline N+4 buffer), Reserve, Assign, AssignString (buffer sharing), AssignN, IString Allocate/Free, and Allocate/Free/destructors for all 20 StringFixed sizes in the exe (5 to 65536) |
-| ClientServerCore | `UdpCompressionHandler` | Encrypt/Decrypt = packet compression (flag byte 01 deflate level 6 / 00 stored) |
+| ClientServerCore | `UdpCompressionHandler` | Encrypt/Decrypt = packet compression (flag byte 01 deflate level 6 / 00 stored); dtor, GetStats, ClearStats |
 | ClientServerCore | `BaseApi` incoming path | OnRoutePacket (stats, RPC routing, game dispatch via vtable slot 18, slow-packet logging), RPC router (64-bucket id hash, BE/LE ids), SoeUtil hex dump |
 | ClientServerCore | `BaseApi` connection API | Connect (address rotation, EstablishConnection), OnTerminated (reason, full stats log, OnDisconnect/OnFailed, release), IsConnected / IsConnecting, Send (raw + LogicalPacket), OnConnectComplete, Disconnect, Reconnect, GiveTime (auto-reconnect), WaitForConnect / WaitForDisconnect / WaitForFlush, guarded UdpConnection disconnect |
 | ClientServerCore | `BaseUdpManager` | SetInifileSection, SetLogChannel (+ BaseApi forwarder), ServiceStart (ini settings, UdpManager creation, socket errors, thread start), ServiceStop, GiveTime (event queuing, 30 s ini reload of UdpParams); UdpManager::SetHandler |
 | ClientServerCore | RPC plumbing | RpcRouter ctor/dtor, RpcHandlerTable ctor, 11 u16 id serializers (LE + big-endian template instances), BasePacket dtor, ByteStream dtor |
+| ClientServerCore | lifetime + accessors | ~BaseUdpManager, ~RpcManagerHandler, ~UdpConnectionHandler, BaseApi SetServer, reliable-channel stats (resend ratios), cached connection counters |
 | UdpLibrary | `UdpManager` | constructor (params fix-up, driver, receive ring, packet pool prefill, memory pools, hash tables, priority queue, port-range bind), ClearStatistics, destructor (incl. memory-pool teardown), OpenSocket, EstablishConnection, ExpectIncoming (NAT punch-through, 00 1F probes), DisconnectAll, PopEvent, DumpPacketHistory, list teardown helpers (5), GiveTime, ProcessRawPacket (incoming dispatch: connect, remap, unknown-terminate, unreachable reply), ActualReceive/Send/SendHelper, NextIncomingPacket, CreatePacket, connection lookup (by address and code), AddNewConnection, address/code hash tables (resize, insert, remove), event queue (alloc, clear, release, queue, DeliverEvents), all 6 handler callbacks, packet pool (3), clock (2), bandwidth buckets (2), priority-queue reprioritize, disconnect cleanup (4), SimulateQueueEntry ctor |
 | UdpLibrary | `UdpConnection` tick | both constructors (incoming / outgoing), destructor, deleting destructor, InternalGiveTime (connect retries, clock sync, reliable channels, multi-buffer hold, keep-alive, port-alive, disconnect drain, no-data timeout), ProcessApplicationPacket, Age, TotalPendingBytes, SetOtherSideTerminated; sync stamps + SyncStampShortDelta; manager SendPortAlive |
 | UdpLibrary | `UdpConnection` API | Send (all 8 channels: unreliable, unbuffered, ordered 1A/1B, reliable 1-4, with promotion to reliable), FlushNow, DrainSendQueue, GetChannelStatus, GetStats, GetDestinationIp/String, GetDisconnectReasonText, DisconnectReasonText (official reason names) |
@@ -90,7 +91,7 @@ carry RTTI; most engine classes were built without it.
 | Game | `Login::ExternalLoginUdpApi` handlers | all 10 reply handlers: LoginReply, ForceDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, ServerUpdate, TunnelAppPacketServerToClient (listener at +0x10) |
 | Game | `Login::ExternalLoginUdpApi` unserializers | all 10: ServerUpdate, LoginReply, ForcedDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, TunnelAppPacketServerToClient (packet layouts static_assert'd) + their Read functions: LoginReply, CharacterLogin/Delete/Transfer/SelectInfo, TunnelApp, server list, and the member readers: IString::Read, byte arrays, EntityDetails, ClientGameServerData, account-feature HashListMap, error details |
 
-Total: 446 functions (435 hooked, 11 too small to hook).
+Total: 457 functions (446 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,

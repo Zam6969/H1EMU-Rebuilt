@@ -58,6 +58,20 @@ CRITICAL_SECTION* MutexConstruct(CRITICAL_SECTION* mutex, DWORD spinCount, const
   return mutex;
 }
 
+// 0x14032f060: ~Mutex. Destroying a held mutex is a fatal error.
+void MutexDestroy(CRITICAL_SECTION* mutex) {
+  if (mutex->OwningThread) __debugbreak();
+  if (mutex->DebugInfo != kMutexHandleMarker) {
+    DeleteCriticalSection(mutex);
+    return;
+  }
+  if (mutex->LockCount != 0) __debugbreak();
+  HANDLE handle = InterlockedExchangePointer(&mutex->LockSemaphore, nullptr);
+  if (!handle) __debugbreak();
+  CloseHandle(handle);
+}
+
+REBUILD_FUNCTION(SoeUtil_MutexDestroy, 0x14032f060, MutexDestroy);
 REBUILD_FUNCTION(SoeUtil_MutexConstruct, 0x14032ee90, MutexConstruct);
 REBUILD_FUNCTION(SoeUtil_MutexLock, 0x14032f270, MutexLock);
 REBUILD_FUNCTION(SoeUtil_MutexUnlock, 0x14032f360, MutexUnlock);
