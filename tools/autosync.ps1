@@ -16,7 +16,9 @@ if ($good -ne $current) {
 git -c core.safecrlf=false add -A 2>&1 | Out-Null
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
-  $count = (Select-String -Path "$root\src\*\*.cpp" -Pattern "REBUILD_FUNCTION(_TOO_SMALL)?\(" | Measure-Object).Count
+  # hookcheck's self-test line: "selftest: N installed, 0 failed, M too small to hook"
+  $line = Select-String -Path "$root\build\Release\rebuild.log" -Pattern "selftest: (\d+) installed, \d+ failed, (\d+) too small" | Select-Object -Last 1
+  $count = [int]$line.Matches[0].Groups[1].Value + [int]$line.Matches[0].Groups[2].Value
   $message = "Auto-sync: $count rebuilt functions (build + hookcheck passing)`n`nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`n"
   $file = [IO.Path]::GetTempFileName()
   [IO.File]::WriteAllText($file, $message, (New-Object Text.UTF8Encoding $false))
