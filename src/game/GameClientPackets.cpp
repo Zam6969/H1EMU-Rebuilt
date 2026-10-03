@@ -542,6 +542,61 @@ void GameClientCheckIdle(uint8_t* game) {
   if (limitB != 0 && idleB > limitB) game::Call<IdleFn>(0x14047b7b0)(game, false);
 }
 
+// 0x1403fd180 (slot 60): client init - post "EVENT_CLIENT_INIT" to the
+// console UI, then run the UI's "GuiOnInit" if it has one, else open "Main".
+void GameClientOnInit(uint8_t* game) {
+  if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+    const char* event = reinterpret_cast<const char*>(0x14206ebb8);  // "EVENT_CLIENT_INIT"
+    soeutil::IString name{soeutil::IStringVtable(), const_cast<char*>(event), static_cast<int>(std::strlen(event)), -1};
+    game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(console, &name, nullptr, nullptr);
+    name.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&name);
+  }
+  const char* onInit = reinterpret_cast<const char*>(0x14206ba40);  // "GuiOnInit"
+  if (!game::Call<bool (*)(void*, const char*)>(0x14048b2d0)(UiRoot(), onInit))
+    game::Call<void (*)(uint8_t*, const char*)>(0x1403fcfc0)(game, reinterpret_cast<const char*>(0x14206ebcc));  // "Main"
+  else
+    game::Call<void (*)(void*, const char*, void*, void*)>(0x140488cc0)(UiRoot(), onInit, nullptr, nullptr);
+}
+
+// 0x140408340 (slot 98): a server-side event packet (opcode 0x14) - stores
+// its value at +0x3B7FC; type 0x7D runs 0x14046fde0, type 0x7E hides the
+// respawn window, anything else goes to the console object (+0x388C8, slot 5).
+void GameClientHandleEvent(uint8_t* game, const uint8_t* data, int length) {
+  struct EventPacket {
+    void** vtable;
+    int opcode;
+    int padding;
+    int type;   // +0x10
+    int padding2;
+    int value;  // +0x18
+    int padding3;
+  } packet{reinterpret_cast<void**>(0x1420682a8), 0x14, 0, 0, 0, 0, 0};
+  static_assert(offsetof(EventPacket, value) == 0x18);
+  if (!data) return;
+  struct Reader {
+    const uint8_t* start;
+    int length;
+    const uint8_t* cursor;
+    const uint8_t* end;
+    uint16_t failed;
+  } reader{data, length, data, data + length, 0};
+  game::Call<void (*)(EventPacket*, Reader*)>(0x1403658b0)(&packet, &reader);
+  if (static_cast<uint8_t>(reader.failed)) return;
+  game::Field<int>(game, 0x3B7FC) = packet.value;
+  if (packet.type == 0x7D) {
+    game::Call<void (*)(uint8_t*)>(0x14046fde0)(game);
+  } else if (packet.type == 0x7E) {
+    game::Call<void (*)(void*, const char*, void*, void*)>(0x140488cc0)(
+        UiRoot(), reinterpret_cast<const char*>(0x14206f3b0), nullptr, nullptr);  // "RespawnWindow:Hide"
+    game::Call<void (*)(uint8_t*)>(0x14047bc30)(game);
+    if (void* respawn = game::Field<void*>(game, 0x388A0)) game::Call<void (*)(void*, bool)>(0x1406145e0)(respawn, true);
+  } else {
+    void* console = game::Field<void*>(game, 0x388C8);
+    reinterpret_cast<void (*)(void*, const uint8_t*, int)>((*static_cast<void***>(console))[0x28 / 8])(console, data, length);
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -573,6 +628,8 @@ REBUILD_FUNCTION(GameClient_SetLoginInfo, 0x14040ec00, GameClientSetLoginInfo);
 REBUILD_FUNCTION(GameClient_Slot45, 0x14046ceb0, GameClientSlot45);
 REBUILD_FUNCTION(GameClient_Slot46, 0x14046c250, GameClientSlot46);
 REBUILD_FUNCTION(GameClient_CheckIdle, 0x1403d33f0, GameClientCheckIdle);
+REBUILD_FUNCTION(GameClient_OnInit, 0x1403fd180, GameClientOnInit);
+REBUILD_FUNCTION(GameClient_HandleEvent, 0x140408340, GameClientHandleEvent);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
