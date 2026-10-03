@@ -661,6 +661,82 @@ void GameClientShutdownUi(uint8_t* game) {
   }
 }
 
+// 0x14043d480 (slot 10): input event. Updates the cursor-mode state from
+// event 0x21, stamps the last-input time (+0x3B7E8), then (when input is
+// enabled, +0x38DED) offers the event to *0x142b19c90, *0x142b19b00 and
+// finally *0x142b1f8f8; event 0x14 also feeds the recorder at +0x3B668.
+bool GameClientHandleInput(uint8_t* game, uint8_t* event) {
+  bool focus = game::Call<bool (*)(void*)>(0x140615d60)(game::Field<void*>(game, 0x388A0));
+  game::Call<void (*)(void*, bool)>(0x140cf6220)(game::Field<void*>(game, 0x38AC8), focus);
+  if (game::Field<int>(event, 0) == 0x21) {
+    game::Field<int>(game, 0x3D538) = game::Field<int>(event, 0x28);
+    game::Field<int>(game, 0x3D53C) = game::Field<int>(event, 0x2C);
+    uint8_t mode = game::Field<uint8_t>(game, 0x3D540);
+    if (mode == 0 && game::Field<int>(event, 0x38) != 0) {
+      game::Field<uint16_t>(game, 0x3D540) = 0x101;
+    } else if (mode == 1 && game::Field<int>(event, 0x38) == 0) {
+      game::Field<uint8_t>(game, 0x3D540) = 0;
+      game::Field<uint8_t>(game, 0x3D542) = 1;
+    }
+  }
+  uint64_t slot;
+  game::Field<uint64_t>(game, 0x3B7E8) = *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&slot);
+  if (game::Field<bool>(game, 0x38DED)) {
+    bool skip = false;
+    if (void* first = *reinterpret_cast<void**>(0x142b19c90)) {
+      int context = game::Field<int>(game::Field<uint8_t*>(game, 0x388A0), 0x124C0);
+      skip = !game::Call<bool (*)(void*, uint8_t*, int)>(0x1413937a0)(first, event, context);
+    }
+    if (!skip) {
+      void* second = *reinterpret_cast<void**>(0x142b19b00);
+      if (!(second && game::Call<bool (*)(void*, uint8_t*)>(0x140915980)(second, event)))
+        game::Call<void (*)(void*, uint8_t*, bool)>(0x1404a8730)(*reinterpret_cast<void**>(0x142b1f8f8), event, true);
+    }
+    if (game::Field<int>(event, 0) == 0x14 && game::Field<bool>(game, 0x3B65E) && game::Field<uint8_t>(game, 0x3B65F) >= 0x80)
+      game::Call<void (*)(uint8_t*, uint8_t*)>(0x140359dc0)(game + 0x3B668, event + 0x20);
+  }
+  return true;
+}
+
+// 0x14040b600 (slot 74): an entity update for an entity that belongs to us
+// (0x1404735e0 in its owner chain) and is not in the hash at +0x3B838:
+// store the byte at +0x5B0 and run its slot-53 builder + 0x1404fd1c0.
+bool GameClientSlot74(uint8_t* game, uint8_t* update) {
+  int key = game::Field<int>(update, 0x10);
+  auto* entity = game::Call<uint8_t* (*)(void*, int*)>(0x14071f100)(game::Field<void*>(game, 0x38860), &key);
+  uint8_t* owned = nullptr;
+  if (entity) {
+    void* self = game::Call<void* (*)()>(0x1404735e0)();
+    uint8_t* chain = entity + 0x20;
+    for (void* node = reinterpret_cast<void* (*)(uint8_t*)>((*reinterpret_cast<void***>(chain))[0])(chain); node;
+         node = *static_cast<void**>(node)) {
+      if (node == self) {
+        owned = entity;
+        break;
+      }
+    }
+  }
+  if (!owned) return true;
+  uint8_t* identity = owned + 0x630;
+  uint64_t idSlot[2];
+  uint64_t id = *reinterpret_cast<uint64_t* (*)(uint8_t*, uint64_t*)>((*reinterpret_cast<void***>(identity))[0x68 / 8])(identity, idSlot);
+  for (auto* node = game::Field<uint8_t*>(game, 0x3B838 + ((static_cast<uint32_t>(id >> 32) ^ static_cast<uint32_t>(id)) & 0x1F) * 8);
+       node; node = game::Field<uint8_t*>(node, 0x28)) {
+    if (game::Field<uint64_t>(node, 0x20) == id) return false;
+  }
+  game::Field<uint8_t>(owned, 0x5B0) = update[0x14];
+  alignas(16) uint8_t body[0x1A0];
+  game::Call<void (*)(uint8_t*)>(0x1417f2640)(body);
+  if (!reinterpret_cast<bool (*)(uint8_t*, uint8_t*)>((*reinterpret_cast<void***>(owned))[0x1A8 / 8])(owned, body)) {
+    game::Call<void (*)(uint8_t*)>(0x1417f2750)(body);
+    return false;
+  }
+  game::Call<void (*)(uint8_t*, uint8_t)>(0x1417f52b0)(body, update[0x14]);
+  game::Call<void (*)(uint8_t*, uint8_t*)>(0x1404fd1c0)(owned, body);
+  game::Call<void (*)(uint8_t*)>(0x1417f2750)(body);
+  return true;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -696,6 +772,8 @@ REBUILD_FUNCTION(GameClient_OnInit, 0x1403fd180, GameClientOnInit);
 REBUILD_FUNCTION(GameClient_HandleEvent, 0x140408340, GameClientHandleEvent);
 REBUILD_FUNCTION(GameClient_HandlePacket93, 0x14040b790, GameClientHandlePacket93);
 REBUILD_FUNCTION(GameClient_ShutdownUi, 0x140470b70, GameClientShutdownUi);
+REBUILD_FUNCTION(GameClient_HandleInput, 0x14043d480, GameClientHandleInput);
+REBUILD_FUNCTION(GameClient_Slot74, 0x14040b600, GameClientSlot74);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
