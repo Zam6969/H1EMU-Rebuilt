@@ -1,4 +1,4 @@
-// The game's zone client (vtable 0x1420dd6e0, 0x2B8 bytes): the gateway
+﻿// The game's zone client (vtable 0x1420dd6e0, 0x2B8 bytes): the gateway
 // listener. Gateway::ExternalGatewayApi calls these slots:
 //   0 dtor, 1 OnConnect, 2 OnDisconnect, 3 OnFailed, 4 OnLoginReply,
 //   5 OnForcedLogout, 6 OnChannelIsRoutable, 7 OnConnectionIsNotRoutable,
@@ -8,6 +8,8 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Memory.h"
+#include "soeutil/String.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -74,7 +76,8 @@ struct ZonePacketHeader {
 };
 
 constexpr uint8_t kOpcodeF5 = 0xF5;
-constexpr size_t kOpcodeF5Value = 0x2B0;  // float set by opcode 0xF5 (meaning not identified yet)
+constexpr size_t kOpcodeF5Value = 0x2B0;  // float set by opcode 0xF5 (1200.0 at construction)
+constexpr size_t kLastTime = 0x278;       // u64 time, set at construction
 
 }  // namespace
 
@@ -121,9 +124,58 @@ void ZoneClientOnTunnelData(uint8_t* client, void* /*api*/, int channel, const u
   reinterpret_cast<HandleFn>((*static_cast<void***>(game))[0x150 / 8])(game, channel, &header, data, length);
 }
 
+// 0x14032fd30: *out = current time; returns out.
+uint64_t* TimeNow(uint64_t* out) { return game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(out); }
+
+// 0x14063cc10: ZoneClient(characterId, ticket, threaded, compression, port,
+// params, unused) - creates the gateway connection (protocol from
+// "ClientProtocol_1080", build from *0x1429fbd88) and registers as its listener.
+uint8_t* ZoneClientConstruct(uint8_t* self, const uint64_t* characterId, const char* ticket, bool threaded,
+                             bool compression, int port, void* params, int unused) {
+  game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd6e0);
+  game::Call<void (*)(uint8_t*)>(0x1417a5ee0)(self + 0x10);
+  game::Field<uint64_t>(self, kLastTime) = 0;
+  game::Field<int>(self, 0x280) = 0x32;
+  game::Field<void*>(self, 0x288) = reinterpret_cast<void*>(0x1420dd6c0);  // list {vtable, head, tail, count}
+  game::Field<int>(self, 0x2A0) = 0;
+  game::Field<void*>(self, 0x290) = nullptr;
+  game::Field<void*>(self, 0x298) = nullptr;
+  TimeNow(reinterpret_cast<uint64_t*>(self + 0x2A8));
+  soeutil::StringFixed<256> protocol;
+  protocol.vtable = reinterpret_cast<void**>(0x142049e08);
+  protocol.data = soeutil::EmptyStringData();
+  protocol.length = 0;
+  protocol.capacity = 0;
+  soeutil::StringFormat(&protocol, reinterpret_cast<const char*>(0x142046fb8),
+                        *reinterpret_cast<const char**>(0x142ac17a0));  // "%s", "ClientProtocol_1080"
+  uint8_t* connection = nullptr;
+  if (void* memory = soeutil::Allocate(0x80)) {
+    uint64_t id = *characterId;
+    using ConstructFn = uint8_t* (*)(void*, uint64_t*, const char*, const char*, const char*, bool, bool, int, void*,
+                                     int, bool);
+    connection = game::Call<ConstructFn>(0x14063b470)(memory, &id, ticket, protocol.data,
+                                                      *reinterpret_cast<const char**>(0x1429fbd88), threaded,
+                                                      compression, port, params, unused, true);
+  }
+  game::Field<uint8_t*>(self, 8) = connection;
+  game::Call<void (*)(uint8_t*, void*)>(0x14063c2a0)(connection, self);  // SetListener
+  game::Call<void (*)(uint8_t*, bool)>(0x14063c290)(game::Field<uint8_t*>(self, 8), false);  // SetLoginPending
+  game::Field<int>(game::Call<uint8_t* (*)(uint8_t*)>(0x14063bcd0)(game::Field<uint8_t*>(self, 8)), 0x70) = 1;
+  game::Field<int>(game::Call<uint8_t* (*)(uint8_t*)>(0x14063bcd0)(game::Field<uint8_t*>(self, 8)), 0x3C) = 5;
+  game::Field<float>(self, 0x270) = 1.0f;
+  game::Field<float>(self, 0x274) = 1.0f;
+  uint64_t now;
+  game::Field<uint64_t>(self, kLastTime) = *TimeNow(&now);
+  game::Field<float>(self, kOpcodeF5Value) = 1200.0f;
+  protocol.vtable = reinterpret_cast<void**>(0x142049de8);  // IStringFixed<char,256>
+  soeutil::StringRelease(&protocol);
+  return self;
+}
+
 // Slots 3, 4, 5, 9: `ret 0` - nothing to do.
 void ZoneClientIgnore() {}
 
+REBUILD_FUNCTION(ZoneClient_Construct, 0x14063cc10, ZoneClientConstruct);
 REBUILD_FUNCTION(ZoneClient_OnConnect, 0x14063dbb0, ZoneClientOnConnect);
 REBUILD_FUNCTION(ZoneClient_OnChannelIsRoutable, 0x14063db80, ZoneClientOnChannelIsRoutable);
 REBUILD_FUNCTION(ZoneClient_OnConnectionIsNotRoutable, 0x14063dc00, ZoneClientOnConnectionIsNotRoutable);
