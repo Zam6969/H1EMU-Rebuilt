@@ -8,6 +8,7 @@
 #include "core/game.h"
 #include "core/hook.h"
 #include "soeutil/Allocator.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
 
 namespace rebuild::game_net {
@@ -197,6 +198,69 @@ void SendRequest(uint8_t* requests, Packet* packet, uintptr_t udpSend, uintptr_t
 
 }  // namespace
 
+// ---- UDP request serialization: opcode byte, fields, then BaseApi::Send
+// (slot 20, reliable).
+
+// 0x141639030: Array<unsigned char>::Write (int32 count, then bytes if any).
+void WriteByteArray(soeutil::ByteStream** stream, const RequestByteArray* array) {
+  int count = array->size;
+  soeutil::StreamPut(*stream, &count, 4);
+  if (count > 0) soeutil::StreamPut(*stream, array->data, count);
+}
+
+namespace {
+void PutOpcode(soeutil::ByteStream** stream, const RequestHeader* packet) {
+  uint8_t opcode = static_cast<uint8_t>(packet->opcode);
+  soeutil::StreamPut(*stream, &opcode, 1);
+}
+void PutU64(soeutil::ByteStream** stream, uint64_t value) { soeutil::StreamPut(*stream, &value, 8); }
+
+template <typename Serialize>
+bool SendSerialized(uint8_t* api, Serialize serialize) {
+  soeutil::ScopedByteStream stream;
+  serialize(&stream.active);
+  using SendFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+  return reinterpret_cast<SendFn>((*reinterpret_cast<void***>(api))[0xA0 / 8])(api, stream.Data(), stream.Size(), true);
+}
+}  // namespace
+
+// 0x1416365a0: CharacterDeleteRequest::Serialize
+void SerializeCharacterDelete(const uint8_t* packet, soeutil::ByteStream** stream) {
+  PutOpcode(stream, reinterpret_cast<const RequestHeader*>(packet));
+  PutU64(stream, *reinterpret_cast<const uint64_t*>(packet + 0x10));
+}
+
+// 0x1416364d0: CharacterCreateRequest::Serialize
+void SerializeCharacterCreate(const uint8_t* packet, soeutil::ByteStream** stream) {
+  PutOpcode(stream, reinterpret_cast<const RequestHeader*>(packet));
+  PutU64(stream, *reinterpret_cast<const uint64_t*>(packet + 0x10));  // server id
+  WriteByteArray(stream, reinterpret_cast<const RequestByteArray*>(packet + 0x18));
+}
+
+// 0x141636670: CharacterLoginRequest::Serialize
+void SerializeCharacterLogin(const uint8_t* packet, soeutil::ByteStream** stream) {
+  PutOpcode(stream, reinterpret_cast<const RequestHeader*>(packet));
+  PutU64(stream, *reinterpret_cast<const uint64_t*>(packet + 0x10));  // character id
+  PutU64(stream, *reinterpret_cast<const uint64_t*>(packet + 0x18));  // server id
+  WriteByteArray(stream, *reinterpret_cast<RequestByteArray* const*>(packet + 0x20));
+}
+
+// 0x141635270 / 0x1416350d0 / 0x141635410: send a serialized request.
+bool LoginSendCharacterDelete(uint8_t* api, const uint8_t* packet) {
+  return SendSerialized(api, [packet](soeutil::ByteStream** s) { SerializeCharacterDelete(packet, s); });
+}
+bool LoginSendCharacterCreate(uint8_t* api, const uint8_t* packet) {
+  return SendSerialized(api, [packet](soeutil::ByteStream** s) { SerializeCharacterCreate(packet, s); });
+}
+bool LoginSendCharacterLogin(uint8_t* api, const uint8_t* packet) {
+  return SendSerialized(api, [packet](soeutil::ByteStream** s) { SerializeCharacterLogin(packet, s); });
+}
+
+// 0x1416355b0: header-only request (CharacterSelectInfoRequest).
+bool LoginSendHeaderOnly(uint8_t* api, const uint8_t* packet) {
+  return SendSerialized(api, [packet](soeutil::ByteStream** s) { PutOpcode(s, reinterpret_cast<const RequestHeader*>(packet)); });
+}
+
 // 0x14163d900: CharacterDeleteRequest(characterId)
 void LoginRequestCharacterDelete(uint8_t* requests, const uint64_t* characterId) {
   struct : RequestHeader {
@@ -265,6 +329,14 @@ REBUILD_FUNCTION(Login_OnCharacterSelectInfoReply, 0x14163dc60, LoginOnCharacter
 REBUILD_FUNCTION(Login_OnServerListReply, 0x14163ddc0, LoginOnServerListReply);
 REBUILD_FUNCTION(Login_OnServerUpdate, 0x14163dde0, LoginOnServerUpdate);
 REBUILD_FUNCTION(Login_OnTunnelAppPacket, 0x14163de00, LoginOnTunnelAppPacket);
+REBUILD_FUNCTION(Login_WriteByteArray, 0x141639030, WriteByteArray);
+REBUILD_FUNCTION(Login_SerializeCharacterDelete, 0x1416365a0, SerializeCharacterDelete);
+REBUILD_FUNCTION(Login_SerializeCharacterCreate, 0x1416364d0, SerializeCharacterCreate);
+REBUILD_FUNCTION(Login_SerializeCharacterLogin, 0x141636670, SerializeCharacterLogin);
+REBUILD_FUNCTION(Login_SendCharacterDelete, 0x141635270, LoginSendCharacterDelete);
+REBUILD_FUNCTION(Login_SendCharacterCreate, 0x1416350d0, LoginSendCharacterCreate);
+REBUILD_FUNCTION(Login_SendCharacterLogin, 0x141635410, LoginSendCharacterLogin);
+REBUILD_FUNCTION(Login_SendHeaderOnly, 0x1416355b0, LoginSendHeaderOnly);
 REBUILD_FUNCTION(Login_RequestCharacterDelete, 0x14163d900, LoginRequestCharacterDelete);
 REBUILD_FUNCTION(Login_RequestCharacterSelectInfo, 0x14163db00, LoginRequestCharacterSelectInfo);
 REBUILD_FUNCTION(Login_RequestCharacterLogin, 0x14163e310, LoginRequestCharacterLogin);
