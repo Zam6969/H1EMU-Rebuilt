@@ -14,8 +14,8 @@ namespace {
 
 using O = ConnectionOffsets;
 
-constexpr int kReasonApplication = 2;          // no data timeout
-constexpr int kReasonConnectTimeout = 5;
+constexpr int kReasonTimeout = 2;
+constexpr int kReasonConnectFail = 5;
 constexpr int kReasonReliableOverflow = 13;
 
 UdpManager* Manager(UdpConnection* c) { return ConnField<UdpManager*>(c, O::kManager); }
@@ -117,7 +117,7 @@ void ConnectionInternalGiveTime(UdpConnection* c) {
   if (status == kStatusNegotiating) {
     int connectTimeout = ConnField<int>(c, 0x1B8);
     if (connectTimeout > 0 && ConnectionAge(c) > connectTimeout) {
-      ConnectionDisconnect(c, 0, kReasonConnectTimeout);
+      ConnectionDisconnect(c, 0, kReasonConnectFail);
       return;
     }
     int sinceSend = ConnectionElapsed(c, ConnField<int64_t>(c, 0x238));
@@ -236,7 +236,7 @@ void ConnectionInternalGiveTime(UdpConnection* c) {
       int silent = ConnectionElapsed(c, ConnField<int64_t>(c, 0x240));
       guard.Leave();
       if (ConnField<int>(c, 0x1BC) <= silent) {
-        ConnectionDisconnect(c, 0, kReasonApplication);
+        ConnectionDisconnect(c, 0, kReasonTimeout);
         return;
       }
       takeMin(ConnField<int>(c, 0x1BC) - silent);

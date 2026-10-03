@@ -36,11 +36,11 @@ enum Opcode : uint8_t {
 // Disconnect reasons used here.
 constexpr int kReasonOtherSideTerminated = 3;
 constexpr int kReasonUnreachableConnection = 7;
-constexpr int kReasonConnectCodeMismatch = 9;
+constexpr int kReasonNewConnectionAttempt = 9;
 constexpr int kReasonProtocolMismatch = 16;
 // Terminate reasons sent while still negotiating.
-constexpr uint16_t kTerminateNewConnectionAttempt = 11;
-constexpr uint16_t kTerminateConnectionRefused = 12;
+constexpr uint16_t kTerminateConnectError = 11;
+constexpr uint16_t kTerminateConnectingToSelf = 12;  // our own connect code came back
 constexpr int kCorruptMultiPacket = 1;
 constexpr int kCorruptGroupPacket = 7;
 
@@ -115,12 +115,12 @@ void HandleConnect(UdpConnection* c, const uint8_t* p, int length) {
 
   if (ConnField<int>(c, UdpConnectionInternals::kStatus) == kStatusNegotiating) {
     SendTerminatePacket(c, connectCode,
-                        connectCode == ConnField<uint32_t>(c, O::kConnectCode) ? kTerminateConnectionRefused
-                                                                               : kTerminateNewConnectionAttempt);
+                        connectCode == ConnField<uint32_t>(c, O::kConnectCode) ? kTerminateConnectingToSelf
+                                                                               : kTerminateConnectError);
     return;
   }
   if (connectCode != ConnField<uint32_t>(c, O::kConnectCode)) {
-    ConnectionDisconnect(c, 0, kReasonConnectCodeMismatch);
+    ConnectionDisconnect(c, 0, kReasonNewConnectionAttempt);
     return;
   }
 

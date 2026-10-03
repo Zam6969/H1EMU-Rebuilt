@@ -20,6 +20,27 @@ enum UdpConnectionStatus {
 };
 
 // UdpLibrary encryption methods, per pass (two passes, ints at +0x1F8).
+// UdpConnection::DisconnectReason (names from the game's own string table, 0x140346020).
+enum DisconnectReason {
+  kDisconnectReasonNone = 0,
+  kDisconnectReasonIcmpError = 1,
+  kDisconnectReasonTimeout = 2,
+  kDisconnectReasonOtherSideTerminated = 3,
+  kDisconnectReasonManagerDeleted = 4,
+  kDisconnectReasonConnectFail = 5,
+  kDisconnectReasonApplication = 6,
+  kDisconnectReasonUnreachableConnection = 7,
+  kDisconnectReasonUnacknowledgedTimeout = 8,
+  kDisconnectReasonNewConnectionAttempt = 9,
+  kDisconnectReasonConnectionRefused = 10,
+  kDisconnectReasonConnectError = 11,
+  kDisconnectReasonConnectingToSelf = 12,
+  kDisconnectReasonReliableOverflow = 13,
+  kDisconnectReasonApplicationReleased = 14,
+  kDisconnectReasonCorruptPacket = 15,
+  kDisconnectReasonProtocolMismatch = 16,
+};
+
 enum UdpEncryptMethod {
   kEncryptNone = 0,
   kEncryptUserSupplied = 1,

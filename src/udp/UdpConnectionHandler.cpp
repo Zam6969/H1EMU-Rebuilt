@@ -18,8 +18,6 @@ enum HandlerSlot {
 };
 
 constexpr int kStatusDisconnectPending = 3;
-constexpr int kDisconnectReasonApplicationReleased = 14;
-constexpr int kDisconnectReasonNoCallback = 4;  // reason that suppresses the Terminated callback
 
 struct HandlerScope {
   explicit HandlerScope(UdpConnection* c)
@@ -63,9 +61,9 @@ void ConnectionDisconnect(UdpConnection* c, int flushTimeout, int reason) {
       ConnField<int64_t>(c, O::kCachedTime) = ConnectionClock(c);
       ConnField<UdpManager*>(c, O::kManager) = nullptr;
       status = kStatusDisconnected;
-      if (reason != kDisconnectReasonNoCallback) manager->VirtualAddRef();
+      if (reason != kDisconnectReasonManagerDeleted) manager->VirtualAddRef();
       ManagerRemoveConnection(manager, c);
-      if (reason != kDisconnectReasonNoCallback) {
+      if (reason != kDisconnectReasonManagerDeleted) {
         CallbackTerminated(manager, c);
         manager->VirtualRelease();
       }

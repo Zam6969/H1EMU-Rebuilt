@@ -21,8 +21,6 @@ enum CorruptReason {
   kCorruptCrcTooShort = 6,
 };
 
-constexpr int kDisconnectReasonUnreachable = 1;
-constexpr int kDisconnectReasonCorruptPacket = 15;
 
 struct MethodSlot {
   uintptr_t function;
@@ -81,7 +79,7 @@ void ConnectionPortUnreachable(UdpConnection* c) {
     }
     if (ConnectionElapsed(c, firstError) < Manager(c)->IcmpErrorRetryPeriod()) return;
   }
-  ConnectionDisconnect(c, 0, kDisconnectReasonUnreachable);
+  ConnectionDisconnect(c, 0, kDisconnectReasonIcmpError);
 }
 
 // 0x140345b80. A corrupt packet on an established connection is reported
