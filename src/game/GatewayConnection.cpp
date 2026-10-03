@@ -7,6 +7,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Mutex.h"
 
 namespace rebuild::game_net {
@@ -57,6 +58,122 @@ GatewayConnection* GatewayConnectionConstruct(GatewayConnection* self, const uin
   self->flag = false;
   soeutil::MutexConstruct(&self->mutex, 4000, nullptr);
   return self;
+}
+
+// Packets the connection queues: a base record and two variants carrying a
+// copy of the payload in a SoeUtil byte stream (vtables 0x1420dd1d0 /
+// 0x1420dd1f0 / 0x1420dd210).
+struct QueuedPacket {
+  void** vtable;
+  uint64_t id;      // +0x08
+  int channel;      // +0x10
+  int padding;
+};
+static_assert(sizeof(QueuedPacket) == 0x18);
+
+struct QueuedDataPacket : QueuedPacket {
+  soeutil::ByteStream stream;  // +0x18
+};
+static_assert(offsetof(QueuedDataPacket, stream) == 0x18 && sizeof(QueuedDataPacket) == 0x2050);
+
+struct QueuedDataPacketEx : QueuedDataPacket {
+  int extra;  // +0x2050
+  int padding2;
+};
+static_assert(offsetof(QueuedDataPacketEx, extra) == 0x2050 && sizeof(QueuedDataPacketEx) == 0x2058);
+
+constexpr uintptr_t kVtQueuedPacket = 0x1420dd1d0;
+constexpr uintptr_t kVtQueuedDataPacketEx = 0x1420dd210;
+
+void SizedDelete(void* object, size_t size) { game::Call<void (*)(void*, size_t)>(0x140d0fb84)(object, size); }
+
+// 0x14063b750: QueuedPacket scalar deleting destructor.
+QueuedPacket* QueuedPacketDeletingDestructor(QueuedPacket* self, unsigned flags) {
+  self->vtable = reinterpret_cast<void**>(kVtQueuedPacket);
+  if (flags & 1) SizedDelete(self, sizeof(QueuedPacket));
+  return self;
+}
+
+// 0x14063b780 / 0x14063b7d0: data packet deleting destructors.
+QueuedDataPacket* QueuedDataPacketDeletingDestructor(QueuedDataPacket* self, unsigned flags) {
+  soeutil::ByteArrayDestroy(&self->stream.inlineArray);
+  self->vtable = reinterpret_cast<void**>(kVtQueuedPacket);
+  if (flags & 1) SizedDelete(self, sizeof(QueuedDataPacket));
+  return self;
+}
+QueuedDataPacketEx* QueuedDataPacketExDeletingDestructor(QueuedDataPacketEx* self, unsigned flags) {
+  soeutil::ByteArrayDestroy(&self->stream.inlineArray);
+  self->vtable = reinterpret_cast<void**>(kVtQueuedPacket);
+  if (flags & 1) SizedDelete(self, sizeof(QueuedDataPacketEx));
+  return self;
+}
+
+// 0x14063b590: QueuedDataPacketEx(id, data, length, extra, channel).
+QueuedDataPacketEx* QueuedDataPacketExConstruct(QueuedDataPacketEx* self, uint64_t id, const void* data, int length,
+                                                int extra, int channel) {
+  self->id = id;
+  self->channel = channel;
+  self->vtable = reinterpret_cast<void**>(kVtQueuedDataPacketEx);
+  soeutil::ByteStream& stream = self->stream;
+  stream.inlineArray.data = nullptr;
+  stream.inlineArray.size = 0;
+  stream.inlineArray.unknown14 = 0;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.unknown202C = 0;
+  stream.writePos = 0;
+  stream.array = &stream.inlineArray;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  self->extra = extra;
+  soeutil::StreamPut(&stream, data, length);
+  return self;
+}
+
+// Intrusive list of queued packets at connection+0x10 (vtable 0x1420dd230).
+struct PacketListNode {
+  void** vtable;
+  PacketListNode* next;  // +0x08
+  PacketListNode* prev;  // +0x10
+};
+struct PacketList {
+  void** vtable;
+  PacketListNode* head;
+  PacketListNode* tail;
+  int count;
+  int padding;
+};
+static_assert(sizeof(PacketList) == 0x20);
+
+// 0x14063b640: unlink and free every node (slot 3 frees a node).
+void PacketListDestroy(PacketList* list) {
+  list->vtable = reinterpret_cast<void**>(0x1420dd230);
+  while (list->head) {
+    PacketListNode* node = list->head;
+    if (!node) continue;
+    if (node->prev)
+      node->prev->next = node->next;
+    else
+      list->head = node->next;
+    if (node->next)
+      node->next->prev = node->prev;
+    else
+      list->tail = node->prev;
+    --list->count;
+    reinterpret_cast<void (*)(PacketList*, PacketListNode*)>(list->vtable[3])(list, node);
+  }
+}
+
+// 0x14063b710: PacketList scalar deleting destructor.
+PacketList* PacketListDeletingDestructor(PacketList* self, unsigned flags) {
+  PacketListDestroy(self);
+  if (flags & 1) SizedDelete(self, sizeof(PacketList));
+  return self;
+}
+
+// 0x14063b6d0: GatewayConnection destructor.
+void GatewayConnectionDestroy(GatewayConnection* self) {
+  if (self->api) reinterpret_cast<void (*)(uint8_t*, int)>((*reinterpret_cast<void***>(self->api))[0])(self->api, 1);
+  soeutil::MutexDestroy(&self->mutex);
+  PacketListDestroy(reinterpret_cast<PacketList*>(&self->listVtable));
 }
 
 // 0x14063bbe0: reliable channel statistics of the zone connection.
@@ -114,6 +231,13 @@ void GatewayConnectionDisconnect(uint8_t** wrapper, int timeoutMs, bool force) {
 }
 
 REBUILD_FUNCTION(GatewayConnection_Construct, 0x14063b470, GatewayConnectionConstruct);
+REBUILD_FUNCTION(GatewayConnection_Destroy, 0x14063b6d0, GatewayConnectionDestroy);
+REBUILD_FUNCTION(GatewayPacketList_Destroy, 0x14063b640, PacketListDestroy);
+REBUILD_FUNCTION(GatewayPacketList_DeletingDestructor, 0x14063b710, PacketListDeletingDestructor);
+REBUILD_FUNCTION(GatewayQueuedPacket_DeletingDestructor, 0x14063b750, QueuedPacketDeletingDestructor);
+REBUILD_FUNCTION(GatewayQueuedDataPacket_DeletingDestructor, 0x14063b780, QueuedDataPacketDeletingDestructor);
+REBUILD_FUNCTION(GatewayQueuedDataPacketEx_DeletingDestructor, 0x14063b7d0, QueuedDataPacketExDeletingDestructor);
+REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Construct, 0x14063b590, QueuedDataPacketExConstruct);
 REBUILD_FUNCTION(GatewayConnection_GetReliableStats, 0x14063bbe0, GatewayConnectionGetReliableStats);
 REBUILD_FUNCTION(GatewayConnection_Value1C0, 0x14063bbf0, GatewayConnectionValue1C0);
 REBUILD_FUNCTION(GatewayConnection_Value1C4, 0x14063bc50, GatewayConnectionValue1C4);
