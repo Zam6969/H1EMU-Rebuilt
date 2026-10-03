@@ -322,6 +322,22 @@ struct ZoneDetailsPacket {
 static_assert(offsetof(ZoneDetailsPacket, zoneType) == 0x28 && offsetof(ZoneDetailsPacket, flag2) == 0x3C);
 static_assert(offsetof(ZoneDetailsPacket, extra) == 0x40 && offsetof(ZoneDetailsPacket, guid) == 0x60);
 
+struct ClickToMovePacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  int version;        // +0x10, 2
+  int padding2;
+  int mode;           // +0x18
+  int status;         // +0x1C
+  void** pathVtable;  // +0x20, path sub-object (dtor 0x1403a7100)
+  uint64_t reserved;
+  float* points;      // +0x30, xyz triples
+  int pointCount;     // +0x38
+  int padding3;
+};
+static_assert(offsetof(ClickToMovePacket, pathVtable) == 0x20 && offsetof(ClickToMovePacket, pointCount) == 0x38);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1492,12 +1508,58 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x3E: {  // click-to-move path reply
+      ValuePacket header{reinterpret_cast<void**>(0x142068548), 0x3E, 0, 0};
+      game::Call<bool (*)(ValuePacket*, const uint8_t*, int, bool)>(0x1403894f0)(&header, data, length, true);  // result unused
+      if (header.value != 2) break;
+      ClickToMovePacket packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142068578);
+      packet.opcode = 0x3E;
+      packet.version = 2;
+      packet.pathVtable = reinterpret_cast<void**>(0x142068558);
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(ClickToMovePacket*, PacketReader*)>(0x140368d40)(&packet, &reader);
+        if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0) {
+          void* mover = Member(game, 0x7115);
+          using MoveFn = void (*)(void*, void***, void*);
+          auto move = [&](void* extra) {
+            reinterpret_cast<MoveFn>((*static_cast<void***>(mover))[0xE0 / 8])(mover, &packet.pathVtable, extra);
+          };
+          if (packet.mode == 1) {
+            if (void* target = Member(game, 0x7142)) game::Call<void (*)(void*, ClickToMovePacket*)>(0x140996c70)(target, &packet);
+          } else if (packet.mode == 2) {
+            if (void* target = Member(game, 0x7143)) game::Call<void (*)(void*, ClickToMovePacket*)>(0x140997f40)(target, &packet);
+          } else if (packet.mode == 3) {
+            move(state + 0x969A0);
+          } else if (packet.mode == 4) {
+            move(state + 0x969B8);
+          } else {
+            uint64_t timeSlot;
+            auto* time = game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&timeSlot);
+            uint64_t requestId = game::Field<uint64_t>(game, 0x38BF0);
+            if (packet.pointCount > 0) {
+              const float* target = packet.points;
+              game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(
+                  GameText(0x14206df28), GameText(0x14206def0), requestId, packet.status, static_cast<double>(target[0]),
+                  static_cast<double>(target[1]), static_cast<double>(target[2]), *time);  // "Reply for %llu (%d), target ..."
+              move(nullptr);
+            } else {
+              game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(
+                  GameText(0x14206df28), GameText(0x14206df38), requestId, packet.status, *time);  // "... failed, time %llu"
+            }
+          }
+        }
+      }
+      game::Call<void (*)(void***)>(0x1403a7100)(&packet.pathVtable);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0x3E: case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
