@@ -426,6 +426,25 @@ void EntityListClear(uint8_t* list) {
   }
 }
 
+// 0x14163c980: List<Login::EntityDetails> scalar deleting destructor.
+uint8_t* EntityListDeletingDestructor(uint8_t* list, unsigned flags) {
+  *reinterpret_cast<uintptr_t*>(list) = 0x1424bfd18;  // List<EntityDetails> vtable
+  while (*reinterpret_cast<void**>(list + 8)) {
+    if (void* head = *reinterpret_cast<void**>(list + 8)) {
+      game::Call<void (*)(uint8_t*, void*)>(0x14163f100)(list, head);  // Remove
+    }
+  }
+  if (flags & 1) soeutil::Free(list, 0x20);
+  return list;
+}
+
+// 0x14163c840: Array<Login::ErrorDetail> scalar deleting destructor.
+uint8_t* ErrorDetailArrayDeletingDestructor(uint8_t* array, unsigned flags) {
+  game::Call<void (*)(uint8_t*)>(0x14163bab0)(array);  // ~Array
+  if (flags & 1) soeutil::Free(array, 0x18);
+  return array;
+}
+
 // 0x14163d900: CharacterDeleteRequest(characterId)
 void LoginRequestCharacterDelete(uint8_t* requests, const uint64_t* characterId) {
   struct : RequestHeader {
@@ -502,16 +521,22 @@ REBUILD_FUNCTION(Login_SendCharacterDelete, 0x141635270, LoginSendCharacterDelet
 REBUILD_FUNCTION(Login_SendCharacterCreate, 0x1416350d0, LoginSendCharacterCreate);
 REBUILD_FUNCTION(Login_SendCharacterLogin, 0x141635410, LoginSendCharacterLogin);
 REBUILD_FUNCTION(Login_SendHeaderOnly, 0x1416355b0, LoginSendHeaderOnly);
+REBUILD_FUNCTION(Login_SendLogout, 0x141635ae0, LoginSendHeaderOnly);      // same template body
+REBUILD_FUNCTION(Login_SendServerList, 0x141635cd0, LoginSendHeaderOnly);  // same template body
 REBUILD_FUNCTION(Login_TcpSendCharacterCreate, 0x141634370, LoginTcpSendCharacterCreate);
 REBUILD_FUNCTION(Login_TcpSendCharacterDelete, 0x1416344f0, LoginTcpSendCharacterDelete);
 REBUILD_FUNCTION(Login_TcpSendCharacterLogin, 0x141634650, LoginTcpSendCharacterLogin);
 REBUILD_FUNCTION(Login_TcpSendHeaderOnly, 0x1416347f0, LoginTcpSendHeaderOnly);
+REBUILD_FUNCTION(Login_TcpSendLogout, 0x141634be0, LoginTcpSendHeaderOnly);      // same template body
+REBUILD_FUNCTION(Login_TcpSendServerList, 0x141634d10, LoginTcpSendHeaderOnly);  // same template body
 REBUILD_FUNCTION(Login_Logout, 0x14163e640, LoginLogout);
 REBUILD_FUNCTION(Login_RequestServerList, 0x14163f2a0, LoginRequestServerList);
 REBUILD_FUNCTION(Login_ErrorDetailArray_Resize, 0x14163e0b0, ErrorDetailArrayResize);
 REBUILD_FUNCTION(Login_ErrorDetailArray_Clear, 0x14163f1a0, ErrorDetailArrayClear);
 REBUILD_FUNCTION(Login_ErrorDetailArray_RemoveLast, 0x14163f240, ErrorDetailArrayRemoveLast);
 REBUILD_FUNCTION(Login_EntityList_Clear, 0x14163f200, EntityListClear);
+REBUILD_FUNCTION(Login_EntityList_DeletingDestructor, 0x14163c980, EntityListDeletingDestructor);
+REBUILD_FUNCTION(Login_ErrorDetailArray_DeletingDestructor, 0x14163c840, ErrorDetailArrayDeletingDestructor);
 REBUILD_FUNCTION(Login_RequestCharacterDelete, 0x14163d900, LoginRequestCharacterDelete);
 REBUILD_FUNCTION(Login_RequestCharacterSelectInfo, 0x14163db00, LoginRequestCharacterSelectInfo);
 REBUILD_FUNCTION(Login_RequestCharacterLogin, 0x14163e310, LoginRequestCharacterLogin);
