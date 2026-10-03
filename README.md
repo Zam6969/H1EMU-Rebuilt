@@ -73,7 +73,7 @@ carry RTTI; most engine classes were built without it.
 | SoeUtil | `Array` / read cursor | Array::Resize (grow, size = min(count, capacity)), ReadBytes |
 | SoeUtil | `IString` / `StringFixed<N>` | layout (copy-on-write shared buffer with share count at data-4, inline N+4 buffer), Reserve, Assign, AssignString (buffer sharing), AssignN, IString Allocate/Free, and Allocate/Free/destructors for all 20 StringFixed sizes in the exe (5 to 65536) |
 | ClientServerCore | `UdpCompressionHandler` | Encrypt/Decrypt = packet compression (flag byte 01 deflate level 6 / 00 stored); dtor, GetStats, ClearStats |
-| ClientServerCore | `BaseApi` incoming path | OnRoutePacket (stats, RPC routing, game dispatch via vtable slot 18, slow-packet logging), RPC router (64-bucket id hash, BE/LE ids), SoeUtil hex dump |
+| ClientServerCore | `BaseApi` incoming path | OnRoutePacket (stats, RPC routing, game dispatch via vtable slot 18, slow-packet logging), RpcSendHeaderOnly ({u16 opcode, u16 0} in the endpoint's byte order), RPC router (64-bucket id hash, BE/LE ids), SoeUtil hex dump |
 | ClientServerCore | `BaseApi` connection API | Connect(addresses, timeout, autoReconnect) with SoeUtil::Random address shuffle, internal Connect (address rotation, EstablishConnection), OnTerminated (reason, full stats log, OnDisconnect/OnFailed, release), IsConnected / IsConnecting, Send (raw + LogicalPacket), OnConnectComplete, Disconnect, Reconnect, GiveTime (auto-reconnect), WaitForConnect / WaitForDisconnect / WaitForFlush, guarded UdpConnection disconnect |
 | ClientServerCore | `BaseUdpManager` | constructor (params role, ports, timeouts, compression / threading, large-buffer profile), SetInifileSection, SetLogChannel (+ BaseApi forwarder), ServiceStart (ini settings, UdpManager creation, socket errors, thread start), ServiceStop, GiveTime (event queuing, 30 s ini reload of UdpParams); UdpManager::SetHandler |
 | ClientServerCore | RPC plumbing | RpcRouter ctor/dtor/RemoveHandler, handler table Clear/Remove, ByteStream::Put, RpcHandlerTable ctor, 11 u16 id serializers (LE + big-endian template instances), BasePacket dtor, ByteStream dtor |
@@ -103,7 +103,7 @@ carry RTTI; most engine classes were built without it.
 | Game | packet stream helpers | u8/u16 writers, tunnel-message header+byte(+chunk list) writers, packed-byte writer, chunk-list writer, channel-2 packet readers, {opcode,int} packet reader, pooled stream holder ctor |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 667 functions (638 hooked, 29 too small to hook).
+Total: 668 functions (639 hooked, 29 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,

@@ -12,6 +12,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Mutex.h"
 #include "soeutil/String.h"
 #include "udp/UdpConnection.h"
@@ -537,7 +538,37 @@ REBUILD_FUNCTION(BaseApi_WaitForDisconnect, 0x1415f5de0, BaseApiWaitForDisconnec
 REBUILD_FUNCTION(BaseApi_WaitForConnect, 0x1415f5ca0, BaseApiWaitForConnect);
 REBUILD_FUNCTION(BaseApi_WaitForFlush, 0x1415f5ed0, BaseApiWaitForFlush);
 REBUILD_FUNCTION(UdpConnection_DisconnectGuarded, 0x1415f41c0, ConnectionDisconnectGuarded);
+// 0x1415f6810: send a header-only packet {u16 opcode, u16 0} through the
+// endpoint's sender (+0x08, slot 1). Byte order at +0x00: 0 big-endian
+// opcode, 1/2 native; anything else sends nothing and returns false.
+bool RpcSendHeaderOnly(uint8_t* endpoint, uint16_t opcode) {
+  int byteOrder = game::Field<int>(endpoint, 0);
+  if (byteOrder < 0 || byteOrder > 2) return false;
+  soeutil::ByteStream stream;
+  stream.inlineArray.data = nullptr;
+  stream.inlineArray.size = 0;
+  stream.inlineArray.unknown14 = 0;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.unknown202C = 0;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  stream.writePos = 0;
+  stream.array = &stream.inlineArray;
+  uint16_t word = byteOrder == 0 ? static_cast<uint16_t>((opcode << 8) | (opcode >> 8)) : opcode;
+  soeutil::ByteArrayWrite(&stream.inlineArray, 0, &word, 2);  // unclamped
+  stream.writePos += 2;
+  uint16_t zero = 0;
+  soeutil::StreamPut(&stream, &zero, 2);
+  int size = stream.array->size;
+  const uint8_t* bytes = size != 0 ? stream.array->data : nullptr;
+  uint8_t* sender = game::Field<uint8_t*>(endpoint, 8);
+  using SendFn = bool (*)(uint8_t*, uint8_t*, const uint8_t*, int);
+  bool sent = reinterpret_cast<SendFn>((*reinterpret_cast<void***>(sender))[1])(sender, endpoint, bytes, size);
+  soeutil::ByteArrayDestroy(&stream.inlineArray);
+  return sent;
+}
+
 REBUILD_FUNCTION(ClientServerCore_RpcRoutePacket, 0x1415f6db0, RpcRoutePacket);
+REBUILD_FUNCTION(ClientServerCore_RpcSendHeaderOnly, 0x1415f6810, RpcSendHeaderOnly);
 REBUILD_FUNCTION(SoeUtil_HexDump, 0x14165b970, HexDump);
 REBUILD_FUNCTION(BaseApi_OnRoutePacket, 0x1415f4b90, BaseApiOnRoutePacket);
 REBUILD_FUNCTION(UdpCompressionHandler_Encrypt, 0x1415f3060, CompressionEncrypt);
