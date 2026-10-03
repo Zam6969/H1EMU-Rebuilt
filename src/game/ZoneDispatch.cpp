@@ -150,7 +150,9 @@ static_assert(offsetof(Packet3Strings, value) == 0x58);
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
 // Packets whose nested constructors are not sized yet get this much room
 // (over-allocating stack is harmless; under-allocating is not).
-constexpr size_t kOpaquePacketSize = 0x1000;
+// One buffer shared by every case, so the frame stays small next to the
+// original's 0x52E98-byte one.
+constexpr size_t kOpaquePacketSize = 0x4000;
 
 constexpr size_t kOpcode3DString = 0x38C90;   // IString (meaning not identified yet)
 constexpr size_t kKickReason = 0x3D520;       // IString
@@ -174,6 +176,20 @@ bool OfferToExtension(uint8_t* state, uint8_t* header, const uint8_t* data, int 
   return Finish(state, channel, data, length, result);
 }
 
+// The reader-based packet pattern: construct, read through a PacketReader,
+// run the handler only on a clean read with no trailing bytes, destroy.
+void ReadAndHandle(uint8_t* game, uint8_t* packet, uintptr_t ctor, uintptr_t read, uintptr_t handler, uintptr_t dtor,
+                   size_t dtorOffset, const uint8_t* data, int length) {
+  game::Call<void (*)(uint8_t*)>(ctor)(packet);
+  if (data) {
+    PacketReader reader{data, length, data, data + length, 0};
+    game::Call<void (*)(uint8_t*, PacketReader*)>(read)(packet, &reader);
+    if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0)
+      game::Call<void (*)(uint8_t*, uint8_t*)>(handler)(game, packet);
+  }
+  game::Call<void (*)(uint8_t*)>(dtor)(packet + dtorOffset);
+}
+
 }  // namespace
 
 // 0x1403fe210: DispatchZonePacket(header, data, length, channel)
@@ -182,6 +198,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
   uint8_t* player = game::Field<uint8_t*>(state, kLocalPlayer);
   int opcode = *reinterpret_cast<int*>(header + 8);
   bool result = true;
+  alignas(16) uint8_t opaque[kOpaquePacketSize];
   if (static_cast<unsigned>(opcode - 3) > 0xF5) return OfferToExtension(state, header, data, length, channel);
   switch (opcode) {
     case 0x0C:
@@ -719,7 +736,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     }
     case 0xA8: {
-      alignas(16) uint8_t packet[kOpaquePacketSize];
+      uint8_t* packet = opaque;
       game::Field<void*>(packet, 0) = reinterpret_cast<void*>(0x142063e00);
       game::Field<int>(packet, 8) = 0xA8;
       game::Call<void (*)(uint8_t*)>(0x1416ce310)(packet + 0x10);
@@ -731,7 +748,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     }
     case 0xAE: {
-      alignas(16) uint8_t packet[kOpaquePacketSize];
+      uint8_t* packet = opaque;
       game::Call<void (*)(uint8_t*)>(0x14039a4e0)(packet);
       using ReadFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
       if (game::Call<ReadFn>(0x140388a70)(packet, data, length, false)) {
@@ -760,7 +777,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       [[fallthrough]];  // the original falls into case 0xB1 when the read fails
     }
     case 0xB1: {
-      alignas(16) uint8_t packet[kOpaquePacketSize];
+      uint8_t* packet = opaque;
       game::Call<void (*)(uint8_t*)>(0x14039d910)(packet);
       using ReadFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
       if (game::Call<ReadFn>(0x14038bc20)(packet, data, length, false)) {
@@ -793,6 +810,31 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x79: {  // same packet the zone client builds for channel 2
+      uint8_t* packet = opaque;
+      game::Call<void (*)(uint8_t*)>(0x14039acb0)(packet);
+      using ReadFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+      result = game::Call<ReadFn>(0x1403893c0)(packet, data, length, false);
+      if (result) reinterpret_cast<void (*)(uint8_t*, uint8_t*)>((*reinterpret_cast<void***>(game))[0x248 / 8])(game, packet);
+      game::Call<void (*)(uint8_t*)>(0x1417f2750)(packet + 0x10);
+      break;
+    }
+    case 0xD6:
+      ReadAndHandle(game, opaque, 0x140399f50, 0x140366140, 0x1403fd710, 0x1403b14d0, 0x20, data, length);
+      result = false;
+      break;
+    case 0xD7:
+      ReadAndHandle(game, opaque, 0x140399dc0, 0x140365ab0, 0x1403fd4d0, 0x1403ac9f0, 0, data, length);
+      result = false;
+      break;
+    case 0xDB:
+      ReadAndHandle(game, opaque, 0x14039a110, 0x140366630, 0x140408fc0, 0x1403acbd0, 0, data, length);
+      result = false;
+      break;
+    case 0xDC:
+      ReadAndHandle(game, opaque, 0x14039aa10, 0x1403675a0, 0x140409a60, 0x1403ad0b0, 0, data, length);
+      result = false;
+      break;
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
@@ -800,9 +842,9 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x35:
     case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
-    case 0x78: case 0x79: case 0x7D: case 0x99:
-    case 0xC5: case 0xD5: case 0xD6: case 0xD7:
-    case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3:
+    case 0x78: case 0x7D: case 0x99:
+    case 0xC5: case 0xD5:
+    case 0xD8: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
