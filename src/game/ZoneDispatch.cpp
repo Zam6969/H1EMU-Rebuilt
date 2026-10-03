@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
 
@@ -346,6 +347,30 @@ struct GameCallback {
   void** vtable;
   uint8_t* game;
 };
+
+struct BeginZoningPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  soeutil::IString zoneName;  // +0x10, StringFixed<32> (vtable 0x14204a378)
+  uint8_t zoneNameInline[0x28];
+  int zoneType;               // +0x50, 0x7FFFFFFF by default
+  int padding2[3];
+  float position[4];          // +0x60
+  float rotation[4];          // +0x70
+  uint8_t flag80;             // +0x80
+  int c;                      // +0x84 (3 is special)
+  float value88;              // +0x88
+  int a;                      // +0x8C
+  int b;                      // +0x90
+  uint8_t flag94;             // +0x94
+  uint8_t flag95;             // +0x95 -> game+0x38848
+  uint8_t flag96;             // +0x96
+  uint64_t guid;              // +0x98
+};
+static_assert(offsetof(BeginZoningPacket, zoneType) == 0x50 && offsetof(BeginZoningPacket, flag80) == 0x80);
+static_assert(offsetof(BeginZoningPacket, a) == 0x8C && offsetof(BeginZoningPacket, flag96) == 0x96);
+static_assert(offsetof(BeginZoningPacket, guid) == 0x98 && sizeof(BeginZoningPacket) == 0xA0);
 
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
@@ -1582,12 +1607,63 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x0B: {  // begin zoning
+      BeginZoningPacket packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063c38);
+      packet.opcode = 0x0B;
+      packet.zoneName.vtable = reinterpret_cast<void**>(0x14204a378);
+      packet.zoneName.data = soeutil::EmptyStringData();
+      packet.zoneType = 0x7FFFFFFF;
+      packet.guid = game::Field<uint64_t>(game, 0x31498);
+      bool ok = false;
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(BeginZoningPacket*, PacketReader*)>(0x1403724a0)(&packet, &reader);
+        ok = !static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0;
+      }
+      if (!ok) {
+        game::Call<void (*)(BeginZoningPacket*)>(0x1403b05b0)(&packet);
+        result = false;
+        break;
+      }
+      game::Field<bool>(game, kInitialDataDone) = false;
+      const char* name = packet.zoneName.data;
+      bool sameZone = packet.zoneType == game::Field<int>(game, 0x38998) &&
+                      std::strcmp(name, game::Field<const char*>(game, 0x38988)) == 0;
+      game::Call<void (*)(uint8_t*, const char*)>(0x14046da20)(game, name);
+      game::Call<void (*)(uint8_t*, int)>(0x14046db50)(game, packet.a);
+      game::Field<int>(game, 0x389A0) = packet.b;
+      game::Call<void (*)(uint8_t*, int)>(0x14046de30)(game, packet.zoneType);
+      game::Field<int>(game, 0x38F48) = packet.c;
+      game::Call<void (*)(uint8_t*, bool)>(0x14046b0d0)(game, packet.c == 3);
+      auto moverStateIs = [&](int wanted) {
+        void* mover = Member(game, 0x7115);
+        return mover && reinterpret_cast<int (*)(void*)>((*static_cast<void***>(mover))[0])(mover) == wanted;
+      };
+      if (moverStateIs(0x15) || moverStateIs(1)) {
+        game::Call<void (*)(uint8_t*, int)>(0x140469190)(game, 1);
+        game::Call<void (*)(uint8_t*)>(0x14046ab00)(game);
+      }
+      game::Call<void (*)(void*)>(0x140ae9ea0)(GlobalObject(0x142b19c68));
+      game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(
+          GameText(0x142054710), GameText(0x14206df60), name, static_cast<double>(packet.position[0]),
+          static_cast<double>(packet.position[1]), static_cast<double>(packet.position[2]));  // "RECEIVED=Begin Zoning ZONE=%s ..."
+      game::Field<bool>(game, 0x38848) = packet.flag95;
+      if (packet.flag96) game::Field<bool>(game, 0x38DEE) = true;
+      void* view = game::Field<void*>(game, 0x3D3E0);
+      reinterpret_cast<void (*)(void*, bool)>((*static_cast<void***>(view))[0x78 / 8])(view, packet.flag94 == 1);
+      using BeginFn = void (*)(uint8_t*, const char*, int, int, float*, float*, uint8_t, float, bool);
+      game::Call<BeginFn>(0x140479fb0)(game, name, packet.a, packet.zoneType, packet.position, packet.rotation,
+                                       packet.flag80, packet.value88, sameZone);
+      game::Call<void (*)(BeginZoningPacket*)>(0x1403b05b0)(&packet);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0xE3:
+    case 0x03: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
