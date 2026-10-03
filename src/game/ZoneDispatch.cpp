@@ -295,6 +295,15 @@ struct Packet3F {
 };
 static_assert(offsetof(Packet3F, seconds) == 0xB0 && sizeof(Packet3F) == 0xB8);
 
+struct Packet08 {
+  void** vtable;
+  int opcode;
+  int padding;
+  uint64_t unknown;       // +0x10, filled by the reader
+  soeutil::IString text;  // +0x18 (vtable 0x14204a378)
+};
+static_assert(offsetof(Packet08, text) == 0x18 && sizeof(Packet08) == 0x30);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1305,16 +1314,41 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(Packet3F*)>(0x1403b08a0)(&packet);
       break;
     }
+    case 0x08: {  // server message: localized format string applied to the packet's text
+      Packet08 packet{reinterpret_cast<void**>(0x142063c30), 8, 0, 0,
+                      {reinterpret_cast<void**>(0x14204a378), soeutil::EmptyStringData(), 0, 0}};
+      using ReadFn = bool (*)(Packet08*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038c260)(&packet, data, length, false)) {
+        game::Call<void (*)(Packet08*)>(0x1403b10a0)(&packet);
+        result = false;
+        break;
+      }
+      if (packet.text.length > 0) {
+        soeutil::IString format{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+        auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
+        reinterpret_cast<bool (*)(void*, const char*, soeutil::IString*)>((*reinterpret_cast<void***>(strings))[3])(
+            strings, *reinterpret_cast<const char**>(0x1429fbd98), &format);
+        soeutil::IString message{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+        soeutil::StringFormat(&message, format.data, packet.text.data);
+        void* display = Member(game, 0x71BA);
+        int a = game::Call<int (*)()>(0x1416dfd50)();
+        int b = game::Call<int (*)()>(0x1416dfe30)();
+        using ShowFn = void (*)(void*, const char*, int, int, int, bool, void*, bool);
+        reinterpret_cast<ShowFn>((*static_cast<void***>(display))[0x28 / 8])(display, message.data, 0, b, a, false,
+                                                                            nullptr, true);
+        game::Call<void (*)(soeutil::IString*)>(0x1402bace0)(&message);
+        format.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&format);
+      }
+      game::Call<void (*)(Packet08*)>(0x1403b10a0)(&packet);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E:
-    case 0x99:
-   
-    case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x3E: case 0x99: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
