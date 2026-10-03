@@ -235,6 +235,72 @@ void BaseApiConnect(uint8_t* api) {
   game::Field<bool>(api, kApiConnecting) = true;
 }
 
+// 0x1415f4d20: UdpConnectionHandler::OnTerminated (on BaseApi + 0x80).
+// Records the disconnect reason, logs the connection's final statistics,
+// raises OnDisconnect / OnFailed and releases the connection.
+void BaseApiOnTerminated(uint8_t* handler, uint8_t* connection) {
+  uint8_t* api = handler - kSubobjectToBaseApi;
+  auto* reason = reinterpret_cast<soeutil::IString*>(api + kApiLastDisconnectReason);
+  if (auto* current = game::Field<uint8_t*>(api, kApiConnection)) {
+    game::Call<void (*)(void*, soeutil::IString*)>(0x140346c00)(current, reason);  // GetDisconnectReasonText
+  } else {
+    soeutil::StringAssignString(reason, reason);
+  }
+  auto* guard = reinterpret_cast<udp::UdpPlatformGuardObject*>(connection + 0x2E0);
+  guard->Enter();
+  int value = game::Field<int>(connection, 0x1C0);
+  guard->Leave();
+  game::Field<int>(api, 0x360) = value;
+  guard->Enter();
+  value = game::Field<int>(connection, 0x1C4);
+  guard->Leave();
+  game::Field<int>(api, 0x364) = value;
+
+  uint8_t* logContext = game::Field<uint8_t*>(api, kApiLogContext);
+  if (logContext && game::Field<bool>(logContext, 0x288)) {
+    alignas(8) uint8_t stats[0xD0];
+    game::Call<void (*)(void*, uint8_t*)>(0x140341130)(game::Field<void*>(logContext, 0x240), stats);  // GetStats
+    alignas(8) uint8_t channel[0x40];
+    game::Call<void (*)(uint8_t*, int, uint8_t*)>(0x140346a60)(connection, kChannelReliable1, channel);  // GetChannelStatus
+    logContext = game::Field<uint8_t*>(api, kApiLogContext);
+    uint8_t* udpManager = game::Field<uint8_t*>(logContext, 0x240);
+    const char* reasonText = reason->data;
+    const char* address = game::Field<const char*>(api, kApiAddressText);
+    void* log = game::Field<void*>(logContext, 0x250);
+    int outgoing = game::Call<int (*)(uint8_t*)>(0x1415f4fe0)(connection);
+    int incoming = game::Call<int (*)(uint8_t*)>(0x1415f4610)(connection);
+    int lastEventAge = game::Call<int (*)(uint8_t*)>(0x1415f4a10)(udpManager);
+    int lastSend = game::Call<int (*)(uint8_t*)>(0x1415f4ad0)(connection);
+    int lastReceive = game::Call<int (*)(uint8_t*)>(0x1415f4a70)(connection);
+    auto i32 = [](const uint8_t* p, size_t o) { return *reinterpret_cast<const int*>(p + o); };
+    auto i64 = [](const uint8_t* p, size_t o) { return *reinterpret_cast<const int64_t*>(p + o); };
+    game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(
+        log, reinterpret_cast<const char*>(0x1424b0c80),  // "BaseApi connection terminated (%s) address=%s reason=%s ..."
+        logContext + 0x209, address, reasonText, lastReceive, lastSend, lastEventAge, incoming, outgoing,
+        i32(channel, 0x00) /*TotalPendingBytes*/, i32(channel, 0x34) /*AckPing*/, i32(channel, 0x30) /*WindowSize*/,
+        i32(channel, 0x08) /*QueuedBytes*/, i32(channel, 0x14) /*oldest age*/, i32(channel, 0x38) /*oldest last send*/,
+        i32(channel, 0x3C) /*attempt*/, i64(stats, 0x98) /*MaxPollingTimeExceeded*/,
+        i64(stats, 0xA0) /*MaxDeliveryTimeExceeded*/, i64(stats, 0x90) /*SocketOverflowErrors*/);
+  }
+  if (game::Field<bool>(api, kApiConnected)) {
+    game::Field<bool>(api, kApiConnected) = false;
+    ApiVirtual<void (*)(uint8_t*)>(api, 0x88 / 8)(api);  // OnDisconnect
+  } else if (game::Field<bool>(api, kApiConnecting)) {
+    game::Field<bool>(api, kApiConnecting) = false;
+    ApiVirtual<void (*)(uint8_t*)>(api, kApiOnFailedSlot)(api);
+  }
+  auto* current = game::Field<uint8_t*>(api, kApiConnection);
+  auto* connectionGuard = reinterpret_cast<udp::UdpPlatformGuardObject*>(current + 0x2E8);
+  connectionGuard->Enter();
+  game::Field<void*>(current, 0x2B0) = nullptr;  // detach handler
+  connectionGuard->Leave();
+  current = game::Field<uint8_t*>(api, kApiConnection);
+  reinterpret_cast<void (*)(void*)>((*reinterpret_cast<void***>(current))[1])(current);  // Release
+  game::Field<void*>(api, kApiConnection) = nullptr;
+  game::Field<bool>(api, kApiAttempting) = false;
+  BaseUdpManagerServiceStop(game::Field<uint8_t*>(api, kApiLogContext));
+}
+
 // 0x1415f49f0 (slot 11)
 bool BaseApiIsConnecting(uint8_t* api) { return game::Field<bool>(api, kApiConnecting); }
 
@@ -465,6 +531,7 @@ REBUILD_FUNCTION(BaseApi_OnConnectComplete, 0x1415f4b30, BaseApiOnConnectComplet
 REBUILD_FUNCTION(BaseApi_Disconnect, 0x1415f4160, BaseApiDisconnect);
 REBUILD_FUNCTION(BaseApi_Reconnect, 0x1415f5350, BaseApiReconnect);
 REBUILD_FUNCTION(BaseApi_Connect, 0x1415f4660, BaseApiConnect);
+REBUILD_FUNCTION(BaseApi_OnTerminated, 0x1415f4d20, BaseApiOnTerminated);
 REBUILD_FUNCTION(BaseApi_GiveTime, 0x1415f43a0, BaseApiGiveTime);
 REBUILD_FUNCTION(BaseApi_WaitForDisconnect, 0x1415f5de0, BaseApiWaitForDisconnect);
 REBUILD_FUNCTION(BaseApi_WaitForConnect, 0x1415f5ca0, BaseApiWaitForConnect);
