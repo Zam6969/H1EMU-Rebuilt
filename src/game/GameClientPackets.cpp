@@ -128,8 +128,80 @@ void GameClientPureVirtual() { *reinterpret_cast<volatile uint32_t*>(static_cast
 void GameClientSlot53(uint8_t*, void*, void*, void*) {}  // 0x1402ece90
 bool GameClientSlot14(uint8_t*) { return true; }          // 0x14046ea60
 
+void* UiRoot() { return *reinterpret_cast<void**>(0x143c45470); }
+uint64_t Now() {
+  uint64_t slot;
+  return *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&slot);
+}
+
+// 0x1403c1290 (slot 0): scalar deleting destructor (dtor 0x1403abd80, 0x43550 bytes).
+uint8_t* GameClientDeletingDestructor(uint8_t* game, unsigned flags) {
+  game::Call<void (*)(uint8_t*)>(0x1403abd80)(game);
+  if (flags & 1) game::Call<void (*)(void*, size_t)>(0x140d0fb84)(game, 0x43550);
+  return game;
+}
+
+// 0x14045a4f0 (slot 3): window close - slot 27 shutdown with the reason text.
+void GameClientOnCloseButton(uint8_t* game) {
+  using ShutdownFn = void (*)(uint8_t*, bool, int, const char*, void*);
+  reinterpret_cast<ShutdownFn>((*reinterpret_cast<void***>(game))[0xD8 / 8])(
+      game, false, 0, reinterpret_cast<const char*>(0x14206d2e8), nullptr);  // "Regular Shutdown likely from the close button"
+}
+
+// 0x140472d40 (slot 26): UI root 0x14048b330; always true.
+bool GameClientSlot26(uint8_t*) {
+  game::Call<void (*)(void*)>(0x14048b330)(UiRoot());
+  return true;
+}
+
+// 0x1402ecb90 (slot 54): slot 55 with an empty request object {vt 0x142046860, 0}.
+void GameClientSlot54(uint8_t* game) {
+  struct Request {
+    void** vtable;
+    void* value;
+  } request{reinterpret_cast<void**>(0x142046860), nullptr};
+  reinterpret_cast<void (*)(uint8_t*, Request*, int)>((*reinterpret_cast<void***>(game))[0x1B8 / 8])(game, &request, 0);
+  game::Call<void (*)(Request*)>(0x1403531d0)(&request);
+}
+
+// 0x1403fd2f0 (slot 62): UI "OnUpdate", UI tick 0x140ce8600, then 0x140cfdf30(0x1403f62a0()).
+void GameClientSlot62(uint8_t*) {
+  game::Call<void (*)(void*, const char*, void*, void*)>(0x140488cc0)(
+      UiRoot(), *reinterpret_cast<const char**>(0x142a002f0), nullptr, nullptr);  // "OnUpdate"
+  game::Call<void (*)(void*)>(0x140ce8600)(UiRoot());
+  void* target = game::Call<void* (*)()>(0x1403f62a0)();
+  game::Call<void (*)(void*)>(0x140cfdf30)(target);
+}
+
+// Slots 122-124: a timer pair at +0x58..+0x68 with a helper at +0x78.
+void GameClientSlot122(uint8_t* self) {  // 0x141669a00: reset
+  game::Call<void (*)(uint8_t*)>(0x141668150)(self + 0x78);
+  game::Field<uint64_t>(self, 0x60) = *reinterpret_cast<uint64_t*>(0x143dcb000);
+  game::Field<uint64_t>(self, 0x68) = *reinterpret_cast<uint64_t*>(0x143dcb000);
+  game::Field<bool>(self, 0x58) = false;
+  game::Field<bool>(self, 0x59) = false;
+}
+void GameClientSlot123(uint8_t* self) {  // 0x141669bb0: mark the first time
+  game::Field<uint64_t>(self, 0x60) = Now();
+  game::Field<bool>(self, 0x58) = true;
+}
+void GameClientSlot124(uint8_t* self) {  // 0x141669b80: mark the second time, then 0x141668520(+0x78, time)
+  uint64_t now = Now();
+  game::Field<uint64_t>(self, 0x68) = now;
+  game::Field<bool>(self, 0x59) = true;
+  game::Call<void (*)(uint8_t*, uint64_t)>(0x141668520)(self + 0x78, now);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
+REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
+REBUILD_FUNCTION(GameClient_OnCloseButton, 0x14045a4f0, GameClientOnCloseButton);
+REBUILD_FUNCTION(GameClient_Slot26, 0x140472d40, GameClientSlot26);
+REBUILD_FUNCTION(GameClient_Slot54, 0x1402ecb90, GameClientSlot54);
+REBUILD_FUNCTION(GameClient_Slot62, 0x1403fd2f0, GameClientSlot62);
+REBUILD_FUNCTION(GameClient_Slot122, 0x141669a00, GameClientSlot122);
+REBUILD_FUNCTION(GameClient_Slot123, 0x141669bb0, GameClientSlot123);
+REBUILD_FUNCTION(GameClient_Slot124, 0x141669b80, GameClientSlot124);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
