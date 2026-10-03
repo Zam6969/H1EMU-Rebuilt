@@ -43,6 +43,22 @@ void MutexUnlock(CRITICAL_SECTION* mutex) {
   LeaveCriticalSection(mutex);
 }
 
+// 0x14032ee90. SoeUtil::Mutex is a CRITICAL_SECTION followed by a 32-byte
+// debug name (max 31 characters).
+CRITICAL_SECTION* MutexConstruct(CRITICAL_SECTION* mutex, DWORD spinCount, const char* name) {
+  char* out = reinterpret_cast<char*>(mutex + 1);
+  char* end = out + 0x1F;
+  const char* in = name ? name : reinterpret_cast<const char*>(0x142046fcb);
+  while (out != end && *in) *out++ = *in++;
+  *out = 0;
+  if (!InitializeCriticalSectionAndSpinCount(mutex, spinCount)) {
+    GetLastError();
+    __debugbreak();
+  }
+  return mutex;
+}
+
+REBUILD_FUNCTION(SoeUtil_MutexConstruct, 0x14032ee90, MutexConstruct);
 REBUILD_FUNCTION(SoeUtil_MutexLock, 0x14032f270, MutexLock);
 REBUILD_FUNCTION(SoeUtil_MutexUnlock, 0x14032f360, MutexUnlock);
 
