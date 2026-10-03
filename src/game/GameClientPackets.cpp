@@ -1090,6 +1090,83 @@ void GameClientForwardToHandler388C8(uint8_t* game, void* item) {
   soeutil::StringRelease(&name);
 }
 
+// Opcode-0x17 sub-packets handled by slot 99: {vtable, opcode, subType, payload}.
+struct Packet17 {
+  void** vtable;
+  int opcode;   // 0x17
+  int pad0C;
+  int subType;
+  int pad14;
+  uint64_t payload[4];
+};
+static_assert(offsetof(Packet17, subType) == 0x10);
+static_assert(offsetof(Packet17, payload) == 0x18);
+static_assert(sizeof(Packet17) == 0x38);
+
+// 0x14040bba0 (slot 99): packet 0x17 - peek the sub-type byte and route.
+// 1/2/6 are read into a local packet (whose read call applies it), 3 goes
+// to the object at +0x38A30 and refreshes the local player's two UI hooks
+// (creating the +0x38A40 helper once), 4/5 go to two global managers.
+bool GameClientHandlePacket17(uint8_t* game, const uint8_t* data, int length) {
+  const uint8_t* end = data + length;
+  const uint8_t* cursor = data + 1 > end ? end : data + 1;
+  int subType = cursor + 1 > end ? 0 : static_cast<int8_t>(*cursor);
+  using ReadFn = void (*)(const uint8_t*, int, Packet17*);
+  Packet17 packet{};
+  packet.opcode = 0x17;
+  packet.subType = subType;
+  switch (subType) {
+    case 1:
+      packet.vtable = reinterpret_cast<void**>(0x142068530);
+      packet.payload[0] = game::Field<uint64_t>(game, 0x389C0);
+      game::Call<ReadFn>(0x140387de0)(data, length, &packet);
+      return true;
+    case 6:
+      packet.vtable = reinterpret_cast<void**>(0x142068538);
+      game::Call<void (*)(uint8_t*)>(0x1403d4c60)(game + 0x390F8);
+      packet.payload[1] = reinterpret_cast<uint64_t>(game + 0x390F8);
+      packet.payload[2] = reinterpret_cast<uint64_t>(game + 0x391B8);
+      packet.payload[3] = reinterpret_cast<uint64_t>(game + 0x395F8);
+      game::Call<ReadFn>(0x140387cc0)(data, length, &packet);
+      return true;
+    case 2: {
+      packet.vtable = reinterpret_cast<void**>(0x142068540);
+      packet.payload[0] = *reinterpret_cast<uint64_t*>(0x142b19b40);
+      game::Call<ReadFn>(0x140387d60)(data, length, &packet);
+      auto* root = *reinterpret_cast<uint8_t**>(0x142b19cc0);
+      if (void* first = game::Field<void*>(root, 0x40)) game::Call<void (*)(void*)>(0x1406fb3e0)(first);
+      if (void* second = game::Field<void*>(root, 0x48)) game::Call<void (*)(void*)>(0x1406fdc50)(second);
+      return true;
+    }
+    case 3: {
+      game::Call<void (*)(void*, const uint8_t*, int)>(0x140999a50)(game::Field<void*>(game, 0x38A30), data, length);
+      static const int kPlayerHooks[] = {0xAD70, 0xAD78};
+      for (int hook : kPlayerHooks) {
+        auto* player = game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80);
+        if (!player) continue;
+        if (void* object = game::Field<void*>(player, hook)) (*reinterpret_cast<void (***)(void*)>(object))[5](object);
+      }
+      if (game[0x38A38] && !game::Field<void*>(game, 0x38A40)) {
+        void* helper = GameAllocate(0x68);
+        if (helper)
+          helper = game::Call<void* (*)(void*, void*, void*, void*, void*, void*)>(0x140999f20)(
+              helper, game::Field<void*>(game, 0x3D3C8), game::Field<void*>(game, 0x38A30), game::Field<void*>(game, 0x38908),
+              *reinterpret_cast<void**>(0x142b19838), game::Field<void*>(game, 0x389C8));
+        game::Field<void*>(game, 0x38A40) = helper;
+      }
+      return true;
+    }
+    case 4:
+      game::Call<void (*)(void*, const uint8_t*, int)>(0x140a19ea0)(*reinterpret_cast<void**>(0x142b19c00), data, length);
+      return true;
+    case 5:
+      game::Call<void (*)(void*, const uint8_t*, int)>(0x140a0fca0)(*reinterpret_cast<void**>(0x142b19bf0), data, length);
+      return true;
+    default:
+      return false;
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1135,6 +1212,7 @@ REBUILD_FUNCTION(GameClient_LoadOptions, 0x14040e7a0, GameClientLoadOptions);
 REBUILD_FUNCTION(GameClient_StartLogging, 0x1404106d0, GameClientStartLogging);
 REBUILD_FUNCTION(GameClient_WaitForCharacterLogin, 0x1403d64a0, GameClientWaitForCharacterLogin);
 REBUILD_FUNCTION(GameClient_ForwardToHandler388C8, 0x14043b860, GameClientForwardToHandler388C8);
+REBUILD_FUNCTION(GameClient_HandlePacket17, 0x14040bba0, GameClientHandlePacket17);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
