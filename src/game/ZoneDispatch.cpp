@@ -127,6 +127,26 @@ static_assert(offsetof(PacketReader, failed) == 0x20);
 
 constexpr size_t kPacket25Size = 0x40;  // ctor 0x1416ffb60 initialises up to +0x3C
 
+struct Packet97 {
+  void** vtable;
+  int opcode;
+  int padding;
+  void** bodyVtable;  // +0x10, dtor 0x1404539a0
+  uint8_t body[0x10];
+  int value;
+  int padding2;
+};
+static_assert(offsetof(Packet97, value) == 0x28 && sizeof(Packet97) == 0x30);
+
+struct Packet3Strings {
+  void** vtable;
+  int opcode;
+  int padding;
+  PacketString text[3];  // +0x10, dtor 0x1403ade00
+  int value;
+};
+static_assert(offsetof(Packet3Strings, value) == 0x58);
+
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
 // Packets whose nested constructors are not sized yet get this much room
 // (over-allocating stack is harmless; under-allocating is not).
@@ -721,6 +741,24 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       }
       break;  // the original runs no destructor here
     }
+    case 0xB0: {
+      Packet3Strings packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063e08);
+      packet.opcode = 0xB0;
+      for (PacketString& text : packet.text) text = {reinterpret_cast<void**>(0x142049b50), reinterpret_cast<char*>(0x143e09641), 0, 0};
+      packet.value = 1;
+      using ReadFn = bool (*)(Packet3Strings*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038b2b0)(&packet, data, length, false)) {
+        game::Call<void (*)(void*)>(0x140ab7c50)(GlobalObject(0x142b19ae0));
+        game::Call<void (*)(void*, PacketString*)>(0x14046d1d0)(GlobalObject(0x142b19ae0), packet.text);
+        game::Call<void (*)(void*)>(0x140ab7c50)(GlobalObject(0x142b19ae0));
+        game::Call<void (*)(PacketString*)>(0x1403ade00)(packet.text);
+        result = false;
+        break;
+      }
+      game::Call<void (*)(PacketString*)>(0x1403ade00)(packet.text);
+      [[fallthrough]];  // the original falls into case 0xB1 when the read fails
+    }
     case 0xB1: {
       alignas(16) uint8_t packet[kOpaquePacketSize];
       game::Call<void (*)(uint8_t*)>(0x14039d910)(packet);
@@ -736,6 +774,25 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x97: {
+      Packet97 packet{reinterpret_cast<void**>(0x142063df0), 0x97, 0, reinterpret_cast<void**>(0x142063dd0), {}, 0};
+      using ReadFn = bool (*)(Packet97*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038b530)(&packet, data, length, false)) {
+        game::Call<void (*)(void*, Packet97*)>(0x14079c110)(game::Field<void*>(GlobalObject(0x142b19cc0), 0xB8), &packet);
+        game::Call<void (*)(void*, Packet97*, void*)>(0x140677100)(Member(game, 0x716B), &packet, Member(game, 0x715E));
+      }
+      packet.bodyVtable = reinterpret_cast<void**>(0x142063dd0);
+      game::Call<void (*)(void***)>(0x1404539a0)(&packet.bodyVtable);
+      result = false;
+      break;
+    }
+    case 0xCB: {
+      U64Packet packet{reinterpret_cast<void**>(0x142063c40), 0xCB, game::Field<uint64_t>(game, 0x31498)};
+      using ReadFn = bool (*)(U64Packet*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038c450)(&packet, data, length, true)) game::Call<void (*)(uint8_t*)>(0x140474500)(game);
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
@@ -743,8 +800,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x35:
     case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
-    case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99:
-    case 0xB0: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
+    case 0x78: case 0x79: case 0x7D: case 0x99:
+    case 0xC5: case 0xD5: case 0xD6: case 0xD7:
     case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
