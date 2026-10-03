@@ -313,7 +313,7 @@ constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x2
 // original's 0x52E98-byte one.
 constexpr size_t kOpaquePacketSize = 0x4000;
 
-constexpr size_t kOpcode3DString = 0x38C90;   // IString (meaning not identified yet)
+constexpr size_t kSessionTemplate = 0x38C90;  // IString with "${sessionKey}" filled in by 0x30 (also set by 0x3D)
 constexpr size_t kKickReason = 0x3D520;       // IString
 constexpr size_t kOpcode69Value = 0x38DB0;    // int; >= 0x12 sets a flag on the extension object's +0x28 child
 constexpr size_t kLoginFailed = 0x38838;      // bool
@@ -829,7 +829,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
                           {reinterpret_cast<void**>(0x142049e08), reinterpret_cast<char*>(0x143e09641), 0, 0}};
       using ReadFn = bool (*)(StringPacket*, const uint8_t*, int, bool);
       if (game::Call<ReadFn>(0x14038ae10)(&packet, data, length, false))
-        game::Call<void (*)(uint8_t*, const char*)>(0x1402bd670)(game + kOpcode3DString, packet.text.data);
+        game::Call<void (*)(uint8_t*, const char*)>(0x1402bd670)(game + kSessionTemplate, packet.text.data);
       game::Call<void (*)(StringPacket*)>(0x1403b0630)(&packet);
       break;
     }
@@ -1387,12 +1387,44 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       LogShutdownPackets(state, channel, data, length);
       break;
     }
+    case 0x30: {  // session/account details: two strings, a flag, and a "${sessionKey}" template
+      uint8_t* packet = opaque;
+      game::Call<void (*)(uint8_t*)>(0x14039dae0)(packet);
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(uint8_t*, PacketReader*)>(0x1403737f0)(packet, &reader);
+        if (!static_cast<uint8_t>(reader.failed)) {  // trailing bytes are not checked here
+          auto* sessionKey = reinterpret_cast<soeutil::IString*>(game + 0x38B90);
+          soeutil::StringAssignString(sessionKey, reinterpret_cast<soeutil::IString*>(packet + 0x10));
+          soeutil::StringAssignString(reinterpret_cast<soeutil::IString*>(game + 0x38C50),
+                                      reinterpret_cast<soeutil::IString*>(packet + 0x130));
+          bool flag = game::Field<bool>(packet, 0x250);
+          if (player) game::Field<bool>(player, 0x17C) = flag;
+          if (game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C))) {
+            auto* self = static_cast<uint8_t*>(game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C)));
+            if (flag)
+              game::Field<uint8_t>(self, 0x8C8) |= 2;
+            else
+              game::Field<uint8_t>(self, 0x8C8) &= ~2;
+          }
+          void* listener = GlobalObject(0x142b19ca0);
+          reinterpret_cast<void (*)(void*, uint64_t)>((*static_cast<void***>(listener))[2])(
+              listener, game::Field<uint64_t>(packet, 0x4A0));
+          auto* url = reinterpret_cast<soeutil::IString*>(game + kSessionTemplate);
+          soeutil::StringAssign(url, game::Field<const char*>(packet, 0x500));
+          game::Call<void (*)(soeutil::IString*, const char*, const char*, int)>(0x140459c10)(
+              url, GameText(0x14206e168), sessionKey->data, 0);  // replace "${sessionKey}"
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403b1130)(packet);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0x16: case 0x30: case 0x3E: case 0x99: case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0x16: case 0x3E: case 0x99: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
