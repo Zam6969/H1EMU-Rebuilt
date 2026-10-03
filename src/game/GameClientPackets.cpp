@@ -10,6 +10,7 @@
 #include "core/game.h"
 #include "core/hook.h"
 #include "soeutil/Allocator.h"
+#include "soeutil/Mutex.h"
 #include "soeutil/String.h"
 
 namespace rebuild::game_net {
@@ -876,6 +877,74 @@ void GameClientHandlePacketE2(uint8_t* /*game*/, const uint8_t* data, int length
   }
 }
 
+// 0x1404307d0 (slot 91): log(level, channel, format, va_list). Channels
+// starting with '#' or "Tcp" are also sent to the server as packet 0x48
+// {StringFixed<64> channel, StringFixed<2048> text}; "#name|local" sends
+// as "name" and then logs locally as "local" (an empty name uses "local"
+// for both). Local logging goes to the console (+0x10, when its level is
+// high enough) and the log at +0x31E50. Serialized by the lock at +0x31E08.
+void GameClientLog(uint8_t* game, int level, const char* channel, const char* format, void* args) {
+  auto* mutex = reinterpret_cast<CRITICAL_SECTION*>(game + 0x31E08);
+  soeutil::MutexLock(mutex);
+  void* recorder = *reinterpret_cast<void**>(0x142b19b98);
+  bool logLocally = true;
+  if (channel && (channel[0] == '#' || std::strncmp(channel, reinterpret_cast<const char*>(0x14206c33c), 3) == 0)) {  // "Tcp"
+    const char* rest = nullptr;
+    if (channel[0] == '#') ++channel;
+    int length = static_cast<int>(std::strlen(channel));
+    const char* bar = channel;
+    while (*bar && *bar != '|') ++bar;
+    if (*bar == '|') {
+      rest = bar + 1;
+      length = static_cast<int>(bar - channel);
+      if (length == 0) {
+        channel = rest;
+        length = static_cast<int>(std::strlen(rest));
+      }
+    }
+    if (recorder) {
+      struct LogPacket {
+        void** vtable;
+        int opcode;  // 0x48
+        int padding;
+        soeutil::StringFixed<64> channel;  // +0x10
+        soeutil::StringFixed<2048> text;   // +0x70
+      };
+      static_assert(offsetof(LogPacket, text) == 0x70);
+      LogPacket packet;
+      packet.vtable = reinterpret_cast<void**>(0x142063c50);
+      packet.opcode = 0x48;
+      packet.channel.vtable = reinterpret_cast<void**>(0x142049d00);
+      packet.channel.data = soeutil::EmptyStringData();
+      packet.channel.length = 0;
+      packet.channel.capacity = 0;
+      packet.text.vtable = reinterpret_cast<void**>(0x142049e48);
+      packet.text.data = soeutil::EmptyStringData();
+      packet.text.length = 0;
+      packet.text.capacity = 0;
+      soeutil::StringAssignN(&packet.channel, channel, length);
+      game::Call<void (*)(soeutil::IString*, const char*, void*)>(0x1402be760)(&packet.text, format, args);  // FormatV
+      game::Call<void (*)(void*, LogPacket*, int, bool)>(0x14035f010)(game::Field<void*>(static_cast<uint8_t*>(recorder), 8),
+                                                                      &packet, 0, true);
+      game::Call<void (*)(LogPacket*)>(0x1403b0780)(&packet);
+    }
+    if (!rest) {
+      logLocally = false;
+    } else {
+      channel = *rest ? rest : nullptr;
+    }
+  }
+  if (logLocally) {
+    if (void* console = game::Field<void*>(game, 0x10)) {
+      if (game::Call<int (*)(void*)>(0x14030e1e0)(console) >= level)
+        game::Call<void (*)(void*, int, const char*, const char*, void*)>(0x14030f070)(console, level, channel, format, args);
+    }
+    game::Call<void (*)(uint8_t*, const char*, const char*, void*, int)>(0x1416ceda0)(game + 0x31E50, channel, format, args,
+                                                                                      level);
+  }
+  soeutil::MutexUnlock(mutex);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -916,6 +985,7 @@ REBUILD_FUNCTION(GameClient_Slot74, 0x14040b600, GameClientSlot74);
 REBUILD_FUNCTION(GameClient_HandlePacket6F, 0x140408b70, GameClientHandlePacket6F);
 REBUILD_FUNCTION(GameClient_HandlePacket42, 0x140409d50, GameClientHandlePacket42);
 REBUILD_FUNCTION(GameClient_HandlePacketE2, 0x14040bee0, GameClientHandlePacketE2);
+REBUILD_FUNCTION(GameClient_Log, 0x1404307d0, GameClientLog);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
