@@ -300,9 +300,9 @@ struct Packet08 {
   int opcode;
   int padding;
   uint64_t unknown;       // +0x10, filled by the reader
-  soeutil::IString text;  // +0x18 (vtable 0x14204a378)
+  soeutil::StringFixed<32> text;  // +0x18 (vtable 0x14204a378)
 };
-static_assert(offsetof(Packet08, text) == 0x18 && sizeof(Packet08) == 0x30);
+static_assert(offsetof(Packet08, text) == 0x18 && sizeof(Packet08) == 0x58);
 
 struct ZoneDetailsPacket {
   void** vtable;
@@ -445,7 +445,8 @@ void LogShutdownPackets(uint8_t* state, int channel, const uint8_t* data, int le
   static const uintptr_t kChannelNames[] = {0x14206e070, 0x14206e078, 0x14206e080, 0x14206e090, 0x14206e0a8};
   // "Zone", "World", "UpdatePosition", "ShortCircuitZone", "Gateway"; anything else "?"
   const char* name = GameText(static_cast<unsigned>(channel) < 5 ? kChannelNames[channel] : 0x14206e06c);
-  soeutil::IString text{reinterpret_cast<void**>(0x14204b2f0), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<1024> text;
+  soeutil::InitFixed(text, reinterpret_cast<void**>(0x14204b2f0));
   soeutil::StringFormat(&text, GameText(0x14206e0b0), channel, name, received->length);
   using HexDumpFn = void (*)(const void*, int, soeutil::IString*);
   game::Call<HexDumpFn>(0x14165b970)(received->firstBytes, 8, &text);
@@ -509,7 +510,8 @@ void WriteMatchResults(const uint8_t* data, int length) {
       const char* quote = GameText(0x14204c8c8);
       const char* comma = GameText(0x142052284);
       const char* newline = GameText(0x142047048);
-      soeutil::IString csv{reinterpret_cast<void**>(0x142049e48), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<2048> csv;
+      soeutil::InitFixed(csv, reinterpret_cast<void**>(0x142049e48));
       append(&csv, GameText(0x14206e2d0));  // "Results"
       append(&csv, comma);
       append(&csv, GameText(0x14206e2dc));  // "Guid"
@@ -542,7 +544,8 @@ void WriteMatchResults(const uint8_t* data, int length) {
       for (int row = 0; row < rows; ++row) {
         for (int column = 0; column < columns; ++column) {
           TableCell cell{reinterpret_cast<void**>(0x142046da8), reinterpret_cast<void*>(0x142ae85c8), 0};
-          soeutil::IString value{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringFixed<128> value;
+          soeutil::InitFixed(value, reinterpret_cast<void**>(0x142049dc8));
           using CellFn = int (*)(uint8_t*, int, int, TableCell*);
           if (reinterpret_cast<CellFn>((*reinterpret_cast<void***>(table))[3])(table, row, column, &cell)) {
             game::Call<void (*)(void*, soeutil::IString*)>(0x140ce9690)(cell.value, &value);
@@ -558,7 +561,8 @@ void WriteMatchResults(const uint8_t* data, int length) {
         }
         append(&csv, newline);
       }
-      soeutil::IString fileName{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<128> fileName;
+      soeutil::InitFixed(fileName, reinterpret_cast<void**>(0x142049dc8));
       int date[8] = {0, 1, 1, 0, 0, 0, 0, 0};  // year, month, day, hour, minute, second
       uint64_t timeSlot;
       uint64_t* now = game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&timeSlot);
@@ -568,7 +572,8 @@ void WriteMatchResults(const uint8_t* data, int length) {
       } else {
         append(&fileName, GameText(0x14206e340));  // "matchresults.csv"
       }
-      soeutil::IString path{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<256> path;
+      soeutil::InitFixed(path, reinterpret_cast<void**>(0x142049e08));
       game::Call<void (*)(soeutil::IString*)>(0x140d09120)(&path);
       append(&path, GameText(0x14204b3f0));  // "/"
       append(&path, fileName.data);
@@ -1460,11 +1465,14 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(void*, const char*, int)>(0x140640a00)(Member(game, 0x7129), GameText(0x14206e1a0),
                                                                packet.expiredValue);  // "BaseClient.MemberUpgrade.ExpiredJob"
       auto* stringVtable = reinterpret_cast<void**>(0x14204a378);
-      soeutil::IString upsellText{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<32> upsellText;
+      soeutil::InitFixed(upsellText, stringVtable);
       soeutil::StringFormat(&upsellText, GameText(0x14206e1c8), packet.jobId);  // "TrialJobUpsellTextId_%d"
-      soeutil::IString bundleText{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<32> bundleText;
+      soeutil::InitFixed(bundleText, stringVtable);
       soeutil::StringFormat(&bundleText, GameText(0x14206e1e0), packet.jobId);  // "TrialJobUpsellBundleTextId_%d"
-      soeutil::IString handler{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFixed<32> handler;
+      soeutil::InitFixed(handler, stringVtable);
       void* ui = *reinterpret_cast<void**>(0x143c45470);
       using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
       if (game::Call<FindHandlerFn>(0x14048a5c0)(ui, GameText(0x14206e200), &handler)) {  // "HandlerJob"
@@ -1511,7 +1519,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       packet.message = {reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
       using ReadFn = bool (*)(Packet3F*, const uint8_t*, int, bool);
       if (game::Call<ReadFn>(0x14038b150)(&packet, data, length, true)) {
-        soeutil::IString title{reinterpret_cast<void**>(0x14204aea0), soeutil::EmptyStringData(), 0, 0};
+        soeutil::StringFixed<512> title;
+        soeutil::InitFixed(title, reinterpret_cast<void**>(0x14204aea0));
         auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
         using LookupFn = int (*)(void*, const char*);
         int titleId = reinterpret_cast<LookupFn>((*reinterpret_cast<void***>(strings))[4])(strings, GameText(0x14206dfe8));
@@ -1523,7 +1532,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
         void* self = game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C));
         game::Call<void (*)(uint8_t*, void*)>(0x14047fcb0)(playerParam, self);
         soeutil::StringAssign(playerParam, GameText(0x14206e008));  // "player"
-        soeutil::IString seconds{reinterpret_cast<void**>(0x14204baa8), soeutil::EmptyStringData(), 0, 0};
+        soeutil::StringFixed<16> seconds;
+        soeutil::InitFixed(seconds, reinterpret_cast<void**>(0x14204baa8));
         soeutil::StringFormat(&seconds, GameText(0x14204b3f4), packet.seconds);  // "%02d"
         using NewParamFn = void (*)(uint8_t*);
         using SetTextFn = void (*)(uint8_t*, const char*, const char*);
@@ -1552,8 +1562,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     }
     case 0x08: {  // server message: localized format string applied to the packet's text
-      Packet08 packet{reinterpret_cast<void**>(0x142063c30), 8, 0, 0,
-                      {reinterpret_cast<void**>(0x14204a378), soeutil::EmptyStringData(), 0, 0}};
+      Packet08 packet{reinterpret_cast<void**>(0x142063c30), 8, 0, 0, {}};
+      soeutil::InitFixed(packet.text, reinterpret_cast<void**>(0x14204a378));
       using ReadFn = bool (*)(Packet08*, const uint8_t*, int, bool);
       if (!game::Call<ReadFn>(0x14038c260)(&packet, data, length, false)) {
         game::Call<void (*)(Packet08*)>(0x1403b10a0)(&packet);
@@ -1565,7 +1575,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
         auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
         reinterpret_cast<bool (*)(void*, const char*, soeutil::IString*)>((*reinterpret_cast<void***>(strings))[3])(
             strings, *reinterpret_cast<const char**>(0x1429fbd98), &format);
-        soeutil::IString message{reinterpret_cast<void**>(0x142049dc8), soeutil::EmptyStringData(), 0, 0};
+        soeutil::StringFixed<128> message;
+        soeutil::InitFixed(message, reinterpret_cast<void**>(0x142049dc8));
         soeutil::StringFormat(&message, format.data, packet.text.data);
         void* display = Member(game, 0x71BA);
         int a = game::Call<int (*)()>(0x1416dfd50)();

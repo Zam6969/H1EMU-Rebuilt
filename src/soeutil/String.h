@@ -34,6 +34,16 @@ static_assert(sizeof(StringFixed<512>) == 0x220);
 static_assert(sizeof(StringFixed<5>) == 0x28);
 static_assert(sizeof(StringFixed<24>) == 0x38);
 
+// Starts a StringFixed<N> empty with the given vtable (the inline buffer is
+// only used once the allocator hands it out).
+template <int N>
+inline void InitFixed(StringFixed<N>& string, void** vtable) {
+  string.vtable = vtable;
+  string.data = reinterpret_cast<char*>(0x143e09641);
+  string.length = 0;
+  string.capacity = 0;
+}
+
 // IString vtable slots.
 constexpr size_t kStringSlotAllocate = 1;  // (bytes, &capacity, &isHeap) -> buffer
 constexpr size_t kStringSlotFree = 2;      // (buffer)

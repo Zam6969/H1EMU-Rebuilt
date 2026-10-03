@@ -986,8 +986,9 @@ void GameClientStartLogging(uint8_t* game) {
   game::Call<void (*)(void*, const char*)>(0x140310480)(console, reinterpret_cast<const char*>(0x142054700));  // "H1Z1.log"
   auto* baseVtable = reinterpret_cast<void**>(0x142049da8);
   auto* fixedVtable = reinterpret_cast<void**>(0x142049dc8);
-  // Plain IStrings: the base vtable (0x142049da8) while assigning, then 0x142049dc8.
-  soeutil::IString folder{baseVtable, soeutil::EmptyStringData(), 0, 0};
+  // StringFixed<128>: the IStringFixed vtable (0x142049da8) while assigning, then 0x142049dc8.
+  soeutil::StringFixed<128> folder;
+  soeutil::InitFixed(folder, baseVtable);
   soeutil::StringAssign(&folder, reinterpret_cast<const char*>(0x14206ce58));  // "./Logs"
   folder.vtable = fixedVtable;
   auto* settings = static_cast<uint8_t*>(*reinterpret_cast<void**>(0x142b199f0));
@@ -1011,7 +1012,8 @@ void GameClientStartLogging(uint8_t* game) {
                                  *reinterpret_cast<const char**>(0x1429fbd88));  // "Client version: %s"
   auto getCommandLine = *reinterpret_cast<const char* (**)()>(0x1440a0140);
   game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206ceb0), getCommandLine());  // "Command line: %s"
-  soeutil::IString launcher{fixedVtable, soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<256> launcher;
+  soeutil::InitFixed(launcher, fixedVtable);
   int unused = 0;
   game::Call<void (*)(soeutil::IString*, int*)>(0x1413432d0)(&launcher, &unused);
   game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206cec8), launcher.data);  // "Launched by: %s"
@@ -1033,7 +1035,8 @@ bool GameClientWaitForCharacterLogin(uint8_t* game) {
     game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206d4f8));  // "Connection to gateway lost before authenticating"
     return false;
   }
-  soeutil::IString unused{reinterpret_cast<void**>(0x14204a378), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<32> unused;
+  soeutil::InitFixed(unused, reinterpret_cast<void**>(0x14204a378));
   game::Call<void (*)(void*)>(0x14063be10)(game::Field<void*>(recorder(), 8));  // give the gateway API time
   uint64_t start = 0;
   game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&start);
@@ -1076,8 +1079,10 @@ bool GameClientWaitForCharacterLogin(uint8_t* game) {
 // 0x1403309b0 into a local string that is never used; kept for fidelity.
 void GameClientForwardToHandler388C8(uint8_t* game, void* item) {
   auto* fixedVtable = reinterpret_cast<void**>(0x142049dc8);
-  soeutil::IString name{fixedVtable, soeutil::EmptyStringData(), 0, 0};
-  soeutil::IString converted{fixedVtable, soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<256> name;
+  soeutil::InitFixed(name, fixedVtable);
+  soeutil::StringFixed<256> converted;
+  soeutil::InitFixed(converted, fixedVtable);
   game::Call<void (*)(void*, soeutil::IString*)>(0x140ce9690)(item, &name);
   char buffer[0x800];
   buffer[0] = 0;
