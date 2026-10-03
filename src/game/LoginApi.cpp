@@ -344,6 +344,88 @@ int LoginTcpSendHeaderOnly(uint8_t* tcpApi, const uint8_t* /*packet*/, const cha
   return xml.Send(tcpApi);
 }
 
+// 0x14163e640: Logout(disconnectTimeoutMs, forceOnTimeout). Sends PacketLogout,
+// then (with a timeout) asks the transport to disconnect.
+void LoginLogout(uint8_t* requests, int disconnectTimeoutMs, bool forceOnTimeout) {
+  RequestHeader packet;
+  packet.opcode = 3;
+  packet.vtable = reinterpret_cast<void**>(0x1424bfc88);
+  SendRequest(requests, &packet, 0x141635ae0, 0x141634be0, 0x142ab6900);  // "Logout"
+  if (disconnectTimeoutMs <= 0) return;
+  if (Transport(requests) == 0) {
+    uint8_t* api = requests - 0xD40;
+    reinterpret_cast<void (*)(uint8_t*, int, bool)>((*reinterpret_cast<void***>(api))[0x60 / 8])(api, disconnectTimeoutMs,
+                                                                                                forceOnTimeout);
+  }
+  if (Transport(requests) == 1) {
+    uint8_t* tcp = requests - 0xAE0;
+    reinterpret_cast<void (*)(uint8_t*, int, bool)>((*reinterpret_cast<void***>(tcp))[0x40 / 8])(tcp, disconnectTimeoutMs,
+                                                                                                forceOnTimeout);
+  }
+}
+
+// 0x14163f2a0: ServerListRequest()
+void LoginRequestServerList(uint8_t* requests) {
+  RequestHeader packet;
+  packet.opcode = 0xD;
+  packet.vtable = reinterpret_cast<void**>(0x1424bfd70);
+  SendRequest(requests, &packet, 0x141635cd0, 0x141634d10, 0x142ab6960);  // "ServerListRequest"
+}
+
+// ---- SoeUtil::Array<Login::ErrorDetail> (0x80-byte elements: two StringFixed<32>).
+
+namespace {
+struct ErrorDetailArray {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+};
+void DestroyErrorDetail(uint8_t* element) { game::Call<void (*)(uint8_t*)>(0x14163bf00)(element); }
+void InitErrorDetail(uint8_t* element) {
+  auto* name = reinterpret_cast<uint64_t*>(element);
+  name[1] = 0x143e09641;  // empty string data
+  name[2] = 0;
+  name[0] = 0x14204a378;  // StringFixed<32>
+  name[9] = 0x143e09641;
+  name[10] = 0;
+  name[8] = 0x14204a378;
+}
+}  // namespace
+
+// 0x14163e0b0: Resize(count). New elements are default-constructed.
+void ErrorDetailArrayResize(ErrorDetailArray* array, int count) {
+  if (array->capacity < count) {
+    game::Call<void (*)(ErrorDetailArray*, int, bool)>(0x14163e1e0)(array, count, true);  // Reserve
+  }
+  int old = array->size;
+  array->size = array->capacity <= count ? array->capacity : count;
+  for (int i = old; i < count; ++i) {
+    uint8_t* element = array->data + static_cast<size_t>(i) * 0x80;
+    if (element) InitErrorDetail(element);
+  }
+}
+
+// 0x14163f1a0: Clear()
+void ErrorDetailArrayClear(ErrorDetailArray* array) {
+  for (int i = 0; i < array->size; ++i) DestroyErrorDetail(array->data + static_cast<size_t>(i) * 0x80);
+  array->size = 0;
+}
+
+// 0x14163f240: RemoveLast(count)
+void ErrorDetailArrayRemoveLast(ErrorDetailArray* array, int count) {
+  int newSize = array->size - count;
+  for (int i = newSize; i < array->size; ++i) DestroyErrorDetail(array->data + static_cast<size_t>(i) * 0x80);
+  array->size = newSize;
+}
+
+// 0x14163f200: List<Login::EntityDetails>::Clear
+void EntityListClear(uint8_t* list) {
+  while (void* head = *reinterpret_cast<void**>(list + 8)) {
+    game::Call<void (*)(uint8_t*, void*)>(0x14163f100)(list, head);  // Remove
+  }
+}
+
 // 0x14163d900: CharacterDeleteRequest(characterId)
 void LoginRequestCharacterDelete(uint8_t* requests, const uint64_t* characterId) {
   struct : RequestHeader {
@@ -424,6 +506,12 @@ REBUILD_FUNCTION(Login_TcpSendCharacterCreate, 0x141634370, LoginTcpSendCharacte
 REBUILD_FUNCTION(Login_TcpSendCharacterDelete, 0x1416344f0, LoginTcpSendCharacterDelete);
 REBUILD_FUNCTION(Login_TcpSendCharacterLogin, 0x141634650, LoginTcpSendCharacterLogin);
 REBUILD_FUNCTION(Login_TcpSendHeaderOnly, 0x1416347f0, LoginTcpSendHeaderOnly);
+REBUILD_FUNCTION(Login_Logout, 0x14163e640, LoginLogout);
+REBUILD_FUNCTION(Login_RequestServerList, 0x14163f2a0, LoginRequestServerList);
+REBUILD_FUNCTION(Login_ErrorDetailArray_Resize, 0x14163e0b0, ErrorDetailArrayResize);
+REBUILD_FUNCTION(Login_ErrorDetailArray_Clear, 0x14163f1a0, ErrorDetailArrayClear);
+REBUILD_FUNCTION(Login_ErrorDetailArray_RemoveLast, 0x14163f240, ErrorDetailArrayRemoveLast);
+REBUILD_FUNCTION(Login_EntityList_Clear, 0x14163f200, EntityListClear);
 REBUILD_FUNCTION(Login_RequestCharacterDelete, 0x14163d900, LoginRequestCharacterDelete);
 REBUILD_FUNCTION(Login_RequestCharacterSelectInfo, 0x14163db00, LoginRequestCharacterSelectInfo);
 REBUILD_FUNCTION(Login_RequestCharacterLogin, 0x14163e310, LoginRequestCharacterLogin);
