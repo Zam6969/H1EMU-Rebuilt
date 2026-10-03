@@ -8,6 +8,8 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Allocator.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
 
 namespace rebuild::crypto {
@@ -117,6 +119,71 @@ bool CipherCCMNeedsRekey(CipherCCM* cipher) {
 // 0x1415fdae0 (slot 10)
 bool CipherCCMFalse(CipherCCM* /*cipher*/) { return false; }
 
+// SoeUtil::Array<unsigned char,13,1>: CCM nonce with 13 inline bytes at +0x18.
+struct NonceArray {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+  uint8_t inlineBytes[13];
+};
+static_assert(offsetof(NonceArray, inlineBytes) == 0x18);
+
+constexpr uintptr_t kVtNonceArray = 0x1424b3b58;
+constexpr uintptr_t kVtByteArray0 = 0x14204adc8;
+
+// 0x1415fcbb0: build the 13-byte nonce {u64 counter, u32 random, u8 extra}.
+NonceArray* BuildNonce(NonceArray* nonce, const uint64_t* counter, const uint32_t* random, uint8_t extra) {
+  soeutil::ByteStream stream;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  nonce->data = nullptr;
+  nonce->vtable = reinterpret_cast<void**>(kVtNonceArray);
+  *reinterpret_cast<uint64_t*>(&nonce->size) = 0;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.inlineArray.data = nullptr;
+  stream.array = &stream.inlineArray;
+  *reinterpret_cast<uint64_t*>(&stream.inlineArray.size) = 0;
+  stream.unknown202C = 0;
+  stream.writePos = 0;
+  uint64_t first = *counter;
+  soeutil::ByteArrayWrite(stream.array, 0, &first, 8);  // unclamped
+  stream.writePos += 8;
+  uint32_t second = *random;
+  soeutil::StreamPut(&stream, &second, 4);
+  soeutil::StreamPut(&stream, &extra, 1);
+  const uint8_t* bytes = stream.array->size ? stream.array->data : nullptr;
+  game::Call<void (*)(NonceArray*, int, const void*, int)>(0x14030d520)(nonce, 0, bytes, stream.writePos);
+  soeutil::ByteArrayDestroy(&stream.inlineArray);
+  return nonce;
+}
+
+// 0x1415fce70: ~Array<unsigned char,13,1>
+void DestroyNonce(NonceArray* nonce) {
+  nonce->vtable = reinterpret_cast<void**>(kVtNonceArray);
+  nonce->size = 0;
+  auto free = [](void* memory) {
+    if (soeutil::ThreadAllocatorCount() == 0) {
+      soeutil::FreeArray(memory);
+    } else {
+      soeutil::MemoryFree(memory, 1);
+    }
+  };
+  if (nonce->data != nonce->inlineBytes) free(nonce->data);
+  nonce->data = nullptr;
+  nonce->vtable = reinterpret_cast<void**>(kVtByteArray0);  // base Array<uchar,0,1> dtor
+  nonce->size = 0;
+  free(nullptr);
+  nonce->data = nullptr;
+}
+
+// 0x1415fd8d0: add ceil(length / 16) to the block counter.
+void CipherCCMCountBlocks(CipherCCM* cipher, int length) {
+  int blocks = length / 16 + (length % 16 > 0 ? 1 : 0);
+  uint64_t before = cipher->blocks;
+  cipher->blocks += static_cast<int64_t>(blocks);
+  if (cipher->blocks <= before) ++cipher->blockWraps;
+}
+
 REBUILD_FUNCTION(Crypto_CipherCCM_Construct, 0x1415fcaf0, CipherCCMConstruct);
 REBUILD_FUNCTION(Crypto_CipherCCM_Destroy, 0x1415fd130, CipherCCMDestroy);
 REBUILD_FUNCTION(Crypto_CipherCCM_Init, 0x1415fd910, CipherCCMInit);
@@ -126,6 +193,9 @@ REBUILD_FUNCTION(Crypto_CipherCCM_IsReady, 0x1415fd980, CipherCCMIsReady);
 REBUILD_FUNCTION(Crypto_CipherCCM_Type, 0x1415fd8c0, CipherCCMType);
 REBUILD_FUNCTION(Crypto_CipherCCM_KeyBytes, 0x1415fd850, CipherCCMKeyBytes);
 REBUILD_FUNCTION(Crypto_CipherCCM_NeedsRekey, 0x1415fdcc0, CipherCCMNeedsRekey);
+REBUILD_FUNCTION(Crypto_CipherCCM_BuildNonce, 0x1415fcbb0, BuildNonce);
+REBUILD_FUNCTION(Crypto_NonceArray_Destroy, 0x1415fce70, DestroyNonce);
+REBUILD_FUNCTION(Crypto_CipherCCM_CountBlocks, 0x1415fd8d0, CipherCCMCountBlocks);
 REBUILD_FUNCTION_TOO_SMALL(Crypto_CipherCCM_False, 0x1415fdae0, CipherCCMFalse);
 
 }  // namespace rebuild::crypto
