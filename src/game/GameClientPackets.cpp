@@ -828,6 +828,54 @@ void GameClientHandlePacket42(uint8_t* game, const uint8_t* data, int length) {
   game::Call<void (*)(void*)>(0x141704320)(game::Field<void*>(game, 0x388F0));
 }
 
+// 0x14040bee0 (slot 94): packet 0xE2 {opcode, i16 sub-type, int}. Sub-type 1
+// carries a 0xC0-byte record (three strings) for 0x1406443a0, sub-type 2 a
+// small one for 0x1406445c0; both go to the system at *0x142b19c78.
+void GameClientHandlePacketE2(uint8_t* /*game*/, const uint8_t* data, int length) {
+  if (!data) return;
+  const uint8_t* end = data + length;
+  const uint8_t* cursor = data + 1;
+  bool failed = false;
+  if (cursor > end) {
+    failed = true;
+    cursor = end;
+  }
+  int subtype = 0;
+  if (cursor + 2 > end) {
+    failed = true;
+    cursor = end;
+  } else {
+    subtype = *reinterpret_cast<const int16_t*>(cursor);
+    cursor += 2;
+  }
+  if (cursor + 4 > end || failed) return;
+  if (subtype == 2) {
+    struct Small {
+      void** vtable;
+      int opcode;
+      int padding;
+      uint64_t subtype;  // +0x10
+      uint64_t value;    // +0x18
+    } packet{reinterpret_cast<void**>(0x14206b710), 0xE2, 0, 2, 0};
+    if (game::Call<bool (*)(Small*, const uint8_t*, int, bool)>(0x14038e540)(&packet, data, length, false))
+      game::Call<void (*)(void*, Small*)>(0x1406445c0)(*reinterpret_cast<void**>(0x142b19c78), &packet);
+  } else if (subtype == 1) {
+    alignas(8) uint8_t packet[0xC0] = {};
+    game::Field<void*>(packet, 0) = reinterpret_cast<void*>(0x14206b708);
+    game::Field<int>(packet, 8) = 0xE2;
+    game::Field<uint64_t>(packet, 0x10) = 1;
+    static const size_t kStrings[] = {0x38, 0x58, 0x78};
+    for (size_t at : kStrings)
+      *reinterpret_cast<soeutil::IString*>(packet + at) = {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    game::Field<int>(packet, 0x94) = -1;
+    ClientReader reader{data, length, data, end, 0};
+    game::Call<void (*)(uint8_t*, ClientReader*)>(0x140376380)(packet, &reader);
+    if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0)
+      game::Call<void (*)(void*, uint8_t*)>(0x1406443a0)(*reinterpret_cast<void**>(0x142b19c78), packet);
+    game::Call<void (*)(uint8_t*)>(0x1403b21b0)(packet);
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -867,6 +915,7 @@ REBUILD_FUNCTION(GameClient_HandleInput, 0x14043d480, GameClientHandleInput);
 REBUILD_FUNCTION(GameClient_Slot74, 0x14040b600, GameClientSlot74);
 REBUILD_FUNCTION(GameClient_HandlePacket6F, 0x140408b70, GameClientHandlePacket6F);
 REBUILD_FUNCTION(GameClient_HandlePacket42, 0x140409d50, GameClientHandlePacket42);
+REBUILD_FUNCTION(GameClient_HandlePacketE2, 0x14040bee0, GameClientHandlePacketE2);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
