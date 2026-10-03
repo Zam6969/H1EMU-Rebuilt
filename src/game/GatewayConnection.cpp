@@ -1,4 +1,4 @@
-// The game's zone-server connection wrapper (0x80 bytes, built by
+﻿// The game's zone-server connection wrapper (0x80 bytes, built by
 // 0x14063b470): owns the Gateway::ExternalGatewayApi (+0x00) and forwards to
 // it. The zone client object (vtable 0x1420dd6e0, constructed at 0x14063cc10)
 // owns one of these and registers itself as the gateway listener.
@@ -7,6 +7,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Mutex.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -19,6 +20,44 @@ Fn ApiVirtual(uint8_t* api, size_t slot) {
 }
 
 }  // namespace
+
+// Fields after the api pointer (constructor 0x14063b470).
+struct GatewayConnection {
+  uint8_t* api;              // +0x00, Gateway::ExternalGatewayApi (0x1068 bytes, own manager)
+  uint64_t createdMs;        // +0x08
+  void** listVtable;         // +0x10 (0x1420dd230)
+  void* listHead;            // +0x18
+  void* listTail;            // +0x20
+  int listCount;             // +0x28
+  int padding;
+  bool flag;                 // +0x30
+  CRITICAL_SECTION mutex;    // +0x38
+};
+static_assert(offsetof(GatewayConnection, listCount) == 0x28 && offsetof(GatewayConnection, mutex) == 0x38);
+
+// 0x14063b470: create the gateway api (with its own UdpManager) and the
+// connection's bookkeeping.
+GatewayConnection* GatewayConnectionConstruct(GatewayConnection* self, const uint64_t* characterId, const char* ticket,
+                                              const char* clientProtocol, const char* clientBuild, bool threaded,
+                                              bool compression, int port, void* params, int unused, bool flag) {
+  uint8_t* api = nullptr;
+  if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x1068)) {
+    uint64_t id = *characterId;
+    using ConstructFn = uint8_t* (*)(void*, uint64_t*, const char*, const char*, const char*, bool, bool, int, void*,
+                                     int, bool);
+    api = game::Call<ConstructFn>(0x14162c9f0)(memory, &id, ticket, clientProtocol, clientBuild, threaded, compression,
+                                               port, params, unused, flag);
+  }
+  self->api = api;
+  self->createdMs = game::Call<uint64_t (*)()>(0x14032e7b0)();
+  self->listVtable = reinterpret_cast<void**>(0x1420dd230);
+  self->listCount = 0;
+  self->listHead = nullptr;
+  self->listTail = nullptr;
+  self->flag = false;
+  soeutil::MutexConstruct(&self->mutex, 4000, nullptr);
+  return self;
+}
 
 // 0x14063bbe0: reliable channel statistics of the zone connection.
 void GatewayConnectionGetReliableStats(uint8_t** wrapper, uint8_t* out) {
@@ -74,6 +113,7 @@ void GatewayConnectionDisconnect(uint8_t** wrapper, int timeoutMs, bool force) {
   ApiVirtual<void (*)(uint8_t*, int, bool)>(Api(wrapper), 0x60 / 8)(Api(wrapper), timeoutMs, force);
 }
 
+REBUILD_FUNCTION(GatewayConnection_Construct, 0x14063b470, GatewayConnectionConstruct);
 REBUILD_FUNCTION(GatewayConnection_GetReliableStats, 0x14063bbe0, GatewayConnectionGetReliableStats);
 REBUILD_FUNCTION(GatewayConnection_Value1C0, 0x14063bbf0, GatewayConnectionValue1C0);
 REBUILD_FUNCTION(GatewayConnection_Value1C4, 0x14063bc50, GatewayConnectionValue1C4);
