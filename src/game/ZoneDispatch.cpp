@@ -263,6 +263,15 @@ struct UiArgs {
 };
 static_assert(sizeof(UiArgs) == 0x18);
 
+struct Packet62 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int jobId;         // +0x10
+  int expiredValue;  // +0x14
+};
+static_assert(offsetof(Packet62, expiredValue) == 0x14 && sizeof(Packet62) == 0x18);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1169,13 +1178,50 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(UiArgs*)>(0x1403a0770)(&args);
       break;
     }
+    case 0x62: {  // trial job expired
+      Packet62 packet{reinterpret_cast<void**>(0x142063da0), 0x62};
+      using ReadFn = bool (*)(Packet62*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038b490)(&packet, data, length, false)) break;
+      auto& job = game::Field<void*>(game, 0x38E68);
+      if (job) {
+        reinterpret_cast<void (*)(void*, int)>((*static_cast<void***>(job))[0])(job, 1);  // deleting dtor
+        job = nullptr;
+        if (void* tracker = Member(game, 0x711D)) game::Call<void (*)(void*)>(0x14098dcb0)(tracker);
+      }
+      game::Call<void (*)(void*, const char*, int)>(0x140640a00)(Member(game, 0x7129), GameText(0x14206e1a0),
+                                                               packet.expiredValue);  // "BaseClient.MemberUpgrade.ExpiredJob"
+      auto* stringVtable = reinterpret_cast<void**>(0x14204a378);
+      soeutil::IString upsellText{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFormat(&upsellText, GameText(0x14206e1c8), packet.jobId);  // "TrialJobUpsellTextId_%d"
+      soeutil::IString bundleText{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringFormat(&bundleText, GameText(0x14206e1e0), packet.jobId);  // "TrialJobUpsellBundleTextId_%d"
+      soeutil::IString handler{stringVtable, soeutil::EmptyStringData(), 0, 0};
+      void* ui = *reinterpret_cast<void**>(0x143c45470);
+      using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
+      if (game::Call<FindHandlerFn>(0x14048a5c0)(ui, GameText(0x14206e200), &handler)) {  // "HandlerJob"
+        UiArgs args{reinterpret_cast<void**>(0x14206ddc0), nullptr, nullptr};
+        using ArgFn = void* (*)(UiArgs*, int);
+        game::Call<void (*)(void*, int)>(0x14046d7b0)(game::Call<ArgFn>(0x1403b4810)(&args, 0), packet.jobId);
+        game::Call<void (*)(void*, soeutil::IString*)>(0x14046d690)(game::Call<ArgFn>(0x1403b4810)(&args, 1), &upsellText);
+        game::Call<void (*)(void*, soeutil::IString*)>(0x14046d690)(game::Call<ArgFn>(0x1403b4810)(&args, 2), &bundleText);
+        game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&handler, GameText(0x14206e210));  // ":OnJobTrialExpired"
+        game::Call<void (*)(void*, const char*, UiArgs*, void*)>(0x140488cc0)(*reinterpret_cast<void**>(0x143c45470),
+                                                                               handler.data, &args, nullptr);
+        game::Call<void (*)(UiArgs*)>(0x1403a0820)(&args);
+      }
+      using StringDtorFn = void (*)(soeutil::IString*);
+      game::Call<StringDtorFn>(0x14030c360)(&handler);
+      game::Call<StringDtorFn>(0x14030c360)(&bundleText);
+      game::Call<StringDtorFn>(0x14030c360)(&upsellText);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E: case 0x3F: case 0x40: case 0x62:
+    case 0x3E: case 0x3F: case 0x40:
     case 0x99:
    
     case 0xDE: case 0xE3:
