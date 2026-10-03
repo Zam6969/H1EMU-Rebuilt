@@ -496,10 +496,11 @@ void GameClientSetLoginInfo(uint8_t* game, void* /*unused*/, const uint64_t* cha
   game::Field<int>(game, 0x38BE8) = keyType;
 }
 
-// 0x14046ceb0 (slot 45): take the pending console input line, echo it as
-// "EVENT_PRINT_CONSOLE_INPUT" to the console (*0x143bd4830), then slot 47.
-void GameClientSlot45(uint8_t* game) {
-  auto* item = game::Call<uint8_t* (*)(void*)>(0x1409d6f20)(game::Field<void*>(game, 0x388C8));
+// Slots 45 / 46: take the next console line from the console object at
+// +0x388C8 (two different queues), echo it as "EVENT_PRINT_CONSOLE_INPUT" to
+// the console UI (*0x143bd4830), then run it (slot 47).
+void EchoAndRunConsoleLine(uint8_t* game, uintptr_t take) {
+  auto* item = game::Call<uint8_t* (*)(void*)>(take)(game::Field<void*>(game, 0x388C8));
   if (!item) return;
   if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
     void* line = game::Field<void*>(item, 8);
@@ -510,6 +511,35 @@ void GameClientSlot45(uint8_t* game) {
     soeutil::StringRelease(&name);  // literal (capacity -1): nothing to free
   }
   reinterpret_cast<void (*)(uint8_t*, void*)>((*reinterpret_cast<void***>(game))[0x178 / 8])(game, game::Field<void*>(item, 8));
+}
+void GameClientSlot45(uint8_t* game) { EchoAndRunConsoleLine(game, 0x1409d6f20); }  // 0x14046ceb0
+void GameClientSlot46(uint8_t* game) { EchoAndRunConsoleLine(game, 0x1409d6bc0); }  // 0x14046c250
+
+int SettingInt(uintptr_t listOffset, uint32_t id, int fallback) {
+  auto* settings = *reinterpret_cast<uint8_t**>(0x142b197a0);
+  for (auto* setting = game::Field<NumericSetting*>(settings, listOffset); setting; setting = setting->next)
+    if (setting->id == id) return static_cast<int>(setting->value);
+  return fallback;
+}
+
+// 0x1403d33f0 (slot 114): idle check. Idle time since +0x3B7E8 (kept at
+// +0x3B7F4) against setting 0x14842C99 (unlimited when *0x142b176cc), and
+// since +0x3B7E0 against setting 0xA5DEE4E9; exceeding either calls
+// 0x14047b7b0(game, first?).
+void GameClientCheckIdle(uint8_t* game) {
+  uint64_t slot;
+  uint32_t lastA = static_cast<uint32_t>(game::Field<uint64_t>(game, 0x3B7E8));
+  game::Field<int>(game, 0x3B7F4) = static_cast<int>(*reinterpret_cast<uint32_t*>(game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&slot)) - lastA);
+  uint32_t lastB = static_cast<uint32_t>(game::Field<uint64_t>(game, 0x3B7E0));
+  int idleB = static_cast<int>(*reinterpret_cast<uint32_t*>(game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&slot)) - lastB);
+  int limitA = *reinterpret_cast<bool*>(0x142b176cc) ? 0x7FFFFFFF : SettingInt(0x2528, 0x14842C99, 0);
+  int limitB = SettingInt(0x27A8, 0xA5DEE4E9, 0);
+  using IdleFn = void (*)(uint8_t*, bool);
+  if (limitA != 0 && game::Field<int>(game, 0x3B7F4) > limitA) {
+    game::Call<IdleFn>(0x14047b7b0)(game, true);
+    return;
+  }
+  if (limitB != 0 && idleB > limitB) game::Call<IdleFn>(0x14047b7b0)(game, false);
 }
 
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
@@ -541,6 +571,8 @@ REBUILD_FUNCTION(GameClient_Slot71, 0x140408a90, GameClientSlot71);
 REBUILD_FUNCTION(GameClient_Slot87, 0x1403dc8c0, GameClientSlot87);
 REBUILD_FUNCTION(GameClient_SetLoginInfo, 0x14040ec00, GameClientSetLoginInfo);
 REBUILD_FUNCTION(GameClient_Slot45, 0x14046ceb0, GameClientSlot45);
+REBUILD_FUNCTION(GameClient_Slot46, 0x14046c250, GameClientSlot46);
+REBUILD_FUNCTION(GameClient_CheckIdle, 0x1403d33f0, GameClientCheckIdle);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
