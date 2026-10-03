@@ -1319,6 +1319,91 @@ void GameClientRefreshJobBrowser(uint8_t* game) {
   soeutil::StringRelease(&handler);
 }
 
+static_assert(sizeof(soeutil::StringFixed<256>) == 0x120);
+
+// 0x14046e660 (slot 38): connect to the gateway. Recreates the zone client
+// (slot 86, honoring "UseCompression"), sets up the s-channel, connects to the
+// address at +0x31608 with a 60 s timeout while pumping, logs the connect info
+// and on failure reports "Failed gateway connection - <info> - <reason>"
+// (error 0x1A when the gateway rejected us with reason 0x10, else 0x0F).
+bool GameClientConnectToGateway(uint8_t* game) {
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  bool useCompression = game::Call<GetBoolFn>(0x1403051c0)(game::Field<void*>(game, 0x38E30), reinterpret_cast<const char*>(0x142046fcb),
+                                                           reinterpret_cast<const char*>(0x14206d1a8), false, false, -1, -1);  // "UseCompression"
+  auto& recorderSlot = *reinterpret_cast<uint8_t**>(0x142b19b98);
+  if (recorderSlot) (*reinterpret_cast<void (***)(void*, int)>(recorderSlot))[0](recorderSlot, 1);
+  recorderSlot = nullptr;
+  recorderSlot = (*reinterpret_cast<uint8_t* (***)(uint8_t*, bool, bool)>(game))[0x2B0 / 8](game, true, useCompression);
+  using ErrorFn = void (*)(const char*, const char*, ...);
+  if (!game::Call<bool (*)(uint8_t*)>(0x1403d5ea0)(game))
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206d1b8));  // "Failed to establish s-channel with gateway."
+  const char* percentS = reinterpret_cast<const char*>(0x142046fb8);  // "%s"
+  soeutil::StringFixed<64> reason;
+  reason.vtable = reinterpret_cast<void**>(0x142049d00);
+  reason.data = soeutil::EmptyStringData();
+  reason.length = 0;
+  reason.capacity = 0;
+  uint64_t start = 0;
+  game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&start);
+  auto api = [&] { return game::Field<void*>(recorderSlot, 8); };
+  bool connected;
+  if (game::Field<int>(game, 0x31618) > 0) {
+    game::Call<void (*)(void*, const char*, int, int)>(0x14063d680)(recorderSlot, game::Field<const char*>(game, 0x31610), 60000, 0);
+    while (game::Call<bool (*)(void*)>(0x14063bda0)(api())) {  // IsConnecting
+      game::Call<void (*)(void*, int)>(0x14063d8e0)(recorderSlot, 1000);
+      game::Call<void (*)(unsigned)>(0x14032ec60)(10);  // Sleep(10)
+    }
+    connected = game::Call<bool (*)(void*)>(0x14063bdb0)(api());
+  } else {
+    soeutil::StringAssign(&reason, reinterpret_cast<const char*>(0x14206d1e8));  // "Invalid gateway address."
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, percentS, reason.data);
+    connected = false;
+  }
+  uint64_t now = 0;
+  int64_t delta = static_cast<int64_t>(*game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&now) - start);
+  int elapsed = static_cast<int>(delta > 0x7fffffff ? 0x7fffffff : delta);
+  auto* fixedVtable = reinterpret_cast<void**>(0x142049e08);
+  soeutil::StringFixed<256> info;
+  info.vtable = fixedVtable;
+  info.data = soeutil::EmptyStringData();
+  info.length = 0;
+  info.capacity = 0;
+  soeutil::StringFormat(&info, reinterpret_cast<const char*>(0x14206d210), elapsed, game::Field<uint64_t>(game, 0x38BF0),
+                        game::Field<const char*>(game, 0x31610), game::Field<const char*>(game, 0x316B0));
+  auto* releaseVtable = reinterpret_cast<void**>(0x142049de8);
+  if (connected) {
+    game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(nullptr, percentS, info.data);
+  } else {
+    bool rejected = false;
+    if (reason.length == 0) {
+      using ValueFn = int (*)(void*);
+      using ReasonTextFn = const char* (*)(int);
+      int disconnect = game::Call<ValueFn>(0x14063bbf0)(api());
+      if (disconnect == 3) {
+        soeutil::StringAssign(&reason, game::Call<ReasonTextFn>(0x140346020)(game::Call<ValueFn>(0x14063bc50)(api())));
+        rejected = game::Call<ValueFn>(0x14063bc50)(api()) == 0x10;
+      } else {
+        soeutil::StringAssign(&reason, game::Call<ReasonTextFn>(0x140346020)(game::Call<ValueFn>(0x14063bbf0)(api())));
+      }
+    }
+    soeutil::StringFixed<256> message;
+    message.vtable = fixedVtable;
+    message.data = soeutil::EmptyStringData();
+    message.length = 0;
+    message.capacity = 0;
+    soeutil::StringFormat(&message, reinterpret_cast<const char*>(0x14206d260), info.data, reason.data);  // "Failed gateway connection - %s - %s"
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, percentS, message.data);
+    game::Call<void (*)(int, const char*, void*, void*)>(0x1403e1d80)(rejected ? 0x1A : 0x0F, message.data, nullptr, nullptr);
+    message.vtable = releaseVtable;
+    soeutil::StringRelease(&message);
+  }
+  info.vtable = releaseVtable;
+  soeutil::StringRelease(&info);
+  reason.vtable = reinterpret_cast<void**>(0x142049ce0);
+  soeutil::StringRelease(&reason);
+  return connected;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1368,6 +1453,7 @@ REBUILD_FUNCTION(GameClient_HandlePacket17, 0x14040bba0, GameClientHandlePacket1
 REBUILD_FUNCTION(GameClient_SetChatText, 0x140468e00, GameClientSetChatText);
 REBUILD_FUNCTION(GameClient_DisconnectFromServer, 0x1403e7a50, GameClientDisconnectFromServer);
 REBUILD_FUNCTION(GameClient_RefreshJobBrowser, 0x14046fa20, GameClientRefreshJobBrowser);
+REBUILD_FUNCTION(GameClient_ConnectToGateway, 0x14046e660, GameClientConnectToGateway);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
