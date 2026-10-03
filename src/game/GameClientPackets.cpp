@@ -2,6 +2,7 @@
 // point for zone packets coming out of the gateway tunnel. Packets are
 // sequenced and timestamped; each is either dispatched now (0x1403fe210 - the
 // zone opcode dispatcher) or queued in a time-ordered delay list.
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -2607,6 +2608,329 @@ bool GameClientCreateAssetSystem(uint8_t* game) {
   return ok;
 }
 
+// Spin-wait backoff the game inlines: pause, then yield, then Sleep(0)/Sleep(1).
+void SpinBackoff(int& spins) {
+  if (spins < 25)
+    _mm_pause();
+  else if (spins < 27)
+    SwitchToThread();
+  else if (spins < 29)
+    Sleep(0);
+  else {
+    Sleep(1);
+    spins -= 4;
+  }
+  ++spins;
+}
+
+// 0x14043c0e0 (slot 89): Update(time, deltaMs) - the per-frame tick. Each
+// subsystem is timed with the high-resolution timer (0x14032fde0) and the lap
+// stored in the frame profile at state+0xA10 (+0x180..+0x430).
+void GameClientUpdate(uint8_t* game, int time, int delta) {
+  using TimerFn = uint64_t* (*)(uint64_t*);
+  auto timer = [] {
+    uint64_t value;
+    return *game::Call<TimerFn>(0x14032fde0)(&value);
+  };
+  uint64_t last = timer();
+  uint8_t* profile = game::Field<uint8_t*>(game, 0x314A8) + 0xA10;
+  auto lap = [&](int offset) {
+    uint64_t now = timer();
+    game::Field<uint64_t>(profile, offset) = now - last;
+    last = now;
+  };
+  auto lapAdd = [&](int offset) {
+    uint64_t now = timer();
+    game::Field<uint64_t>(profile, offset) += now - last;
+    last = now;
+  };
+  auto field = [&](int offset) { return game::Field<uint8_t*>(game, offset); };
+  auto call = [](uint64_t address, auto... args) { game::Call<void (*)(decltype(args)...)>(address)(args...); };
+  auto vcall = [](void* object, int offset, auto... args) {
+    (*reinterpret_cast<void (***)(void*, decltype(args)...)>(object))[offset / 8](object, args...);
+  };
+  auto display = [&] { return field(0x38890); };
+  auto window = [&] { return field(0x38898); };
+
+  if (delta > 0) {
+    if (uint8_t* recorder = field(0x38DC8); recorder && recorder[0x20]) call(0x14083c2f0, recorder);
+    lap(0x180);
+    game::Call<void (*)(void*, float)>(0x141868970)(field(0x3B6F8), game::Field<float>(display(), 0x2F4));
+    call(0x141868a80, field(0x3B6F8), time, delta, 3);
+    lap(0x1D8);
+    if (!game[0x38F50]) {
+      if (uint8_t* a = field(0x389B0)) call(0x141877540, a);
+      if (uint8_t* b = field(0x389B8)) call(0x1418770b0, b);
+    }
+    lap(0x1E0);
+    call(0x1409fdb70, field(0x38B78), delta);
+    lap(0x1E8);
+    if (void* global = *reinterpret_cast<void**>(0x142b19bb0)) call(0x14077ae00, global, delta);
+    if (uint8_t* a = field(0x3B7C0)) call(0x1406f6ca0, a);
+    if (uint8_t* a = field(0x38A10)) call(0x140996270, a, delta);
+    if (uint8_t* a = field(0x38A18)) call(0x140997c50, a, delta);
+    lap(0x188);
+
+    // Screen fade: move +0x3B650 toward +0x3B654 over the time left in +0x3B658.
+    float one = *reinterpret_cast<float*>(0x1425ba090);
+    float current = game::Field<float>(game, 0x3B650);
+    float target = game::Field<float>(game, 0x3B654);
+    if (current != target) {
+      float step = (std::min)(static_cast<float>(delta), *reinterpret_cast<float*>(0x1425ba0a0));
+      float remaining = (std::max)(game::Field<float>(game, 0x3B658), step);
+      game::Field<float>(game, 0x3B650) = (target - current) * (step / remaining) + current;
+      game::Field<float>(game, 0x3B658) -= step;
+      auto* effect = game::Call<uint8_t* (*)(void*, unsigned)>(0x14128f190)(game::Field<void*>(display(), 0x48), 0x5C3E6A59);
+      if (effect) {
+        struct FloatParameter {
+          void** vtable;
+          float value;
+        } parameter{reinterpret_cast<void**>(0x1420636e0), (std::max)((std::min)(game::Field<float>(game, 0x3B650), one), 0.0f)};
+        // Find parameter 0x9D60ACD4 in the effect's {key, index, next} list.
+        uint8_t* slot = nullptr;
+        for (auto* node = game::Field<uint8_t*>(game::Field<uint8_t*>(effect, 0x10), 0xE0); node; node = game::Field<uint8_t*>(node, 8)) {
+          if (game::Field<unsigned>(node, 0) == 0x9D60ACD4u) {
+            int index = game::Field<int>(node, 4);
+            if (index >= 0) slot = game::Field<uint8_t**>(effect, 0x20)[index];
+            break;
+          }
+        }
+        game::Call<void (*)(uint8_t*, FloatParameter*)>(0x141287680)(slot + 0x10, &parameter);
+      }
+    }
+    lap(0x1F0);
+    call(0x141426fe0, game::Field<void*>(field(0x314A8), 0x96BB0), int64_t{-1});
+    if (uint8_t* a = field(0x3D4C0)) call(0x14070fa60, a);
+    lap(0x1F8);
+    if (uint8_t* a = field(0x38828)) vcall(a, 0x80);
+    lap(0x190);
+
+    // Camera.
+    uint8_t* cameraSystem = game + 0x42E80;
+    auto* camera = game::Call<uint8_t* (*)(uint8_t*)>(0x1402f39f0)(cameraSystem);
+    if (!game[0x3B770]) {
+      float& zoom = game::Field<float>(camera, 0x70);
+      zoom = (std::max)((std::min)(zoom, *reinterpret_cast<float*>(0x14204791c)), 0.0f);
+      call(0x1402f9680, camera);
+    }
+    uint8_t* view = game::Field<uint8_t*>(camera, 0x88);
+    uint8_t* renderView = game::Field<uint8_t*>(display(), 0x50);
+    alignas(16) uint8_t viewMatrix[0x40];
+    alignas(16) uint8_t projectionMatrix[0x40];
+    std::memcpy(viewMatrix, renderView + 0x50, sizeof(viewMatrix));
+    std::memcpy(projectionMatrix, renderView + 0x130, sizeof(projectionMatrix));
+    vcall(view, 0x108, static_cast<void*>(viewMatrix));
+    vcall(view, 0x110, static_cast<void*>(projectionMatrix));
+    call(0x1402f51c0, cameraSystem, game::Call<void* (*)(void*)>(0x1404d5400)(display()));
+    call(0x1402f51a0, cameraSystem, game::Field<uint8_t*>(display(), 0x50) + 0x20);
+    call(0x1402f51b0, cameraSystem, game::Field<uint8_t*>(display(), 0x50) + 0x30);
+    call(0x1402f5570, cameraSystem, delta, true);
+    lap(0x200);
+    if (!game[0x3B770]) call(0x1402f96a0, camera);
+    lapAdd(0x200);
+    call(0x1403f4840, game, time, delta);
+    lap(0x210);
+    last = timer();
+    if (uint8_t* a = field(0x38860)) call(0x140722d90, a, delta);
+    lap(0x220);
+    call(0x14047c240, game);
+    call(0x14047c8b0, game);
+    lap(0x1A0);
+
+    auto minimized = [] {
+      auto* device = game::Field<uint8_t*>(game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b19788), 0x40), 8);
+      return (*reinterpret_cast<bool (***)(void*)>(device))[0x20 / 8](device);
+    };
+    using ClockFn = uint64_t* (*)(uint64_t*);
+    if (minimized()) {
+      call(0x14043d5a0, game, delta);
+      call(0x14043d330, game);
+      lap(0x298);
+      call(0x140471700, game);
+    } else {
+      // Frame-time smoothing at +0x390F0.
+      uint64_t previous = game::Field<uint64_t>(game, 0x390E8);
+      uint64_t clockValue;
+      int64_t elapsed = static_cast<int64_t>(*game::Call<ClockFn>(0x14032fc80)(&clockValue) - previous);
+      float smoothed = static_cast<float>(elapsed) * *reinterpret_cast<float*>(0x142047918) -
+                       game::Field<float>(window(), 0x17C) * *reinterpret_cast<float*>(0x1420728c8);
+      smoothed = (smoothed + game::Field<float>(game, 0x390F0)) * *reinterpret_cast<float*>(0x1425ba080);
+      game::Field<float>(game, 0x390F0) = smoothed;
+      call(0x140ac5e60, window());
+      game::Field<uint64_t>(game, 0x390E8) = *game::Call<ClockFn>(0x14032fc80)(&clockValue);
+      call(0x140477bc0, game);
+      call(0x14043d5a0, game, delta);
+      if (field(0x388A8)) {
+        game::Call<void (*)()>(0x141426830)();
+        vcall(field(0x388A8), 0xF8);
+      }
+      lap(0x198);
+
+      if (!game[0x38EF1]) {
+        uint8_t* renderLock = game + 0x38AF8;
+        if (game::Call<bool (*)(void*)>(0x14032f2e0)(renderLock)) {  // try-lock
+          call(0x14032f270, renderLock);                             // lock
+          call(0x14032f360, renderLock);                             // unlock
+          lap(0x228);
+          if (!minimized()) {
+            call(0x140ac3c30, window());
+            lap(0x238);
+            call(0x140ac3c80, window(), true);
+            lap(0x240);
+            call(0x1404d4230, display(), game[0x3BB20] == 0);
+            call(0x140915550, *reinterpret_cast<void**>(0x142b19b00));
+            lap(0x1A8);
+            if (uint8_t* a = field(0x38B60); a && game[0x38EB3]) call(0x140a8dce0, a);
+            lap(0x248);
+            float seconds = static_cast<float>(delta) * *reinterpret_cast<float*>(0x142047918);
+            game::Call<void (*)(uint8_t*, float)>(0x1402f57e0)(cameraSystem, seconds);
+            call(0x1402f3220, cameraSystem);
+            lap(0x250);
+            call(0x140ac4420, window());
+            lap(0x258);
+
+            // Listener position from the local player.
+            void* listener = *reinterpret_cast<void**>(0x142b19b20);
+            alignas(16) uint8_t position[16] = {};
+            if (auto* self = game::Call<uint8_t* (*)(void*)>(0x14071e830)(field(0x38860))) {
+              auto* source = (*reinterpret_cast<uint8_t* (***)(void*)>(self))[0x188 / 8](self);
+              std::memcpy(position, source, 16);
+              call(0x1418fe3f0, listener, static_cast<void*>(position));
+            }
+            auto* viewer = game::Call<uint8_t* (*)(void*)>(0x14071e830)(*reinterpret_cast<void**>(0x142b19b38));
+            auto* viewerAgain = game::Call<uint8_t* (*)(void*)>(0x14071e830)(*reinterpret_cast<void**>(0x142b19b38));
+            if (viewer) {
+              uint64_t scratch[2];
+              void* orientation;
+              if ((*reinterpret_cast<bool (***)(void*)>(field(0x388A8)))[0x180 / 8](field(0x388A8)))
+                orientation = game::Call<void* (*)(void*, uint64_t*)>(0x140927e90)(viewerAgain, &scratch[0]);
+              else
+                orientation = (*reinterpret_cast<void* (***)(void*, uint64_t*)>(viewer))[0x58 / 8](viewer, &scratch[1]);
+              call(0x14186e3b0, listener, orientation);
+            }
+            if (void* scene = game::Field<void*>(display(), 0x80)) call(0x141307960, scene, game::Field<void*>(display(), 0x48));
+            lap(0x260);
+
+            uint8_t* state = field(0x314A8);
+            void* streamer = game::Field<void*>(state, 0x96A10);
+            if (streamer && (*reinterpret_cast<int (***)(void*)>(streamer))[0x30 / 8](streamer) > 0) {
+              call(0x140477ff0, game::Field<void*>(field(0x314A8), 0xF78), -1);
+              lap(0x268);
+            } else {
+              game::Field<uint64_t>(profile, 0x268) = 0;
+              lap(0x270);
+            }
+            vcall(game, 0x338);
+            static const int kSummed[] = {0x248, 0x318, 0x310, 0x308, 0x300, 0x2F0, 0x2E8, 0x320};
+            uint64_t total = game::Field<uint64_t>(profile, 0x388);
+            for (int offset : kSummed) total += game::Field<uint64_t>(profile, offset);
+            game::Field<uint64_t>(profile, 0x430) = total;
+            if (uint8_t* a = field(0x3D490)) vcall(a, 0x48);
+            if (void* a = game::Field<void*>(field(0x314A8), 0x96A10)) vcall(a, 0x40);
+            call(0x140ac5790, window());
+            if (uint8_t* world = field(0x3D3E0)) call(0x140797f30, world + 0x20);
+            call(0x1404d5420, display(), profile + 0x438);
+            lap(0x278);
+            call(0x140ac5690, window(), true, 0);
+            lap(0x280);
+
+            // Wait for the loader thread when it is synchronized to the frame.
+            auto loaderSync = [&] { return game::Field<uint8_t*>(field(0x314A8), 0xF78); };
+            if (loaderSync()[0x58]) {
+              vcall(*reinterpret_cast<void**>(0x142ae89a8), 0x28);
+              int spins = 0;
+              while (!loaderSync()[0x59]) SpinBackoff(spins);
+            }
+            lap(0x288);
+            call(0x140471700, game);
+            last = timer();
+            call(0x140790360, field(0x3D3E0));
+            lap(0x2A0);
+            game::Call<void (*)()>(0x141458500)();  // TexLod::Begin
+            lap(0x2A8);
+            call(0x140ac54a0, window(), true);
+            lap(0x2B0);
+            call(0x140ac53c0, window());
+            lap(0x2B8);
+            call(0x1404d4230, display(), true);
+            game::Call<void (*)()>(0x141458620)();  // TexLod::End
+            lap(0x2C0);
+            lap(0x2C8);
+            call(0x14049b980, game);
+            lap(0x230);
+            call(0x140ac41e0, window(), true);
+            lap(0x2D0);
+            vcall(*reinterpret_cast<void**>(0x142ae89a8), 0x20, delta, 5, true);
+            lap(0x2E0);
+            game::Field<uint64_t>(profile, 0x2D8) = 0;
+            game::Field<uint64_t>(profile, 0x288) = 0;
+            if (uint8_t* a = field(0x38B58)) call(0x140679700, a, time);
+            lap(0x2E8);
+            lap(0x2F0);
+            if (void* a = *reinterpret_cast<void**>(0x142b19c70)) call(0x140a88510, a, time);
+            lap(0x1B0);
+            if (void* a = *reinterpret_cast<void**>(0x142b19c78)) call(0x140643b10, a);
+            lap(0x1B8);
+            if (void* a = *reinterpret_cast<void**>(0x142b19cd8)) call(0x1404cedc0, a);
+            lap(0x1C0);
+            vcall(game, 0x1F0);
+            lap(0x2F8);
+            call(0x140cf3330, field(0x38AC8));
+            game::Field<int>(game, 0x38AD8) = 1;
+            if (void* a = *reinterpret_cast<void**>(0x143bd4c88)) call(0x140955d70, a);
+            if (void* a = *reinterpret_cast<void**>(0x143bd4830)) call(0x140950af0, a);
+            lap(0x300);
+            if (uint8_t* recorder = field(0x3D490)) {
+              auto* device = game::Field<uint8_t*>(game::Field<uint8_t*>(display(), 0x40), 8);
+              bool flag = (*reinterpret_cast<bool (***)(void*)>(device))[0x2E0 / 8](device);
+              vcall(field(0x3D490), 0x18, flag);
+            }
+            lap(0x318);
+            uint8_t* stats = window() + 0x1A8;
+            game::Field<uint64_t>(profile, 0x308) = 0;
+            game::Field<uint64_t>(profile, 0x310) = 0;
+            game::Field<uint64_t>(profile, 0x318) = 0;
+            game::Field<uint64_t>(profile, 0x320) = 0;
+            game::Field<uint64_t>(profile, 0x3B0) = game::Field<uint64_t>(stats, 0x70);
+            game::Field<uint64_t>(profile, 0x3B8) = game::Field<uint64_t>(stats, 0x78);
+            std::memcpy(profile + 0x3C0, stats, 0x70);
+            game::Call<void (*)(void*, void*, float)>(0x14186a260)(field(0x3D3D0), game::Field<void*>(display(), 0x48), seconds);
+            lap(0x328);
+            call(0x1407c7730, field(0x38AF0), time);
+            lap(0x1C8);
+            call(0x140ac5690, window(), true, 0);
+            lap(0x280);
+            call(0x140ac3f90, window());
+            lap(0x330);
+
+            // Queued debug primitives (+0x3F5B0 list, next +0x60).
+            auto* renderer = game::Field<uint8_t*>(game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b19780), 0x38890), 0x50);
+            for (auto* node = field(0x3F5B0); node; node = game::Field<uint8_t*>(node, 0x60)) {
+              if (!renderer) continue;
+              int color = game::Field<int>(node, 0x50) != -1 ? game::Field<int>(node, 0x50) : 0;
+              alignas(16) uint8_t primitive[0x80];
+              using BuildFn = void* (*)(void*, void*, int, void*, uint8_t*, bool, uint8_t*, uint8_t*, float, int, float);
+              void* built = game::Call<BuildFn>(0x14138ae90)(primitive, *reinterpret_cast<void**>(0x142b19ce0), color, game::Field<void*>(node, 0x38), node,
+                                                            true, node + 0x20, node + 0x10, game::Field<float>(node, 0x48), game::Field<int>(node, 0x4C),
+                                                            one);
+              call(0x141289020, renderer, built);
+              call(0x1402f2140, static_cast<void*>(primitive + 0x78));
+            }
+          }
+          call(0x14032f360, renderLock);  // unlock
+        }
+        lap(0x1D0);
+      }
+      call(0x140ac58e0, window());
+      lap(0x340);
+    }
+    if (void* tracker = *reinterpret_cast<void**>(0x142b19c90)) {
+      if (game[0x42E50]) call(0x1411e39d0, 0);
+      game::Call<void (*)(void*, float)>(0x141393fe0)(tracker, static_cast<float>(delta) * *reinterpret_cast<float*>(0x142047918));
+    }
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -2665,6 +2989,7 @@ REBUILD_FUNCTION(GameClient_HandlePacket83, 0x14040cd70, GameClientHandlePacket8
 REBUILD_FUNCTION(GameClient_Init, 0x14040ed60, GameClientInit);
 REBUILD_FUNCTION(GameClient_DrawStatusOverlay, 0x1403e7ea0, GameClientDrawStatusOverlay);
 REBUILD_FUNCTION(GameClient_CreateAssetSystem, 0x1403db810, GameClientCreateAssetSystem);
+REBUILD_FUNCTION(GameClient_Update, 0x14043c0e0, GameClientUpdate);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
