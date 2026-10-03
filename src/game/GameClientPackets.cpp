@@ -4199,6 +4199,646 @@ void GameClientGiveTime(uint8_t* game) {
   game::Field<uint64_t>(game, 0x31538) = timer();
 }
 
+// SOE heap allocation used by the service factories: MemoryAllocate when a
+// thread allocator is active, else operator new[](size, nothrow).
+void* SoeHeapAllocate(size_t size) {
+  if (soeutil::ThreadAllocatorCount() == 0)
+    return game::Call<void* (*)(size_t, const void*)>(0x1402fc150)(size, reinterpret_cast<void*>(0x143c46658));
+  return game::Call<void* (*)(size_t, int)>(0x14032f910)(size, 0);
+}
+
+// Base of the inline-constructed services: {vtable, named-object vtable +8
+// (0x1424bc0a0), name data +0x10, +0x18, +0x20, +0x28, +0x30}.
+void InitNamedServiceBase(uint8_t* object) {
+  game::Field<void*>(object, 0x10) = soeutil::EmptyStringData();
+  game::Field<uint64_t>(object, 0x18) = 0;
+  game::Field<uint64_t>(object, 8) = 0x1424bc0a0;
+  game::Field<uint64_t>(object, 0x28) = 0;
+  game::Field<uint64_t>(object, 0x30) = 0;
+  game::Field<uint64_t>(object, 0x20) = 0;
+}
+// Inline hash table {vtable, +8 count, +0xC 0x7FFFFFFF, +0x10, +0x18, +0x20, buckets +0x28}.
+void InitInlineHashTable(uint8_t* table, uint64_t vtable, size_t bucketBytes) {
+  game::Field<uint64_t>(table, 0) = vtable;
+  game::Field<int>(table, 0x20) = 0;
+  game::Field<uint64_t>(table, 0x10) = 0;
+  game::Field<uint64_t>(table, 0x18) = 0;
+  std::memset(table + 0x28, 0, bucketBytes);
+  game::Field<int>(table, 8) = 0;
+  game::Field<int>(table, 0xC) = 0x7FFFFFFF;
+}
+
+// 0x1403d8a00 (slot 76): CreateAppServices - construct the client's ~60 app
+// services, store each in the state's service table (state+0x96BB8..) and
+// its global, and initialize them with the app context at +0x38830.
+bool GameClientCreateAppServices(uint8_t* game) {
+  auto StateSlot = [&](int offset) -> void*& { return game::Field<void*>(game::Field<uint8_t*>(game, 0x314A8), offset); };
+  auto Global = [](uint64_t address) -> void*& { return *reinterpret_cast<void**>(address); };
+  auto context = [&] { return game::Field<void*>(game, 0x38830); };
+  auto initService = [&](void* service, int slot = 0x30 / 8) {
+    (*reinterpret_cast<void (***)(void*, void*, void*)>(service))[slot](service, context(), nullptr);
+  };
+  enum Alloc { Heap, Game };
+  // allocate + construct (+ vtable/post-construct), store in a state slot,
+  // optionally InitService and publish to a global.
+  auto CreateService = [&](Alloc alloc, size_t size, uint64_t constructor, uint64_t vtable, uint64_t postConstruct, int slot, bool init,
+                           uint64_t global) {
+    void* memory = alloc == Heap ? SoeHeapAllocate(size) : GameAllocate(size);
+    void* service = nullptr;
+    if (memory) {
+      service = game::Call<void* (*)(void*)>(constructor)(memory);
+      if (vtable) {
+        service = memory;
+        *static_cast<uint64_t*>(memory) = vtable;
+        if (postConstruct) game::Call<void (*)(void*)>(postConstruct)(memory);
+      }
+    }
+    StateSlot(slot) = service;
+    if (init) initService(StateSlot(slot));
+    if (global) Global(global) = StateSlot(slot);
+  };
+
+  CreateService(Heap, 0x2F40, 0x140397360, 0x142069da8, 0x140a5ae10, 0x96BB8, true, 0x142b197a8);
+  CreateService(Heap, 0x3A40, 0x140397530, 0, 0, 0x96BC0, true, 0x142b197b0);
+  CreateService(Heap, 0x408, 0x141731c60, 0, 0, 0x96BC8, true, 0x142b197b8);
+  {  // inline-constructed service with an embedded hash table at +0x38
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0xE8));
+    if (object) {
+      uint8_t* table = object + 0x38;
+      Global(0x142b19648) = table;
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206a180;
+      InitInlineHashTable(table, 0x14206a150, 0x80);
+      object[0xE0] = 0;
+    }
+    StateSlot(0x96BD0) = object;
+    Global(0x142b197c0) = StateSlot(0x96BD0);
+  }
+  CreateService(Heap, 0x480, 0x14039bb00, 0, 0, 0x96BF0, false, 0);
+  (*reinterpret_cast<void (***)(void*, void*, void*)>(StateSlot(0x96BF0)))[0x30 / 8](StateSlot(0x96BF0), nullptr, nullptr);  // no context
+  Global(0x142b197c8) = StateSlot(0x96BF0);
+  CreateService(Heap, 0x6330, 0x14039b0c0, 0, 0, 0x96BF8, true, 0x142b197d0);
+  CreateService(Heap, 0x1B0, 0x14039bdb0, 0x142069350, 0, 0x96C00, true, 0x142b197d8);
+  CreateService(Heap, 0x21A0, 0x14039bf00, 0x14206a3d8, 0, 0x96C08, true, 0x142b197e0);
+  CreateService(Heap, 0x1720, 0x1417355f0, 0x14206a1e8, 0x140a63f70, 0x96BE0, true, 0x142b197e8);
+  CreateService(Game, 0x360, 0x140660320, 0, 0, 0x96BE8, false, 0x142b197f0);
+  CreateService(Heap, 0x6128, 0x14039c6e0, 0x142069478, 0, 0x96C20, true, 0x142b197f8);
+  CreateService(Heap, 0x2890, 0x14039c8b0, 0, 0, 0x96C28, true, 0x142b19800);
+  CreateService(Heap, 0x63F0, 0x14039c990, 0x142069870, 0, 0x96C30, false, 0);
+  CreateService(Heap, 0x90, 0x141739c50, 0, 0, 0x96C40, true, 0x142b19808);
+  CreateService(Heap, 0x8B8, 0x14171e6f0, 0, 0, 0x96C48, true, 0x142b19810);
+  CreateService(Game, 0x48, 0x140a22d60, 0, 0, 0x96C50, false, 0);
+  initService(StateSlot(0x96C50), 1);  // this service initializes through slot 1
+  Global(0x142b19818) = StateSlot(0x96C50);
+  Global(0x142b19820) = StateSlot(0x96C30);
+  CreateService(Heap, 0x45A0, 0x14039caf0, 0x142069a70, 0x140a3c7f0, 0x96C38, true, 0x142b19828);
+  CreateService(Heap, 0x5F0, 0x14039c590, 0, 0, 0x96C18, true, 0x142b19830);
+  CreateService(Heap, 0x2C18, 0x14039cf40, 0x142069608, 0, 0x96C58, true, 0x142b19838);
+  CreateService(Heap, 0x4C8, 0x14039d0f0, 0x142064c60, 0x1404a3340, 0x96C60, true, 0x142b19840);
+  {
+    void* memory = SoeHeapAllocate(0x420);
+    StateSlot(0x96CC0) = memory ? game::Call<void* (*)(void*, int)>(0x141753b50)(memory, 0) : nullptr;
+    initService(StateSlot(0x96CC0));
+    Global(0x142b19848) = StateSlot(0x96CC0);
+  }
+  CreateService(Heap, 0xE8, 0x140af58a0, 0, 0, 0x96CC8, true, 0x142b19850);
+  CreateService(Heap, 0x10E8, 0x1417569c0, 0, 0, 0x96CD8, true, 0x142b19858);
+  CreateService(Heap, 0x98, 0x1417593d0, 0, 0, 0x96CE0, true, 0x142b19860);
+  CreateService(Game, 0x10, 0x140ada5b0, 0, 0, 0x96CE8, false, 0x142b19868);
+  CreateService(Game, 0x48, 0x140a9b390, 0, 0, 0x96CF0, false, 0x142b19870);
+  {  // inline service with a 0x2000-byte hash table at +0x38
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x2060));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206bbb0;
+      InitInlineHashTable(object + 0x38, 0x14206bb80, 0x2000);
+    }
+    StateSlot(0x96D20) = object;
+    initService(StateSlot(0x96D20));
+    Global(0x142b19878) = StateSlot(0x96D20);
+  }
+  CreateService(Heap, 0x48D0, 0x14174c9f0, 0, 0, 0x96CD0, true, 0x142b19880);
+  CreateService(Heap, 0x4390, 0x14039d360, 0, 0, 0x96C68, false, 0);
+  initService(static_cast<uint8_t*>(StateSlot(0x96C68)) + 8);  // through its secondary base
+  Global(0x142b19888) = StateSlot(0x96C68);
+  CreateService(Heap, 0xC90, 0x14039e500, 0x14206a770, 0x140a7c730, 0x96C70, true, 0x142b19890);
+  {  // inline service with four small lists
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x1C0));
+    if (object) {
+      uint8_t* first = object + 0x38;
+      Global(0x142b19670) = first;
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206a818;
+      game::Field<uint64_t>(first, 8) = 0;
+      game::Field<uint64_t>(first, 0x10) = 0;
+      game::Field<uint64_t>(first, 0) = 0x14206a7f8;
+      for (int list : {0x98, 0xF8, 0x158}) {
+        game::Field<uint64_t>(object, list + 8) = 0;
+        game::Field<uint64_t>(object, list + 0x10) = 0;
+        game::Field<uint64_t>(object, list) = 0x14206a7f8;
+      }
+      object[0x1B8] = 0;
+    }
+    StateSlot(0x96C80) = object;
+    initService(StateSlot(0x96C80));
+    Global(0x142b19898) = StateSlot(0x96C80);
+  }
+  {
+    auto* object = static_cast<uint64_t*>(SoeHeapAllocate(0x1B20));
+    if (object) {
+      game::Call<void (*)(void*)>(0x14039dcb0)(object);
+      *object = 0x14206aad0;
+      game::Call<void (*)(void*)>(0x140a85740)(object);
+      game::Call<void (*)(void*)>(0x140a85750)(object);
+    }
+    StateSlot(0x96C88) = object;
+    initService(StateSlot(0x96C88));
+    Global(0x142b198a0) = StateSlot(0x96C88);
+  }
+  CreateService(Heap, 0x2E0, 0x1417414f0, 0x14206abd0, 0, 0x96C98, true, 0x142b198a8);
+  CreateService(Game, 0x9B0, 0x140667e80, 0, 0, 0x96C90, false, 0x142b198b0);
+  CreateService(Game, 0x9A0, 0x14066ede0, 0, 0, 0x96CA0, false, 0x142b198b8);
+  CreateService(Heap, 0x20E0, 0x14039f630, 0x14206ad00, 0, 0x96CA8, true, 0x142b198c0);
+  StateSlot(0x96CB0) = GameAllocate(1);  // empty tag object
+  Global(0x142b198c8) = StateSlot(0x96CB0);
+  {  // inline service with a hash table at +0x38 (0x80 buckets)
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0xE0));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206a0f0;
+      InitInlineHashTable(object + 0x38, 0x14206a0c0, 0x80);
+    }
+    StateSlot(0x96CB8) = object;
+    initService(StateSlot(0x96CB8));
+    Global(0x142b198d0) = StateSlot(0x96CB8);
+  }
+  {
+    void* memory = SoeHeapAllocate(0x148);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x141754e20)(memory) : nullptr;
+    initService(service);  // not null-checked in the original
+    Global(0x142b198d8) = service;
+  }
+  {
+    void* memory = GameAllocate(0x60);
+    Global(0x142b198e0) = memory ? game::Call<void* (*)(void*)>(0x140ad7480)(memory) : nullptr;
+  }
+  {
+    void* memory = SoeHeapAllocate(0x7A8);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x14186f4c0)(memory) : nullptr;
+    using InitFn = bool (*)(void*, void*, void*);
+    if (!(*reinterpret_cast<InitFn**>(service))[0x30 / 8](service, context(), nullptr) &&
+        !(*reinterpret_cast<bool (***)(uint8_t*)>(game))[0xA0 / 8](game)) {
+      using ShutdownFn = void (*)(uint8_t*, bool, int, const char*, const char*);
+      (*reinterpret_cast<ShutdownFn**>(game))[0xD8 / 8](game, true, 8, nullptr, nullptr);
+      return false;
+    }
+    Global(0x142b198e8) = service;
+  }
+  {
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x2060));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206bc80;
+      InitInlineHashTable(object + 0x38, 0x14206bc50, 0x2000);
+    }
+    StateSlot(0x96CF8) = object;
+    initService(StateSlot(0x96CF8));
+    Global(0x142b198f0) = StateSlot(0x96CF8);
+  }
+  {
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x2060));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206bd50;
+      InitInlineHashTable(object + 0x38, 0x14206bd20, 0x2000);
+    }
+    StateSlot(0x96D00) = object;
+    initService(StateSlot(0x96D00));
+    Global(0x142b198f8) = StateSlot(0x96D00);
+  }
+  {
+    void* memory = SoeHeapAllocate(0x4088);
+    if (memory) std::memset(memory, 0, 0x4088);
+    StateSlot(0x96D08) = memory ? game::Call<void* (*)(void*)>(0x14039c3b0)(memory) : nullptr;
+    initService(StateSlot(0x96D08));
+    Global(0x142b19900) = StateSlot(0x96D08);
+  }
+  CreateService(Heap, 0x1E8, 0x14175b490, 0, 0, 0x96D10, true, 0x142b19908);
+  {
+    void* memory = SoeHeapAllocate(0x78);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x140ae3930)(memory) : nullptr;
+    Global(0x142b19910) = service;
+    initService(service);  // not null-checked in the original
+  }
+  // World.
+  uint8_t* renderer = game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x38890), 0x70);
+  {
+    auto* hook = static_cast<uint64_t*>(GameAllocate(8));
+    if (hook) *hook = 0x14206b488;
+    game::Field<void*>(renderer, 0xA388) = hook;
+    void* memory = GameAllocate(0x3B658);
+    void* world = memory ? game::Call<void* (*)(void*, void*, void*)>(0x14078c430)(
+                               memory, game::Field<void*>(game::Field<uint8_t*>(game, 0x38890), 0x40), renderer)
+                         : nullptr;
+    game::Field<void*>(game, 0x3D3E0) = world;
+    Global(0x142b19918) = world;
+    Global(0x142b19920) = game::Field<void*>(game, 0x3D3E0);
+  }
+  game::Call<void (*)(uint8_t*)>(0x1403d5b10)(game);
+  // Animation feature weights from the debug settings (key, list offset, default).
+  auto settingFloat = [](int listOffset, unsigned key, uint64_t fallback) {
+    for (auto* node = game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b197a0), listOffset); node;
+         node = game::Field<uint8_t*>(node, 0x20))
+      if (game::Field<unsigned>(node, 0x18) == key) return static_cast<float>(game::Field<double>(node, 0));
+    return *reinterpret_cast<float*>(fallback);
+  };
+  struct Feature {
+    int listOffset;
+    unsigned key;
+    uint64_t fallback;
+    uint64_t name;
+  };
+  static const Feature kFeatures[] = {
+      {0x36C8, 0xEF256ECD, 0x142072850, 0x14206bdc0},  // Feature_FootIK
+      {0x640, 0x8D3D18BC, 0x1425ba080, 0x14206bdd0},   // Feature_JumpAdditives
+      {0x3FB0, 0xBBE177EA, 0x14204862c, 0x14206bde8},  // Feature_PoseAdjustment
+      {0x1600, 0xB78952B4, 0x1425ba078, 0x14206be00},  // Feature_SpineAdditives
+      {0x39F0, 0x72BF9732, 0x1425ba08c, 0x14206be18},  // Feature_WristIK
+  };
+  for (const Feature& feature : kFeatures) {
+    float weight = settingFloat(feature.listOffset, feature.key, feature.fallback);
+    game::Call<void (*)(void*, const char*, float)>(0x141384900)(*reinterpret_cast<void**>(0x142b19928), reinterpret_cast<const char*>(feature.name),
+                                                                weight);
+  }
+  {  // two inline 0x15E0-byte hash tables
+    auto* tables = static_cast<uint8_t*>(GameAllocate(0x2BF8));
+    if (tables) {
+      game::Field<int>(tables, 8) = 0;
+      std::memset(tables + 0x10, 0, 0x15E0);
+      game::Field<int>(tables, 0) = 0;
+      game::Field<int>(tables, 4) = 0x7FFFFFFF;
+      game::Field<uint64_t>(tables, 0x15F8) = 0;
+      game::Field<uint64_t>(tables, 0x1600) = 0;
+      game::Field<int>(tables, 0x1608) = 0;
+      std::memset(tables + 0x1610, 0, 0x15E0);
+      game::Field<int>(tables, 0x15F0) = 0;
+      game::Field<int>(tables, 0x15F4) = 0x7FFFFFFF;
+      game::Field<int>(tables, 0x2BF0) = 0;
+    }
+    game::Field<void*>(game, 0x3D4E8) = tables;
+    Global(0x142b19930) = tables;
+  }
+  {
+    void* memory = SoeHeapAllocate(0xBC0);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x141432bc0)(memory) : nullptr;
+    game::Field<void*>(game, 0x3D4E0) = service;
+    Global(0x142b19938) = service;
+  }
+  {
+    void* memory = SoeHeapAllocate(0xE8);
+    game::Field<void*>(game, 0x3D4C8) = memory ? game::Call<void* (*)(void*)>(0x14184c6c0)(memory) : nullptr;
+    initService(game::Field<void*>(game, 0x3D4C8));
+    Global(0x142b19940) = game::Field<void*>(game, 0x3D4C8);
+  }
+  const char* resources = reinterpret_cast<const char*>(0x14206be28);  // "Resources/"
+  {
+    void* memory = GameAllocate(0x360);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x1407e8370)(memory) : nullptr;
+    game::Field<void*>(game, 0x3B938) = service;
+    game::Call<void (*)(void*, const char*)>(0x1407e8e70)(service, resources);
+  }
+  using InitPathFn = void (*)(void*, void*, const char*);
+  {
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x160));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206b160;
+      InitInlineHashTable(object + 0x38, 0x14206b130, 0x100);
+    }
+    game::Field<void*>(game, 0x3D4D0) = object;
+    (*reinterpret_cast<InitPathFn**>(object))[0x30 / 8](object, nullptr, resources);
+  }
+  {
+    void* memory = SoeHeapAllocate(0x288);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x14039e270)(memory) : nullptr;
+    game::Field<void*>(game, 0x3D4D8) = service;
+    (*reinterpret_cast<InitPathFn**>(service))[0x30 / 8](service, nullptr, resources);
+  }
+  {
+    auto* object = static_cast<uint64_t*>(GameAllocate(0x20));
+    if (object) {
+      object[0] = 0x1420688b0;
+      object[1] = 0x142068890;
+      object[2] = 0;
+      object[3] = 0;
+    }
+    game::Field<void*>(game, 0x38AB8) = object;
+    Global(0x142b19948) = object;
+  }
+  {
+    auto* object = static_cast<uint64_t*>(GameAllocate(8));
+    if (object) *object = 0x14206b6f0;
+    game::Field<void*>(game, 0x38AC0) = object;
+    Global(0x142b19950) = object;
+  }
+  {  // inline service with two hash tables (+0x38, +0x68)
+    auto* object = static_cast<uint8_t*>(SoeHeapAllocate(0x98));
+    if (object) {
+      InitNamedServiceBase(object);
+      game::Field<uint64_t>(object, 0) = 0x14206b7e8;
+      static const uint64_t kTables[][2] = {{0x38, 0x14206b758}, {0x68, 0x14206b7b8}};
+      for (const auto& table : kTables) {
+        uint8_t* t = object + table[0];
+        game::Field<int>(t, 0x20) = 0;
+        game::Field<uint64_t>(t, 0x10) = 0;
+        game::Field<uint64_t>(t, 0x18) = 0;
+        game::Field<int>(t, 8) = 0;
+        game::Field<int>(t, 0xC) = 0x7FFFFFFF;
+        game::Field<uint64_t>(t, 0x28) = 0;
+        game::Field<uint64_t>(t, 0) = table[1];
+      }
+    }
+    Global(0x142b19958) = object;
+    initService(object);  // not null-checked in the original
+  }
+  {
+    void* memory = GameAllocate(0xD3C8);
+    void* streamer = memory ? game::Call<void* (*)(void*, void*)>(0x14136c120)(memory, game::Field<void*>(game, 0x3D3C0)) : nullptr;
+    game::Field<void*>(game, 0x3D508) = streamer;
+    auto manager = [] { return game::Call<void* (*)()>(0x141650f80)(); };
+    game::Call<void (*)(void*, void*, void*)>(0x1416583e0)(manager(), streamer, nullptr);
+    game::Call<void (*)(void*)>(0x14164e6d0)(manager());
+    if (game::Call<uint8_t (*)(void*)>(0x140aa86c0)(game::Call<void* (*)()>(0x140aa8500)()) != 1) return false;
+    game::Call<void (*)(void*)>(0x14164fd50)(manager());
+  }
+  {
+    void* memory = GameAllocate(0xF10);
+    void* audio = memory ? game::Call<void* (*)(void*)>(0x14184e7a0)(memory) : nullptr;
+    game::Field<void*>(game, 0x3D500) = audio;
+    Global(0x142b19960) = audio;
+  }
+  soeutil::StringFixed<256> audioPath;
+  soeutil::InitFixed(audioPath, reinterpret_cast<void**>(0x142049e08));
+  soeutil::StringFixed<256> instancesPath;
+  soeutil::InitFixed(instancesPath, reinterpret_cast<void**>(0x142049e08));
+  using GetStringFn = void (*)(void*, const char*, const char*, const char*, soeutil::IString*, bool, int, int);
+  game::Call<GetStringFn>(0x1403334f0)(game::Field<void*>(game, 0x38E30), reinterpret_cast<const char*>(0x14206be88),
+                                       reinterpret_cast<const char*>(0x14206be70), reinterpret_cast<const char*>(0x14206be38), &instancesPath, true,
+                                       -1, -1);  // [AudioPaths] GameObjectInstances
+  if (int soundError = game::Call<int (*)(void*, const char*)>(0x14184e8b0)(game::Field<void*>(game, 0x3D500), instancesPath.data))
+    game::Call<void (*)(const char*, const char*, ...)>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206bea0),
+                                                                     soundError);  // "... failed to initialize the sound manager.  Error code: %d."
+  auto assetSystem = [&] { return game::Field<void*>(game, 0x3D3C0); };
+  auto assetLoader = [&] { return game::Field<void*>(game, 0x3D3C8); };
+  {
+    void* memory = game::Call<void* (*)(size_t, int)>(0x14032f910)(0x178B20, 0x10);
+    auto* display = game::Field<uint8_t*>(game, 0x38890);
+    game::Field<void*>(game, 0x3D510) =
+        memory ? game::Call<void* (*)(void*, void*, void*, void*)>(0x14130f8c0)(memory, game::Field<void*>(display, 0x40),
+                                                                                game::Field<void*>(display, 0x48), assetLoader())
+               : nullptr;
+  }
+  // Asset-backed resource managers: ctor(memory, assetSystem, assetLoader), then
+  // the three vtables (primary, +8, +0x48) of the concrete manager.
+  auto resourceManager = [&](size_t size, uint64_t constructor, uint64_t vtable0, uint64_t vtable8, uint64_t vtable48, int member, uint64_t global) {
+    auto* object = static_cast<uint64_t*>(GameAllocate(size));
+    if (object) {
+      game::Call<void (*)(void*, void*, void*)>(constructor)(object, assetSystem(), assetLoader());
+      object[0] = vtable0;
+      object[1] = vtable8;
+      object[0x48 / 8] = vtable48;
+    }
+    game::Field<void*>(game, member) = object;
+    Global(global) = object;
+  };
+  resourceManager(0x8318, 0x140396150, 0x142067640, 0x142067688, 0x1420676b0, 0x3D428, 0x142b19968);
+  resourceManager(0x1318, 0x1403962b0, 0x142067868, 0x1420678b0, 0x1420678d8, 0x3D430, 0x142b19970);
+  {
+    void* memory = GameAllocate(0x8320);
+    void* manager =
+        memory ? game::Call<void* (*)(void*, void*, void*, bool)>(0x141845390)(memory, assetSystem(), assetLoader(), true) : nullptr;
+    game::Field<void*>(game, 0x3D4F8) = manager;
+    Global(0x142b19978) = manager;
+  }
+  using LoadFileFn = void (*)(void*, const char*, void*, void*, int, int);
+  {
+    void* memory = GameAllocate(0x9A0);
+    auto* sockets = memory ? game::Call<uint8_t* (*)(void*, void*)>(0x140398540)(memory, assetSystem()) : nullptr;
+    game::Field<void*>(game, 0x3D3E8) = sockets;
+    void* files = game::Field<void*>(sockets, 0x990);
+    (*reinterpret_cast<LoadFileFn**>(files))[0x18 / 8](files, reinterpret_cast<const char*>(0x14206bf00), sockets, nullptr, 2,
+                                                       0);  // "ActorSockets.xml"
+    Global(0x142b19980) = game::Field<void*>(game, 0x3D3E8);
+  }
+  {  // occlusion zones: {vtable, assetSystem +8, hash table +0x10, assetSystem +0xB0, flag +0xB8}
+    auto* zones = static_cast<uint8_t*>(GameAllocate(0xC0));
+    if (zones) {
+      void* system = assetSystem();
+      game::Field<void*>(zones, 8) = system;
+      game::Field<uint64_t>(zones, 0) = 0x142063838;
+      game::Field<uint64_t>(zones, 0x18) = 0;
+      game::Field<uint64_t>(zones, 0x20) = 0;
+      game::Field<int>(zones, 0x28) = 0;
+      std::memset(zones + 0x30, 0, 0x80);
+      game::Field<int>(zones, 0x10) = 0;
+      game::Field<int>(zones, 0x14) = 0x7FFFFFFF;
+      game::Field<void*>(zones, 0xB0) = system;
+      zones[0xB8] = 0;
+    }
+    game::Field<void*>(game, 0x3D4B0) = zones;
+    Global(0x142b19988) = zones;
+    auto* stored = game::Field<uint8_t*>(game, 0x3D4B0);
+    void* files = game::Field<void*>(stored, 0xB0);
+    (*reinterpret_cast<LoadFileFn**>(files))[0x18 / 8](files, reinterpret_cast<const char*>(0x14206bf18), stored, nullptr, 2,
+                                                       0);  // "OcclusionZones.xml"
+  }
+  resourceManager(0x1318, 0x140395ff0, 0x142067418, 0x142067460, 0x142067488, 0x3D410, 0x142b19990);
+  resourceManager(0x1318, 0x140395bd0, 0x142066f88, 0x142066fd0, 0x142066ff8, 0x3D418, 0x142b19998);
+  resourceManager(0x1318, 0x140395650, 0x142067de0, 0x142067e28, 0x142067e50, 0x3D3F0, 0x142b199a0);
+  resourceManager(0x1318, 0x140396410, 0x142068230, 0x142068278, 0x1420682a0, 0x3D438, 0x142b199a8);
+  resourceManager(0x8318, 0x1403957b0, 0x142066be0, 0x142066c28, 0x142066c50, 0x3D3F8, 0x142b195d8);
+  resourceManager(0x1318, 0x140395e90, 0x142068008, 0x142068050, 0x142068078, 0x3D408, 0x142b199b0);
+  resourceManager(0x1318, 0x140395d30, 0x1420671b0, 0x1420671f8, 0x142067220, 0x3D420, 0x142b199b8);
+  resourceManager(0x1318, 0x140395910, 0x142066d60, 0x142066da8, 0x142066dd0, 0x3D400, 0x142b199c0);
+  resourceManager(0x1318, 0x140396570, 0x142067b98, 0x142067be0, 0x142067c08, 0x3D4B8, 0x142b199c8);
+  resourceManager(0x8318, 0x140395a70, 0x1420679e8, 0x142067a30, 0x142067a58, 0x3D440, 0x142b199d0);
+  {
+    void* memory = SoeHeapAllocate(0x230);
+    game::Field<void*>(game, 0x3D488) = memory ? game::Call<void* (*)(void*)>(0x14184a150)(memory) : nullptr;
+    initService(game::Field<void*>(game, 0x3D488));
+    Global(0x142b199d8) = game::Field<void*>(game, 0x3D488);
+  }
+  // Small client-owned helpers: construct (or zero) and publish.
+  auto smallObject = [&](size_t size, uint64_t constructor, int member, uint64_t global) {
+    void* memory = GameAllocate(size);
+    void* object = nullptr;
+    if (memory) {
+      if (constructor)
+        object = game::Call<void* (*)(void*)>(constructor)(memory);
+      else {
+        *static_cast<uint8_t*>(memory) = 0;
+        object = memory;
+      }
+    }
+    game::Field<void*>(game, member) = object;
+    Global(global) = object;
+  };
+  smallObject(1, 0x141868d80, 0x3D470, 0x142b199e0);
+  smallObject(1, 0, 0x3D458, 0x142b199e8);
+  smallObject(0x70, 0x1403986a0, 0x3D448, 0x142b195e8);
+  {  // {flag, index -1, 0, flag}
+    auto* settings = static_cast<uint8_t*>(GameAllocate(0x14));
+    if (settings) {
+      settings[0] = 0;
+      game::Field<int>(settings, 4) = -1;
+      game::Field<uint64_t>(settings, 8) = 0;
+      settings[0x10] = 0;
+    }
+    game::Field<void*>(game, 0x3D478) = settings;
+    settings[0] = (*reinterpret_cast<uint8_t**>(0x142b199f0))[0x2E98];  // not null-checked in the original
+    game::Field<int>(game::Field<uint8_t*>(game, 0x3D478), 4) = game::Field<int>(game::Field<uint8_t*>(game, 0x31418), 0x8018);
+    Global(0x142b195f8) = game::Field<void*>(game, 0x3D478);
+  }
+  smallObject(1, 0, 0x3D460, 0x142b199f8);
+  smallObject(1, 0x14185ade0, 0x3D468, 0x142b195f0);
+  smallObject(4, 0x141854440, 0x3D450, 0x142b195e0);
+  {
+    void* memory = GameAllocate(0xA0);
+    Global(0x142b19a00) = memory ? game::Call<void* (*)(void*)>(0x140aa6360)(memory) : nullptr;
+  }
+  game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206bf30));  // "... Initialized Effects systems."
+  {
+    void* memory = GameAllocate(0x90);
+    game::Field<void*>(game, 0x3D490) = memory ? game::Call<void* (*)(void*)>(0x140aa5c50)(memory) : nullptr;
+    Global(0x142b19a08) = game::Field<void*>(game, 0x3D490);
+    Global(0x142b19a10) = game::Field<void*>(game, 0x3D490);
+    Global(0x142b19a18) = game::Field<void*>(game, 0x3D490);
+  }
+  if (!Global(0x142ae8ab0)) {
+    void* memory = GameAllocate(0x640);
+    Global(0x142ae8ab0) = memory ? game::Call<void* (*)(void*)>(0x1402fab20)(memory) : nullptr;
+  }
+  game::Call<void (*)()>(0x1417f5db0)();
+  // Camera system with a ref-counted callback {vtable, refcount, function 0x1416c8a60}.
+  bool cameraFlag = game::Call<bool (*)(void*)>(0x1404d3090)(game::Field<void*>(game, 0x38890));
+  uint64_t callbackHandle = 0;  // pointer | flag bit 0
+  if (auto* callback = static_cast<uint8_t*>(GameAllocate(0x18))) {
+    game::Field<uint64_t>(callback, 0) = 0x142071f00;
+    _InterlockedExchange64(reinterpret_cast<volatile long long*>(callback + 8), 1);
+    game::Field<uint64_t>(callback, 0) = 0x1420721d0;
+    game::Field<uint64_t>(callback, 0x10) = 0x1416c8a60;
+    callbackHandle = (callbackHandle & 1) | reinterpret_cast<uint64_t>(callback);
+  }
+  int cameraMode = game::Field<int>(*reinterpret_cast<uint8_t**>(0x142b199f0), 0x2C94) != 0 && cameraFlag ? 1 : 0;
+  game::Call<void (*)(uint8_t*, void*, int, uint64_t*)>(0x1402f3b60)(game + 0x42E80, game::Field<void*>(game, 0x38890), cameraMode, &callbackHandle);
+  auto camera = [&] { return game::Call<void* (*)(uint8_t*)>(0x1402f39f0)(game + 0x42E80); };
+  Global(0x142b19a20) = camera();
+  {
+    void* memory = GameAllocate(0xB0);
+    Global(0x142b19a28) = memory ? game::Call<void* (*)(void*)>(0x1414d92a0)(memory) : nullptr;
+  }
+  {
+    void* memory = GameAllocate(0x190);
+    void* view = memory ? game::Call<void* (*)(void*, void*)>(0x14039c2a0)(memory, Global(0x142b19a30)) : nullptr;
+    game::Field<void*>(game, 0x3D498) = view;
+    Global(0x142b195d0) = view;
+  }
+  {
+    void* memory = GameAllocate(0x60);
+    void* controller = memory ? game::Call<void* (*)(void*, void*, int)>(0x1414d9c80)(memory, camera(), 3) : nullptr;
+    game::Field<void*>(game, 0x3D4A0) = controller;
+    Global(0x142b19a38) = controller;
+  }
+  {
+    void* memory = GameAllocate(8);
+    void* listener = memory ? game::Call<void* (*)(void*, void*)>(0x1414d91b0)(memory, camera()) : nullptr;
+    game::Field<void*>(game, 0x3D4A8) = listener;
+    Global(0x142ae8ab8) = listener;
+  }
+  {
+    void* memory = GameAllocate(0x53FD8);
+    void* entities =
+        memory ? game::Call<void* (*)(void*, int, void*)>(0x140708300)(memory, 0x19, game::Field<void*>(game, 0x38890)) : nullptr;
+    game::Field<void*>(game, 0x3D4C0) = entities;
+    Global(0x142b19a40) = entities;
+    Global(0x142b19a48) = game::Field<void*>(game, 0x3D4C0);
+  }
+  auto zeroedService = [&](size_t size, uint64_t constructor) {
+    void* memory = SoeHeapAllocate(size);
+    if (!memory) return static_cast<void*>(nullptr);
+    std::memset(memory, 0, size);
+    return game::Call<void* (*)(void*)>(constructor)(memory);
+  };
+  Global(0x142b19a50) = zeroedService(0x180, 0x14039f700);
+  initService(Global(0x142b19a50));  // not null-checked in the original
+  {
+    void* memory = GameAllocate(0x250);
+    Global(0x142b19a58) = memory ? game::Call<void* (*)(void*)>(0x140769bd0)(memory) : nullptr;
+  }
+  {
+    void* memory = GameAllocate(0x830);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x14076bd70)(memory) : nullptr;
+    Global(0x142b19a60) = service;
+    (*reinterpret_cast<void (***)(void*, const char*)>(service))[1](service, resources);
+  }
+  Global(0x142b19a68) = zeroedService(0x70, 0x14039f4f0);
+  initService(Global(0x142b19a68));
+  game::Call<void (*)(const char*, const char*, ...)>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206bf70));  // "... Initialized AppServices."
+  {
+    void* memory = GameAllocate(0xB0);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x14039bd30)(memory) : nullptr;
+    game::Field<void*>(game, 0x3D3D0) = service;
+    Global(0x142b19a70) = service;
+  }
+  game::Call<void (*)()>(0x1414589c0)();
+  game::Call<void (*)(int)>(0x1414585d0)(0);
+  {
+    void* memory = SoeHeapAllocate(0x170);
+    Global(0x142b19a78) = memory ? game::Call<void* (*)(void*)>(0x14174fb60)(memory) : nullptr;
+    initService(Global(0x142b19a78));
+  }
+  Global(0x142b19a80) = GameAllocate(1);
+  {
+    void* memory = GameAllocate(0x148);
+    Global(0x142b19a88) = memory ? game::Call<void* (*)(void*)>(0x140ab8210)(memory) : nullptr;
+  }
+  {
+    void* memory = GameAllocate(0xAA8);
+    Global(0x142b19a90) = memory ? game::Call<void* (*)(void*)>(0x14139f080)(memory) : nullptr;
+  }
+  {
+    void* input = (*reinterpret_cast<void* (***)(uint8_t*)>(game))[0x88 / 8](game);
+    (*reinterpret_cast<void (***)(void*, void*)>(input))[0x1B0 / 8](input, Global(0x142b19a90));
+  }
+  {
+    void* memory = GameAllocate(0x70);
+    Global(0x142b19a98) = memory ? game::Call<void* (*)(void*)>(0x140abfe80)(memory) : nullptr;
+  }
+  CreateService(Game, 8, 0x140aa75b0, 0, 0, 0x96D18, false, 0x142b19aa0);
+  {
+    void* memory = GameAllocate(0x4AD0);
+    void* service = memory ? game::Call<void* (*)(void*)>(0x140aed470)(memory) : nullptr;
+    game::Field<void*>(game, 0x42E48) = service;
+    Global(0x142b19aa8) = service;
+  }
+  {
+    void* memory = SoeHeapAllocate(0x1B58);
+    Global(0x142b19ab0) = memory ? game::Call<void* (*)(void*)>(0x14039b870)(memory) : nullptr;
+    initService(Global(0x142b19ab0));
+  }
+  // Drop our reference to the camera callback.
+  if (auto* callback = reinterpret_cast<uint8_t*>(callbackHandle & ~1ull)) {
+    if (_InterlockedExchangeAdd64(reinterpret_cast<volatile long long*>(callback + 8), -1) == 1)
+      (*reinterpret_cast<void (***)(void*, int)>(callback))[0](callback, 1);
+  }
+  callbackHandle &= 1;
+  instancesPath.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&instancesPath);
+  audioPath.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&audioPath);
+  return true;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -4261,6 +4901,7 @@ REBUILD_FUNCTION(GameClient_Update, 0x14043c0e0, GameClientUpdate);
 REBUILD_FUNCTION(GameClient_ShutdownSystems, 0x1403e57f0, GameClientShutdownSystems);
 REBUILD_FUNCTION(GameClient_ShutdownGame, 0x1403e42c0, GameClientShutdownGame);
 REBUILD_FUNCTION(GameClient_GiveTime, 0x1403fa350, GameClientGiveTime);
+REBUILD_FUNCTION(GameClient_CreateAppServices, 0x1403d8a00, GameClientCreateAppServices);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
