@@ -1199,6 +1199,80 @@ void GameClientSetChatText(uint8_t* game, void* text) {
   soeutil::StringRelease(&handler);
 }
 
+// Small outgoing packet {vtable, opcode, two payload words}.
+struct SmallPacket {
+  void** vtable;
+  int opcode;
+  int pad0C;
+  uint64_t first;
+  uint64_t second;
+};
+static_assert(offsetof(SmallPacket, first) == 0x10);
+static_assert(sizeof(SmallPacket) == 0x20);
+
+// 0x1403e7a50 (slot 40): DisconnectFromServer(reason) - log, tell the server
+// (0x5F if flagged, 0x71/3 if mounted, then 0x07 and a 2 s flush unless
+// suppressed), destroy the local player and per-session managers, and save
+// user options if they changed.
+void GameClientDisconnectFromServer(uint8_t* game, const char* reason) {
+  using LogFn = void (*)(const char*, const char*, ...);
+  game::Call<LogFn>(0x1402bab70)(reinterpret_cast<const char*>(0x142054710), reinterpret_cast<const char*>(0x14206dc80),
+                                 reason);  // "NetInfo.log", "DisconnectFromServer(): Reason: %s"
+  auto vcall = [](void* object, int slot) { (*reinterpret_cast<void (***)(void*)>(object))[slot](object); };
+  if (void* object = game::Field<void*>(game, 0x3D3C0)) vcall(object, 0x90 / 8);
+  using SendFn = void (*)(void*, SmallPacket*, int, bool);
+  auto* state = game::Field<uint8_t*>(game, 0x314A8);
+  if (state[0x198]) {
+    SmallPacket packet{reinterpret_cast<void**>(0x142063d90), 0x5F, 0, reinterpret_cast<uint64_t>(state + 0xD0), 0};
+    game::Call<SendFn>(0x14035f210)(game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19b98), 8), &packet, 1, true);
+  }
+  vcall(game, 0x1E8 / 8);
+  if (auto* player = game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80))
+    game::Call<void (*)(uint8_t*)>(0x140558310)(player + 0x1260);
+  auto* recorder = *reinterpret_cast<uint8_t**>(0x142b19b98);
+  if (void* owner = game::Field<void*>(game, 0x38860)) {
+    void* self = game::Call<void* (*)(void*)>(0x14071e830)(owner);
+    if (self && game::Call<void* (*)(void*)>(0x14050f300)(self)) {
+      if (recorder) {
+        SmallPacket dismount{reinterpret_cast<void**>(0x142065c60), 0x71, 0, 3, 1};
+        game::Call<SendFn>(0x14035f520)(game::Field<void*>(recorder, 8), &dismount, 0, true);
+      }
+      uint64_t value = *reinterpret_cast<uint64_t*>(0x142b181f8);
+      game::Call<void (*)(void*, int, uint64_t*, void*)>(0x140505f60)(self, 0, &value, nullptr);
+      uint64_t now = 0;
+      game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&now);
+      value = now;
+      game::Call<void (*)(uint8_t*, void*, uint64_t*)>(0x1403d0d40)(game, self, &value);
+    }
+  }
+  if (!game[0x3883A] && recorder) {
+    game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206dca8));  // "Disconnecting from the server"
+    SmallPacket logout{reinterpret_cast<void**>(0x142063c18), 7, 0, 0, 0};
+    game::Call<SendFn>(0x14035f120)(game::Field<void*>(recorder, 8), &logout, 0, true);
+    game::Call<void (*)(void*, int, bool)>(0x14063c2b0)(game::Field<void*>(recorder, 8), 2000, true);
+  }
+  if (void* handler = game::Field<void*>(game, 0x388C8)) game::Call<void (*)(void*)>(0x1409c6070)(handler);
+  vcall(game, 0x110 / 8);
+  state = game::Field<uint8_t*>(game, 0x314A8);
+  if (void* player = game::Field<void*>(state, 0xF80))
+    (*reinterpret_cast<void (***)(void*, int)>(player))[2](player, 1);  // deleting destructor
+  game::Field<void*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80) = nullptr;
+  *reinterpret_cast<void**>(0x142b19ba0) = nullptr;
+  if (void* manager = *reinterpret_cast<void**>(0x142b19c60)) game::Call<void (*)(void*)>(0x1406565f0)(manager);
+  if (void* manager = *reinterpret_cast<void**>(0x142b19c48)) game::Call<void (*)(void*)>(0x1407dc930)(manager);
+  if (void* manager = *reinterpret_cast<void**>(0x142b19c68)) game::Call<void (*)(void*)>(0x140ae9ec0)(manager);
+  if (void* object = game::Field<void*>(game, 0x388A8)) (*reinterpret_cast<void (***)(void*, int)>(object))[8](object, 1);
+  game::Field<void*>(game, 0x388A8) = nullptr;
+  game::Call<void (*)(uint8_t*, int)>(0x140469190)(game, 4);
+  game::Call<void (*)(uint8_t*)>(0x14047cfe0)(game);
+  if (void* object = game::Field<void*>(game, 0x388A0)) game::Call<void (*)(void*, int)>(0x1406145e0)(object, 0);
+  if (void* owner = game::Field<void*>(game, 0x38860)) game::Call<void (*)(void*, int)>(0x14071c680)(owner, 0);
+  if (game::Call<bool (*)(void*)>(0x140aae940)(*reinterpret_cast<void**>(0x142b199f0))) {
+    game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206dcc8));  // "Saving user options"
+    game::Call<void (*)(void*)>(0x140ab23d0)(*reinterpret_cast<void**>(0x142b199f0));
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1246,6 +1320,7 @@ REBUILD_FUNCTION(GameClient_WaitForCharacterLogin, 0x1403d64a0, GameClientWaitFo
 REBUILD_FUNCTION(GameClient_ForwardToHandler388C8, 0x14043b860, GameClientForwardToHandler388C8);
 REBUILD_FUNCTION(GameClient_HandlePacket17, 0x14040bba0, GameClientHandlePacket17);
 REBUILD_FUNCTION(GameClient_SetChatText, 0x140468e00, GameClientSetChatText);
+REBUILD_FUNCTION(GameClient_DisconnectFromServer, 0x1403e7a50, GameClientDisconnectFromServer);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
