@@ -1167,6 +1167,38 @@ bool GameClientHandlePacket17(uint8_t* game, const uint8_t* data, int length) {
   }
 }
 
+// UI script argument list {vtable, begin, end}.
+struct ScriptArgs {
+  void** vtable;
+  void* begin;
+  void* end;
+};
+static_assert(sizeof(ScriptArgs) == 0x18);
+
+// 0x140468e00 (slot 48): call "<ChatHandler>:SetChatText"(text) in the UI;
+// if no such script function exists, report it through the logger at +0x38DD0.
+void GameClientSetChatText(uint8_t* game, void* text) {
+  soeutil::IString handler{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
+  if (game::Call<FindHandlerFn>(0x14048a5c0)(UiRoot(), reinterpret_cast<const char*>(0x14206e460), &handler)) {  // "ChatHandler"
+    game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&handler, reinterpret_cast<const char*>(0x14206e600));  // ":SetChatText"
+    ScriptArgs args{reinterpret_cast<void**>(0x14206c548), nullptr, nullptr};
+    if (auto* slot = game::Call<int* (*)(ScriptArgs*, int)>(0x140418710)(&args, 0)) *slot = 0;
+    game::Call<void (*)(void*, void*)>(0x14046d850)(args.begin, text);
+    if (!game::Call<bool (*)(void*, const char*, ScriptArgs*, void*)>(0x140488cc0)(UiRoot(), handler.data, &args, nullptr)) {
+      void* logger = game::Field<void*>(game, 0x38DD0);
+      int line = game::Call<int (*)()>(0x1416dfd20)();
+      int file = game::Call<int (*)()>(0x1416dfe00)();
+      using ReportFn = void (*)(void*, const char*, int, int, int, bool, void*, bool);
+      (*reinterpret_cast<ReportFn**>(logger))[5](logger, reinterpret_cast<const char*>(0x14206e610), 0, file, line, false, nullptr,
+                                                 true);  // "Problem with chat handler.  No function matching ..."
+    }
+    game::Call<void (*)(ScriptArgs*)>(0x1403a06c0)(&args);
+  }
+  handler.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&handler);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1213,6 +1245,7 @@ REBUILD_FUNCTION(GameClient_StartLogging, 0x1404106d0, GameClientStartLogging);
 REBUILD_FUNCTION(GameClient_WaitForCharacterLogin, 0x1403d64a0, GameClientWaitForCharacterLogin);
 REBUILD_FUNCTION(GameClient_ForwardToHandler388C8, 0x14043b860, GameClientForwardToHandler388C8);
 REBUILD_FUNCTION(GameClient_HandlePacket17, 0x14040bba0, GameClientHandlePacket17);
+REBUILD_FUNCTION(GameClient_SetChatText, 0x140468e00, GameClientSetChatText);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
