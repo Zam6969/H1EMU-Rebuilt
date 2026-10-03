@@ -597,6 +597,70 @@ void GameClientHandleEvent(uint8_t* game, const uint8_t* data, int length) {
   }
 }
 
+// 0x14040b790 (slot 92): packet opcode 0x93 for an object by id - read
+// {id, i8, u8, u8, u64, int} and pass it to the object's slot-83 component
+// via 0x1406c8990. False if unreadable or the object/component is missing.
+bool GameClientHandlePacket93(uint8_t* game, const uint8_t* data, int length) {
+  struct Packet93 {
+    void** vtable;
+    int opcode;
+    int padding;
+    int id;               // +0x10
+    int8_t a;             // +0x14
+    uint8_t b;            // +0x15
+    uint8_t c;            // +0x16
+    uint8_t padding2;
+    uint64_t d;           // +0x18
+    int e;                // +0x20
+    int padding3;
+  } packet{reinterpret_cast<void**>(0x142064320), 0x93, 0, *reinterpret_cast<int*>(0x142b186ac), 0, 0, 0, 0, 0, 0, 0};
+  static_assert(offsetof(Packet93, d) == 0x18 && sizeof(Packet93) == 0x28);
+  if (!data) return false;
+  struct Reader {
+    const uint8_t* start;
+    int length;
+    const uint8_t* cursor;
+    const uint8_t* end;
+    uint16_t failed;
+  } reader{data, length, data, data + length, 0};
+  game::Call<void (*)(Packet93*, Reader*)>(0x140367dd0)(&packet, &reader);
+  if (static_cast<uint8_t>(reader.failed) || static_cast<int>(reader.end - reader.cursor) > 0) return false;
+  int id = packet.id;
+  auto* object = game::Call<uint8_t* (*)(uint8_t*, int*)>(0x1403f8380)(game, &id);
+  if (!object) return false;
+  void* component = reinterpret_cast<void* (*)(uint8_t*)>((*reinterpret_cast<void***>(object))[0x298 / 8])(object);
+  if (!component) return false;
+  game::Call<void (*)(void*, int, uint8_t, uint8_t, uint64_t*)>(0x1406c8990)(component, packet.a, packet.b, packet.c, &packet.d);
+  return true;
+}
+
+// 0x140470b70 (slot 34): close the UI modules ("App.UI.Modules",
+// "App.UI.EditModuleContents"), delete the object at +0x38DC8, clear the
+// state block's +0x1C0 entry and destroy the extension root (*0x142b19cc0).
+void GameClientShutdownUi(uint8_t* game) {
+  auto closeModule = [](const char* name) {
+    using HashFn = uint32_t (*)(const char*, int, void*, void*, void*, void*);
+    uint32_t hash = game::Call<HashFn>(0x1402ee3a0)(name, -1, nullptr, nullptr, nullptr, nullptr) & 0x7FFFFFFF;
+    game::Call<void (*)(void*, uint64_t, void*)>(0x140ce84b0)(UiRoot(), hash, nullptr);
+  };
+  if (UiRoot()) {
+    closeModule(reinterpret_cast<const char*>(0x14206d2b8));  // "App.UI.Modules"
+    closeModule(reinterpret_cast<const char*>(0x14206d2c8));  // "App.UI.EditModuleContents"
+  }
+  if (void* object = game::Field<void*>(game, 0x38DC8)) {
+    game::Call<void (*)(void*)>(0x1403b3390)(object);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(object, 0x30);
+  }
+  game::Field<void*>(game, 0x38DC8) = nullptr;
+  game::Call<void (*)(uint8_t*)>(0x1403d4610)(game::Field<uint8_t*>(game, 0x314A8) + 0x1C0);
+  auto& root = *reinterpret_cast<void**>(0x142b19cc0);
+  if (root) {
+    game::Call<void (*)(void*)>(0x1407b4b00)(root);
+    DeleteVirtual(root);
+    root = nullptr;
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -630,6 +694,8 @@ REBUILD_FUNCTION(GameClient_Slot46, 0x14046c250, GameClientSlot46);
 REBUILD_FUNCTION(GameClient_CheckIdle, 0x1403d33f0, GameClientCheckIdle);
 REBUILD_FUNCTION(GameClient_OnInit, 0x1403fd180, GameClientOnInit);
 REBUILD_FUNCTION(GameClient_HandleEvent, 0x140408340, GameClientHandleEvent);
+REBUILD_FUNCTION(GameClient_HandlePacket93, 0x14040b790, GameClientHandlePacket93);
+REBUILD_FUNCTION(GameClient_ShutdownUi, 0x140470b70, GameClientShutdownUi);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
