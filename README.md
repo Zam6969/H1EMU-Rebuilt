@@ -69,13 +69,13 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpManager::Params` | constructor with all 5 role presets |
 | SoeUtil | `Mutex` | Lock, Unlock (critical section or Win32 mutex mode) |
 | UdpLibrary | `UdpManager` | GiveTime, ProcessRawPacket (incoming dispatch: connect, remap, unknown-terminate, unreachable reply), ActualReceive/Send/SendHelper, NextIncomingPacket, CreatePacket, connection lookup (by address and code), AddNewConnection, address/code hash tables (resize, insert, remove), event queue (alloc, clear, release, queue, DeliverEvents), all 6 handler callbacks, packet pool (3), clock (2), bandwidth buckets (2), priority-queue reprioritize, disconnect cleanup (4), SimulateQueueEntry ctor |
-| UdpLibrary | `UdpConnection` tick | InternalGiveTime (connect retries, clock sync, reliable channels, multi-buffer hold, keep-alive, port-alive, disconnect drain, no-data timeout), ProcessApplicationPacket, Age, TotalPendingBytes, SetOtherSideTerminated; sync stamps + SyncStampShortDelta; manager SendPortAlive |
+| UdpLibrary | `UdpConnection` tick | both constructors (incoming / outgoing), destructor, deleting destructor, InternalGiveTime (connect retries, clock sync, reliable channels, multi-buffer hold, keep-alive, port-alive, disconnect drain, no-data timeout), ProcessApplicationPacket, Age, TotalPendingBytes, SetOtherSideTerminated; sync stamps + SyncStampShortDelta; manager SendPortAlive |
 | UdpLibrary | `UdpConnection` | Init, SetupEncryption, GiveTime, GetStatus, Disconnect, Clock, ProcessRawPacket (CRC verify + decrypt), corrupt/ICMP handling, receive buckets, Elapsed, PhysicalSend (2-pass encrypt + CRC), PhysicalSendFinal, send buckets, SendTerminatePacket, FlushChannels, all 5 handler callbacks, all 10 encrypt/decrypt methods; manager-side Schedule/AddDisconnecting/RemoveConnection, priority-queue Update |
 | UdpLibrary | `UdpConnection` dispatch | ProcessCookedPacket: every protocol opcode (connect/confirm, multi, terminate, clock sync/reflect, reliable/ack routing, group, ordered, unreachable/remap); BufferedSend (00 03 multi-packet batching) |
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
 
-Total: 227 functions (216 hooked, 11 too small to hook).
+Total: 231 functions (220 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
