@@ -68,6 +68,8 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpMisc` | Put/GetVariableValue, Random, NextPrime, CreateQuickLogicalPacket |
 | UdpLibrary | `UdpManager::Params` | constructor with all 5 role presets |
 | SoeUtil | `Mutex` | Construct (named, spin count), Lock, Unlock (critical section or Win32 mutex mode) |
+| SoeUtil | `Time` | TimeNow (QueryPerformanceCounter ms) |
+| ClientServerCore | `UdpCompressionHandler` | Encrypt/Decrypt = packet compression (flag byte 01 deflate level 6 / 00 stored) |
 | UdpLibrary | `UdpManager` | constructor (params fix-up, driver, receive ring, packet pool prefill, memory pools, hash tables, priority queue, port-range bind), ClearStatistics, destructor (incl. memory-pool teardown), OpenSocket, EstablishConnection, ExpectIncoming (NAT punch-through, 00 1F probes), DisconnectAll, PopEvent, DumpPacketHistory, list teardown helpers (5), GiveTime, ProcessRawPacket (incoming dispatch: connect, remap, unknown-terminate, unreachable reply), ActualReceive/Send/SendHelper, NextIncomingPacket, CreatePacket, connection lookup (by address and code), AddNewConnection, address/code hash tables (resize, insert, remove), event queue (alloc, clear, release, queue, DeliverEvents), all 6 handler callbacks, packet pool (3), clock (2), bandwidth buckets (2), priority-queue reprioritize, disconnect cleanup (4), SimulateQueueEntry ctor |
 | UdpLibrary | `UdpConnection` tick | both constructors (incoming / outgoing), destructor, deleting destructor, InternalGiveTime (connect retries, clock sync, reliable channels, multi-buffer hold, keep-alive, port-alive, disconnect drain, no-data timeout), ProcessApplicationPacket, Age, TotalPendingBytes, SetOtherSideTerminated; sync stamps + SyncStampShortDelta; manager SendPortAlive |
 | UdpLibrary | `UdpConnection` API | Send (all 8 channels: unreliable, unbuffered, ordered 1A/1B, reliable 1-4, with promotion to reliable), FlushNow, DrainSendQueue, GetChannelStatus, GetStats, GetDestinationIp/String, GetDisconnectReasonText, DisconnectReasonText (official reason names) |
@@ -76,7 +78,7 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
 
-Total: 257 functions (246 hooked, 11 too small to hook).
+Total: 260 functions (249 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
