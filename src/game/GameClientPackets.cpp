@@ -1021,6 +1021,56 @@ void GameClientStartLogging(uint8_t* game) {
   soeutil::StringRelease(&folder);
 }
 
+// 0x1403d64a0 (slot 39): after the gateway login, pump the connection until
+// the server sends our character (or 120 s pass / the connection drops /
+// the game is closing), then tell the UI and console. Returns false (with an
+// error log) if the login did not complete.
+bool GameClientWaitForCharacterLogin(uint8_t* game) {
+  auto recorder = [] { return *reinterpret_cast<uint8_t**>(0x142b19b98); };
+  auto connected = [&] { return game::Call<bool (*)(void*)>(0x14063bdb0)(game::Field<void*>(recorder(), 8)); };
+  using ErrorFn = void (*)(const char*, const char*);
+  if (!connected()) {
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206d4f8));  // "Connection to gateway lost before authenticating"
+    return false;
+  }
+  soeutil::IString unused{reinterpret_cast<void**>(0x14204a378), soeutil::EmptyStringData(), 0, 0};
+  game::Call<void (*)(void*)>(0x14063be10)(game::Field<void*>(recorder(), 8));  // give the gateway API time
+  uint64_t start = 0;
+  game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&start);
+  constexpr int kLoginTimeoutMs = 120000;
+  int elapsed = 0;
+  auto localPlayer = [&] { return game::Field<void*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+  while (!game[0x38838] && !localPlayer() && connected()) {
+    uint64_t now = 0;
+    int64_t delta = static_cast<int64_t>(*game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&now) - start);
+    elapsed = static_cast<int>(delta > 0x7fffffff ? 0x7fffffff : delta);
+    if (elapsed >= kLoginTimeoutMs) break;
+    game::Call<void (*)(void*, int)>(0x14063d8e0)(recorder(), 1000);
+    if (game[0x38839]) game::Call<void (*)(uint8_t*, bool, bool, bool, int)>(0x140474860)(game, false, true, true, 10);
+    game::Call<void (*)(unsigned)>(0x14032ec60)(25);  // Sleep(25)
+  }
+  game::Call<void (*)(void*, const char*, void*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(0x14206d580), nullptr,
+                                                                      nullptr);  // "CharacterSelectHandler:OnCharacterLoginComplete"
+  if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+    const char* event = reinterpret_cast<const char*>(0x14206d5b0);  // "EVENT_LOGIN_COMPLETE"
+    soeutil::IString name{soeutil::IStringVtable(), const_cast<char*>(event), static_cast<int>(std::strlen(event)), -1};
+    game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(console, &name, nullptr, nullptr);
+    name.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&name);
+  }
+  bool ok = true;
+  if (game[0x38838]) {
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206d530));  // "While connecting to the server the client was ..."
+    ok = false;
+  } else if (elapsed >= kLoginTimeoutMs && !localPlayer()) {
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206dc20));  // "Connected to the server but failed to receive ..."
+    ok = false;
+  }
+  unused.vtable = reinterpret_cast<void**>(0x14204a358);
+  soeutil::StringRelease(&unused);
+  return ok;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1064,6 +1114,7 @@ REBUILD_FUNCTION(GameClient_HandlePacketE2, 0x14040bee0, GameClientHandlePacketE
 REBUILD_FUNCTION(GameClient_Log, 0x1404307d0, GameClientLog);
 REBUILD_FUNCTION(GameClient_LoadOptions, 0x14040e7a0, GameClientLoadOptions);
 REBUILD_FUNCTION(GameClient_StartLogging, 0x1404106d0, GameClientStartLogging);
+REBUILD_FUNCTION(GameClient_WaitForCharacterLogin, 0x1403d64a0, GameClientWaitForCharacterLogin);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
