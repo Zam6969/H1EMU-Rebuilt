@@ -372,6 +372,18 @@ static_assert(offsetof(BeginZoningPacket, zoneType) == 0x50 && offsetof(BeginZon
 static_assert(offsetof(BeginZoningPacket, a) == 0x8C && offsetof(BeginZoningPacket, flag96) == 0x96);
 static_assert(offsetof(BeginZoningPacket, guid) == 0x98 && sizeof(BeginZoningPacket) == 0xA0);
 
+constexpr size_t kLargeSubPacketSize = 0x20100;  // fits the 0xE3 sub-packets 2 (0x16030) and 5 (~0x17DA8)
+
+struct U64Packet2 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int subtype;  // +0x10
+  int padding2;
+  uint64_t id;  // +0x18
+};
+static_assert(offsetof(U64Packet2, id) == 0x18);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1658,12 +1670,77 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(BeginZoningPacket*)>(0x1403b05b0)(&packet);
       break;
     }
+    case 0xE3: {  // sub-dispatched by the int after the opcode
+      ValuePacket subHeader{reinterpret_cast<void**>(0x1420662d8), 0xE3, 0, 0};
+      if (!game::Call<bool (*)(ValuePacket*, const uint8_t*, int, bool)>(0x1403889f0)(&subHeader, data, length, true)) {
+        result = false;
+        break;
+      }
+      // Feature flags on the local player controller (read fresh, not null-checked, as in the original).
+      auto flags = [] { return static_cast<uint8_t*>(GlobalObject(0x142b19ba0)) + 0x109DB; };
+      void* mover = Member(game, 0x7115);
+      auto moverState = [&] { return reinterpret_cast<int (*)(void*)>((*static_cast<void***>(mover))[0])(mover); };
+      using ReadFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+      switch (subHeader.value) {
+        case 1:
+          if (game::Field<int>(game, 0x38E48) >= 2 && !(mover && moverState() == 0x29))
+            game::Call<void (*)(uint8_t*, int)>(0x140469190)(game, 0x29);
+          *flags() |= 1;
+          game::Call<void (*)(bool)>(0x1406efa90)(true);
+          break;
+        case 2: {
+          std::unique_ptr<uint8_t[]> packet(new uint8_t[kLargeSubPacketSize]);  // 0x16030 bytes (stack in the original)
+          game::Call<void (*)(uint8_t*)>(0x14039da40)(packet.get());
+          if (game::Call<ReadFn>(0x14038c150)(packet.get(), data, length, false)) {
+            if (game::Field<int>(packet.get(), 0x18) == 0) {
+              if (void* target = GlobalObject(0x142b19cd0)) game::Call<void (*)(void*, uint8_t*)>(0x1406ee7e0)(target, packet.get());
+            } else if (void* target = GlobalObject(0x142b19cf0)) {
+              game::Call<void (*)(void*, uint8_t*)>(0x1406ee5a0)(target, packet.get());
+            }
+          }
+          game::Call<void (*)(uint8_t*)>(0x1403b1010)(packet.get());
+          break;
+        }
+        case 5: {
+          std::unique_ptr<uint8_t[]> packet(new uint8_t[kLargeSubPacketSize]);  // ~0x17DA8 bytes (stack in the original)
+          game::Call<void (*)(uint8_t*)>(0x14039d9f0)(packet.get());
+          if (game::Call<ReadFn>(0x14038c070)(packet.get(), data, length, false)) {
+            if (void* target = GlobalObject(0x142b19cf8)) game::Call<void (*)(void*, uint8_t*)>(0x1407a8540)(target, packet.get());
+          }
+          game::Call<void (*)(uint8_t*)>(0x1403b0f30)(packet.get());
+          break;
+        }
+        case 6:
+          *flags() |= 2;
+          game::Call<void (*)(bool)>(0x1406efac0)(true);
+          break;
+        case 7:
+          *flags() |= 4;
+          game::Call<void (*)(bool)>(0x1406efaf0)(true);
+          break;
+        case 8:  // match results summary (builds a long JSON-like string) - still the original
+          return g_originalDispatch(game, header, data, length, channel);
+        case 12: {
+          U64Packet2 packet{reinterpret_cast<void**>(0x142066368), 0xE3, 0, 12, 0, *reinterpret_cast<uint64_t*>(0x142b181f8)};
+          if (game::Call<bool (*)(U64Packet2*, const uint8_t*, int, bool)>(0x14038c1c0)(&packet, data, length, false) &&
+              mover && moverState() == 0x27) {
+            uint64_t id = packet.id;
+            game::Call<void (*)(void*, uint64_t*)>(0x1406e5140)(Member(game, 0x7115), &id);
+          }
+          break;
+        }
+        default:  // 3, 4, 9, 10, 11 and out of range: nothing
+          break;
+      }
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0xE3:
+    case 0x03:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
