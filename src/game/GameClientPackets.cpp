@@ -3703,6 +3703,502 @@ void GameClientShutdownGame(uint8_t* game) {
   vcall(game, 0x278);  // tail call
 }
 
+// 0x1403fa350 (slot 9): GiveTime - the client's connection/login state
+// machine (state at +0x314B0, 36 states; shutdown reason at 0x142b176c4),
+// followed by the per-frame profile/time bookkeeping shared by every state.
+void GameClientGiveTime(uint8_t* game) {
+  using TimerFn = uint64_t* (*)(uint64_t*);
+  auto timer = [] {
+    uint64_t value;
+    return *game::Call<TimerFn>(0x14032fde0)(&value);
+  };
+  auto now = [] {
+    uint64_t value;
+    return *game::Call<TimerFn>(0x14032fd30)(&value);
+  };
+  auto setState = [&](int state) { game::Call<void (*)(uint8_t*, int)>(0x140474de0)(game, state); };
+  auto& shutdownReason = *reinterpret_cast<int*>(0x142b176c4);
+  using LogFn = void (*)(const char*, const char*, ...);
+  auto error = [](uint64_t text) { game::Call<LogFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(text)); };
+  auto vcall = [](void* object, int offset) { (*reinterpret_cast<void (***)(void*)>(object))[offset / 8](object); };
+  auto recorder = [] { return *reinterpret_cast<uint8_t**>(0x142b19b98); };
+  auto gatewayConnected = [&] { return game::Call<bool (*)(void*)>(0x14063bdb0)(game::Field<void*>(recorder(), 8)); };
+
+  auto login = [&] { return game::Field<void*>(game, 0x38B80); };
+  auto fireConsoleEvent = [](uint64_t name) {
+    if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+      const char* text = reinterpret_cast<const char*>(name);
+      soeutil::IString event{soeutil::IStringVtable(), const_cast<char*>(text), static_cast<int>(std::strlen(text)), -1};
+      game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(console, &event, nullptr, nullptr);
+      event.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&event);
+    }
+  };
+  auto fireAssignedEvent = [](uint64_t name) {
+    if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+      soeutil::IString event{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      game::Call<void (*)(soeutil::IString*, const char*, int)>(0x1402ee880)(&event, reinterpret_cast<const char*>(name), -1);
+      game::Call<void (*)(void*, soeutil::IString*, void*, void*)>(0x1409511d0)(*reinterpret_cast<void**>(0x143bd4830), &event, nullptr, nullptr);
+      event.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&event);
+    }
+  };
+  // Debug setting 0x36713FC6 in the settings list at *(0x142b197a0)+0x3E90
+  // (NaN counts as zero, like the original ucomisd/jne).
+  auto debugFlagSet = [] {
+    uint8_t* node = game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b197a0), 0x3E90);
+    for (; node && game::Field<unsigned>(node, 0x18) != 0x36713FC6u; node = game::Field<uint8_t*>(node, 0x20)) {
+    }
+    if (!node) return false;
+    double value = game::Field<double>(node, 0);
+    return value < 0.0 || value > 0.0;
+  };
+
+  game::Call<void (*)()>(0x141426830)();
+  game::Call<void (*)(uint8_t*)>(0x14047b7a0)(game);
+  if (void* a = game::Field<void*>(game, 0x42E48)) game::Call<void (*)(void*)>(0x140af0020)(a);
+  if (void* a = *reinterpret_cast<void**>(0x143bc1408)) game::Call<void (*)(void*)>(0x1407411b0)(a);
+  uint8_t* profile = game::Field<uint8_t*>(game, 0x314A8) + 0xA10;
+  uint64_t previousEnd = game::Field<uint64_t>(game, 0x31538);
+  game::Field<uint64_t>(profile, 0x30) = previousEnd == *reinterpret_cast<uint64_t*>(0x142b186b8) ? 0 : timer() - previousEnd;
+  uint64_t frameStart = timer();
+  game::Field<uint64_t>(game, 0x31530) = frameStart;
+  uint64_t lapStart = frameStart;
+
+  switch (game::Field<int>(game, 0x314B0)) {
+    case 0:
+      game[0x38839] = 1;
+      game::Call<void (*)(uint8_t*)>(0x140472810)(game);
+      break;
+    case 4: {  // splash screen
+      bool waitForSplash = true;
+      if (!*reinterpret_cast<void**>(0x142b19b08)) {
+        using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+        game::Call<GetBoolFn>(0x1403051c0)(*reinterpret_cast<uint8_t**>(0x142b199f0) + 0x1D38, reinterpret_cast<const char*>(0x14206d358),
+                                           reinterpret_cast<const char*>(0x14206d348), true, false, -1, -1);  // [UI] SplashScreen (result unused)
+        waitForSplash = *reinterpret_cast<void**>(0x142b19b08) != nullptr;
+      }
+      if (waitForSplash) {
+        int64_t shown = static_cast<int64_t>(now() - game::Field<uint64_t>(game, 0x314D0));
+        if (static_cast<int>(shown > 0x7fffffff ? 0x7fffffff : shown) < 2500) break;
+      }
+      if ((*reinterpret_cast<bool (***)(uint8_t*)>(game))[0xE8 / 8](game)) {
+        setState(12);
+      } else {
+        shutdownReason = 4;
+        setState(0x23);
+      }
+      break;
+    }
+    case 12: {  // log in
+      game::Field<uint64_t>(*reinterpret_cast<uint8_t**>(0x142b19780), 0x314F8) = now();
+      game::Call<void (*)(uint8_t*, const char*)>(0x140470070)(game, reinterpret_cast<const char*>(0x14206d35c));  // "Login"
+      game::Field<uint64_t>(game, 0x38B70) = now();
+      if (void* launcher = *reinterpret_cast<void**>(0x142b19b10); launcher && game::Call<bool (*)(void*)>(0x14065c010)(launcher)) {
+        game::Call<void (*)(void*)>(0x14065b540)(launcher);
+        if (game::Call<bool (*)(void*)>(0x14065c130)(launcher)) {
+          if (!game::Call<bool (*)(void*)>(0x14065e8c0)(launcher)) {
+            game::Call<void (*)(void*)>(0x14065de00)(launcher);
+            break;
+          }
+          if (game::Call<bool (*)(void*)>(0x14065f1b0)(launcher)) break;
+        }
+        game::Call<void (*)(uint8_t*)>(0x140477d40)(game);
+      }
+      void* login = game::Field<void*>(game, 0x38B80);
+      game::Call<void (*)(void*, uint8_t*, int, int)>(0x140738550)(login, game + 0x31608, game::Field<int>(game, 0x31DF4), game::Field<int>(game, 0x31DF8));
+      game::Call<void (*)(void*, uint8_t*)>(0x1407385d0)(game::Field<void*>(game, 0x38B80), game + 0x31A28);
+      game::Call<void (*)(void*, const char*, int)>(0x140736260)(game::Field<void*>(game, 0x38B80), reinterpret_cast<const char*>(0x14206d368), 3);
+      if (void* splash = *reinterpret_cast<void**>(0x142b19b08)) {
+        game::Call<void (*)(void*)>(0x141342530)(splash);
+        *reinterpret_cast<void**>(0x142b19b08) = nullptr;
+      }
+      setState(game::Call<bool (*)(void*, int)>(0x140738660)(game::Field<void*>(game, 0x38B80), 0) ? 13 : 17);
+      break;
+    }
+    case 29: {  // waiting for a relogin session
+      uint64_t deadline = game::Field<uint64_t>(game, 0x38B88);
+      if (deadline != *reinterpret_cast<uint64_t*>(0x142b17e20) && static_cast<int64_t>(deadline) < static_cast<int64_t>(now())) {
+        error(0x14206d388);  // "Timed out while waiting for a relogin session."
+        shutdownReason = 0x16;
+        setState(0x23);
+      } else if (!gatewayConnected()) {
+        error(0x14206d3c0);  // "Lost connection to the gateway while waiting for ..."
+        shutdownReason = 0x14;
+        setState(0x23);
+      } else {
+        game::Call<void (*)(void*, int)>(0x14063d8e0)(recorder(), 1000);
+      }
+      break;
+    }
+    case 30: {  // back to character select
+      fireConsoleEvent(0x14206d408);  // "EVENT_LOGIN_BEGIN"
+      (*reinterpret_cast<void (***)(uint8_t*, const char*)>(game))[0x140 / 8](game, reinterpret_cast<const char*>(0x14206d420));  // "Exiting to character select"
+      game::Call<void (*)(void*, size_t)>(0x140d0fb84)(game::Field<void*>(game, 0x390E0), 0x10);
+      game::Field<void*>(game, 0x390E0) = nullptr;
+      if (game::Call<bool (*)(void*, bool)>(0x140738660)(login(), true)) {
+        setState(13);
+      } else {
+        shutdownReason = 0x15;
+        setState(0x23);
+      }
+      break;
+    }
+    case 13: {  // waiting for the login server
+      game::Call<void (*)(void*)>(0x1407369d0)(login());
+      auto* session = game::Field<uint8_t*>(login(), 0x10);
+      if (session && session[0x2BC]) {
+        setState(14);
+        break;
+      }
+      if (game[0x38839] && game::Call<bool (*)(void*)>(0x140736d50)(login())) break;
+      fireConsoleEvent(0x14206d440);  // "EVENT_TITLE_SCREEN_LOGIN_FAILED"
+      shutdownReason = 0x13;
+      setState(0x23);
+      break;
+    }
+    case 14: {  // character select shown
+      game::Call<void (*)(void*)>(0x1407369d0)(login());
+      if (!game[0x38EB2]) {
+        auto* window = game::Call<void* (*)(void*, const char*)>(0x140cf41f0)(game::Field<void*>(game, 0x38AC8),
+                                                                              reinterpret_cast<const char*>(0x14206d460));  // "Main.wndCharacterSelect"
+        auto page = [&] {
+          return game::Call<void* (*)(void*)>(0x140cfa3c0)(game::Call<void* (*)(void*, bool)>(0x140cf3e60)(window, true));
+        };
+        if (window && game::Call<void* (*)(void*, bool)>(0x140cf3e60)(window, true) && page()) {
+          void* first = page();
+          if ((*reinterpret_cast<void* (***)(void*)>(first))[0x150 / 8](first)) {
+            void* second = page();
+            if (!(*reinterpret_cast<bool (***)(void*)>(second))[0x168 / 8](second)) setState(16);
+          }
+        }
+      } else {
+        auto* state = static_cast<uint8_t*>(login());
+        if (state[0x15A] || state[0x15B]) setState(16);
+      }
+      if (!game[0x38839]) {
+        shutdownReason = 9;
+        setState(0x23);
+      }
+      break;
+    }
+    case 15:
+      game::Call<void (*)(void*)>(0x1407369d0)(login());
+      break;
+    case 16: {  // character chosen
+      game::Call<void (*)(void*)>(0x1407369d0)(login());
+      if (game::Call<bool (*)(void*)>(0x140736d30)(login())) {
+        setState(17);
+      } else if (!game::Call<bool (*)(void*)>(0x140736d50)(login())) {
+        error(0x14206d478);  // "Failure during login."
+        setState(14);
+        ScriptArgList args{reinterpret_cast<void**>(0x14206d328), nullptr, 0, 0};
+        game::Call<void (*)(uint8_t*, int)>(0x14046d940)(ScriptArgAt(&args, 0), 0);
+        ScriptArgSetInt(&args, 1, 3);
+        game::Call<bool (*)(void*, const char*, ScriptArgList*, void*)>(0x140488cc0)(
+            UiRoot(), reinterpret_cast<const char*>(0x14206d490), &args, nullptr);  // "CharacterSelectHandler:OnCharacterLogin"
+        game::Call<void (*)(ScriptArgList*)>(0x1403a0770)(&args);
+      } else if (game[0x3B770] && game::Field<uint8_t*>(login(), 0x10)[0x2BC]) {
+        game::Call<void (*)(uint8_t*, const char*)>(0x14040daa0)(game, reinterpret_cast<const char*>(0x14206d4b8));  // "Has character list"
+      }
+      if (!game[0x38839]) {
+        shutdownReason = 0x12;
+        setState(0x23);
+      }
+      break;
+    }
+    case 17: {  // connect to the gateway with the chosen character
+      using ConnectFn = void (*)(uint8_t*, uint64_t, uint64_t*, uint64_t, uint64_t, uint64_t, const char*, int, const char*, bool);
+      auto connect = (*reinterpret_cast<ConnectFn**>(game))[0xE0 / 8];
+      const char* empty = reinterpret_cast<const char*>(0x142046fcb);
+      if (game::Call<bool (*)(void*)>(0x140736d30)(login())) {
+        auto* session = game::Field<uint8_t*>(login(), 0x10);
+        soeutil::StringFixed<256> ticket;
+        soeutil::InitFixed(ticket, reinterpret_cast<void**>(0x142049e08));
+        const void* encoded = game::Field<int>(session, 0xA8) ? game::Field<void*>(session, 0xA0) : nullptr;
+        game::Call<void (*)(const void*, int, soeutil::IString*)>(0x14166ae60)(encoded, game::Field<int>(session, 0xA8), &ticket);
+        uint64_t characterId = game::Field<uint64_t>(session, 0x100);
+        connect(game, game::Field<uint64_t>(session, 0x108), &characterId, game::Field<uint64_t>(session, 0x158), game::Field<uint64_t>(session, 0x20),
+                game::Field<uint64_t>(session, 0x60), ticket.data, game::Field<int>(session, 0xF8), empty, false);
+        ticket.vtable = reinterpret_cast<void**>(0x142049de8);
+        soeutil::StringRelease(&ticket);
+      } else {
+        uint64_t characterId = game::Field<uint64_t>(game, 0x38BF0);
+        connect(game, game::Field<uint64_t>(game, 0x31DE8), &characterId, game::Field<uint64_t>(game, 0x38C08), game::Field<uint64_t>(game, 0x31610),
+                game::Field<uint64_t>(game, 0x316B0), game::Field<const char*>(game, 0x31750), game::Field<int>(game, 0x38BE8), empty, true);
+      }
+      if (game[0x3883A]) {
+        setState(0x13);
+        break;
+      }
+      if (!(*reinterpret_cast<bool (***)(uint8_t*)>(game))[0x130 / 8](game)) {
+        error(0x14206d4d0);  // "Failure to set up initial connection."
+        fireConsoleEvent(0x14206d440);
+        shutdownReason = 0x11;
+        setState(0x23);
+        break;
+      }
+      if (debugFlagSet() || !(*reinterpret_cast<bool (***)(uint8_t*)>(game))[0x90 / 8](game)) game::Call<void (*)(uint8_t*)>(0x1403d5f60)(game);
+      game::Call<void (*)(uint8_t*, int)>(0x1403d7290)(game, 0);
+      if (gatewayConnected()) {
+        game::Call<void (*)(void*)>(0x14063be10)(game::Field<void*>(recorder(), 8));
+        game::Field<uint64_t>(game, 0x314B8) = now();
+        setState(0x12);
+      } else {
+        error(0x14206d4f8);  // "Connection to gateway lost before authenticating"
+        fireConsoleEvent(0x14206d440);
+        shutdownReason = 0xE;
+        setState(0x23);
+      }
+      break;
+    }
+    case 18: {  // waiting for our character
+      if (game[0x38838]) {
+        error(0x14206d530);  // "While connecting to the server the client was ..."
+        shutdownReason = 0x10;
+        setState(0x23);
+        break;
+      }
+      uint8_t* player = game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80);
+      if (player) {
+        game::Call<bool (*)(void*, const char*, void*, void*)>(0x140488cc0)(
+            UiRoot(), reinterpret_cast<const char*>(0x14206d580), nullptr, nullptr);  // "CharacterSelectHandler:OnCharacterLoginComplete"
+        fireConsoleEvent(0x14206d5b0);  // "EVENT_LOGIN_COMPLETE"
+        auto* name = game::Call<uint8_t* (*)(uint8_t*)>(0x1416cb000)(game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80) + 0x28);
+        game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206d5c8), game::Field<const char*>(game, 0x31610),
+                                       game::Field<const char*>(name, 8));  // "Connected to the server at: %s and received our character: %s."
+        game::Call<void (*)(uint8_t*)>(0x140467bb0)(game);
+        void* strings = game::Call<void* (*)(void*, bool)>(0x140481b20)(game::Field<void*>(game, 0x3B6B8), true);
+        alignas(16) uint8_t localePacket[0x1B0];
+        void* packet = game::Call<void* (*)(void*, void*)>(0x14039d970)(localePacket, strings);
+        game::Call<void (*)(void*, void*, int, bool)>(0x14035f8f0)(game::Field<void*>(recorder(), 8), packet, 1, true);
+        game::Call<void (*)(void*)>(0x1403b0df0)(localePacket);
+        SmallPacket clockOffset{reinterpret_cast<void**>(0x142063db8), 0x72, 0, static_cast<uint32_t>(game::Field<int>(game, 0x38824)), 0};
+        game::Call<void (*)(void*, SmallPacket*, int, bool)>(0x14035ee40)(game::Field<void*>(recorder(), 8), &clockOffset, 0, true);
+        setState(0x13);
+        break;
+      }
+      uint64_t since = game::Field<uint64_t>(game, 0x314B8);
+      if (game::Call<int (*)(uint64_t*)>(0x1403f71e0)(&since) > 120000) {
+        error(0x14206d608);  // "Timed out while waiting to receive character data."
+        fireConsoleEvent(0x14206d440);
+        shutdownReason = 0xF;
+        setState(0x23);
+      } else if (gatewayConnected()) {
+        game::Call<void (*)(void*, int)>(0x14063d8e0)(recorder(), 1000);
+      } else {
+        error(0x14206d640);  // "Lost connection to the gateway while waiting to receive character data."
+        fireAssignedEvent(0x14206d440);
+        shutdownReason = 0x14;
+        setState(0x23);
+      }
+      break;
+    }
+    case 19:  // post-initialize
+      if ((*reinterpret_cast<bool (***)(uint8_t*)>(game))[0xF8 / 8](game)) {
+        vcall(game, 0x108);
+        setState(0x14);
+      } else {
+        error(0x14206d688);  // "Failure in PostInitialize."
+        shutdownReason = 0xD;
+        setState(0x23);
+      }
+      break;
+    case 20:  // waiting for initial deployment
+      if (game::Call<void* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860))) {
+        setState(0x15);
+        break;
+      }
+      game::Call<void (*)(uint8_t*)>(0x140477650)(game);
+      game::Call<void (*)(void*, int)>(0x14063d8e0)(recorder(), 1000);
+      if (!gatewayConnected()) {
+        error(0x14206d6a8);  // "Disconnect from gateway waiting for initial deployment."
+        shutdownReason = 0xC;
+        setState(0x23);
+      }
+      break;
+    case 21:  // enter the world
+      game::Call<void (*)(void*)>(0x140cf6190)(game::Field<void*>(game, 0x38AC8));
+      game::Call<void (*)(void*)>(0x140cfb4d0)(game::Field<void*>(game, 0x38AD0));
+      vcall(game, 0x1E0);
+      game::Call<void (*)(uint8_t*, int)>(0x14046be80)(game, 0x14);
+      game::Call<bool (*)(void*, const char*, void*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(0x14206d6e0), nullptr,
+                                                                          nullptr);  // "MiniMap:StartMiniMap"
+      (*reinterpret_cast<unsigned (__stdcall**)(unsigned)>(0x1440a0540))(5);  // timeBeginPeriod (game import)
+      game::Field<uint64_t>(game, 0x38800) = now();
+      if (game[0x3883A]) {
+        game::Call<void (*)(uint8_t*)>(0x140474500)(game);
+        game::Call<void (*)(uint8_t*, const char*)>(0x14040daa0)(game, reinterpret_cast<const char*>(0x14206d6f8));  // "Solo: Starting Run"
+        setState(0x18);
+      } else {
+        setState(0x16);
+      }
+      break;
+    case 22: {
+      int result = game::Call<int (*)(uint8_t*)>(0x140478560)(game);
+      if (result == 1) {
+        setState(0x17);
+      } else if (result == 2) {
+        error(0x14206d710);  // "WaitForWorldReady failed."
+        shutdownReason = 0xA;
+        setState(0x23);
+      }
+      break;
+    }
+    case 23: {
+      int result = game::Call<int (*)(uint8_t*)>(0x140478080)(game);
+      if (result == 1) {
+        game::Call<void (*)(uint8_t*, int)>(0x1403edab0)(game, 0);
+        if (game[0x3B7DC]) {
+          setState(0x18);
+        } else {
+          if (game[0x38EB2]) fireAssignedEvent(0x14206d730);  // "EVENT_LOADING_ZONE_LOAD_COMPLETE"
+          setState(0x1A);
+        }
+      } else if (result == 2) {
+        error(0x14206d710);
+        shutdownReason = 0xB;
+        setState(0x23);
+      }
+      break;
+    }
+    case 24: {  // solo run start
+      game::Call<void (*)(uint8_t*)>(0x140433440)(game);
+      float minutes = *reinterpret_cast<float*>(0x1425ba090);
+      for (auto* node = game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b197a0), 0xF98); node; node = game::Field<uint8_t*>(node, 0x20)) {
+        if (game::Field<unsigned>(node, 0x18) == 0xC0DC29E7u) {
+          minutes = static_cast<float>(game::Field<double>(node, 0));
+          break;
+        }
+      }
+      game::Field<int>(game, 0x314C4) = static_cast<int>(minutes * *reinterpret_cast<float*>(0x1420728c8));
+      game::Field<uint64_t>(game, 0x314F8) = now();
+      if (game[0x38EB2]) fireAssignedEvent(0x14206d730);
+      setState(0x1A);
+      break;
+    }
+    case 26: {  // solo run in progress
+      game::Call<void (*)(uint8_t*)>(0x14049b6a0)(game + 0x3B9B0);
+      if (!game[0x38839]) {
+        shutdownReason = 9;
+        setState(0x23);
+        break;
+      }
+      uint64_t lastSent = game::Field<uint64_t>(game, 0x3B778);
+      if (game::Call<int (*)(uint64_t*)>(0x1403f71e0)(&lastSent) >= game::Field<int>(game, 0x314C4)) {
+        game::Field<uint64_t>(game, 0x3B778) = game::Field<uint64_t>(game, 0x3B9C8);
+        uint64_t scratch;
+        int* score = game::Call<int* (*)(uint8_t*, uint64_t*)>(0x1403f88b0)(game, &scratch);
+        SmallPacket report{reinterpret_cast<void**>(0x142063d18), 0x3C, 0, static_cast<uint32_t>(*score), 0};
+        game::Call<void (*)(void*, SmallPacket*, int, bool)>(0x14035f650)(game::Field<void*>(recorder(), 8), &report, 0, true);
+      }
+      uint64_t endTime = game::Field<uint64_t>(game, 0x38F80);
+      if (endTime != *reinterpret_cast<uint64_t*>(0x142b18168)) {
+        uint64_t clockValue;
+        int remaining = static_cast<int>(endTime) - static_cast<int>(*game::Call<TimerFn>(0x14032fe90)(&clockValue));
+        if (remaining >= 0) {
+          // Countdown "mm:ss" pushed to the HUD string at 0x142b17bf8 when it changes.
+          soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringFormat(&text, reinterpret_cast<const char*>(0x14206d758), remaining / 60, remaining % 60);  // "%02d:%02d"
+          soeutil::IString copy{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringAssign(&copy, text.data);
+          auto* shown = reinterpret_cast<soeutil::IString*>(0x142b17bf8);
+          if (shown->length != copy.length || std::memcmp(shown->data, copy.data, static_cast<size_t>(shown->length)) != 0) {
+            soeutil::StringAssignString(shown, &copy);
+            game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(0x142b17b90));
+          }
+          copy.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&copy);
+          text.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&text);
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x14049b560)(game + 0x3B9B0);
+      game::Call<void (*)(uint8_t*)>(0x140477e60)(game);
+      game::Call<void (*)(uint8_t*)>(0x1403d4180)(game);
+      break;
+    }
+    case 27: {
+      int result = game::Call<int (*)(uint8_t*)>(0x140478310)(game);
+      if (result == 1) {
+        setState(0x1A);
+      } else if (result == 2) {
+        error(0x14206d710);
+        shutdownReason = 8;
+        setState(0x23);
+      }
+      break;
+    }
+    case 28: {
+      int result = game::Call<int (*)(uint8_t*)>(0x140478560)(game);
+      if (result == 1 || result == 2) game::Call<void (*)(uint8_t*, bool)>(0x1403ee100)(game, result == 1);
+      break;
+    }
+    case 35: {  // shut down
+      const char* reason = game::Call<const char* (*)(int)>(0x140499ef0)(shutdownReason);
+      game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206d768), reason);  // "Beginning to shutdown the game client reason %s."
+      if (void* loader = *reinterpret_cast<void**>(0x142ae89a8)) {
+        (*reinterpret_cast<void (***)(void*, bool)>(loader))[0x98 / 8](loader, false);
+        vcall(loader, 0xA8);
+      }
+      (*reinterpret_cast<void (***)(uint8_t*, const char*)>(game))[0x140 / 8](game, reinterpret_cast<const char*>(0x14206d7a0));  // "Game client shutdown"
+      (*reinterpret_cast<unsigned (__stdcall**)(unsigned)>(0x1440a0548))(5);  // timeEndPeriod (game import)
+      game[0x38839] = 0;
+      game[0x312D1] = 0;
+      game::Call<void (*)(uint8_t*)>(0x140470ae0)(game);  // does not return
+      __debugbreak();
+      break;
+    }
+    default:
+      break;
+  }
+
+  // ---- shared per-frame tail ----
+  uint64_t afterState = timer();
+  game::Field<uint64_t>(profile, 0x18) = afterState - lapStart;
+  if (*reinterpret_cast<uint8_t**>(0x142b197a0)) {
+    bool check = debugFlagSet() || !(*reinterpret_cast<bool (***)(uint8_t*)>(game))[0x90 / 8](game);
+    if (check && *reinterpret_cast<uint8_t*>(0x142b176cd) && *reinterpret_cast<uint8_t*>(0x142b176ce) &&
+        !(*reinterpret_cast<bool (**)()>(0x142b176e8))()) {
+      game::Call<LogFn>(0x1402baba0)(reinterpret_cast<const char*>(0x142054700), reinterpret_cast<const char*>(0x14206d7c0));  // "H1Z1.log", "... pfnRun() failed ..."
+      (*reinterpret_cast<void (**)()>(0x142b176e0))();
+      (*reinterpret_cast<BOOL (__stdcall**)(HMODULE)>(0x14409fef8))(*reinterpret_cast<HMODULE*>(0x142b176d8));  // FreeLibrary (game import)
+      game::Call<int (*)(const char*)>(0x140d42358)(reinterpret_cast<const char*>(0x14206d820));
+      game::Call<int (*)(const char*, const char*)>(0x140d55674)(reinterpret_cast<const char*>(0x14206d840), reinterpret_cast<const char*>(0x14206d820));
+      vcall(game, 0xF0);
+    }
+  }
+  int frameMs = game::Field<int>(game, 0x31540);
+  if (frameMs > 0 && game::Field<int>(game, 0x314B0) >= 12)
+    game::Call<void (*)(uint8_t*, float)>(0x1403fa010)(game, static_cast<float>(frameMs) * *reinterpret_cast<float*>(0x142047918));
+  uint64_t afterTimers = timer();
+  game::Field<uint64_t>(profile, 0x20) = afterTimers - afterState;
+  int state = game::Field<int>(game, 0x314B0);
+  if (state <= 0x1A && ((0x4016000u >> state) & 1)) {  // states 13, 14, 16, 26
+    game::Call<void (*)(uint8_t*)>(0x1403fba60)(game);
+  } else if (state > 4 && state != 0x23) {
+    if (!game[0x38839]) {
+      shutdownReason = 0x17;
+      setState(0x23);
+    } else {
+      if (void* handler = game::Field<void*>(game, 0x388C8)) {
+        game::Call<void (*)(void*)>(0x1409d7200)(handler);
+        while (game::Call<int (*)()>(0x14133c270)() != 0) {
+        }
+      }
+      game::Call<void (*)(uint8_t*, bool, bool, bool, int)>(0x140474860)(game, true, false, true, 10);
+    }
+  }
+  game::Field<uint64_t>(profile, 0x10) = timer() - afterTimers;
+  game::Field<uint64_t>(profile, 8) = timer() - game::Field<uint64_t>(game, 0x31530);
+  uint64_t since = game::Field<uint64_t>(game, 0x31538) != *reinterpret_cast<uint64_t*>(0x142b186b8) ? game::Field<uint64_t>(game, 0x31538)
+                                                                                                    : game::Field<uint64_t>(game, 0x31530);
+  int64_t total = static_cast<int64_t>(timer() - since);
+  game::Field<uint64_t>(profile, 0) = static_cast<uint64_t>(total);
+  game::Field<int>(game, 0x31540) = static_cast<int>(total / 1000000);
+  game::Field<uint64_t>(game, 0x31538) = timer();
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -3764,6 +4260,7 @@ REBUILD_FUNCTION(GameClient_CreateAssetSystem, 0x1403db810, GameClientCreateAsse
 REBUILD_FUNCTION(GameClient_Update, 0x14043c0e0, GameClientUpdate);
 REBUILD_FUNCTION(GameClient_ShutdownSystems, 0x1403e57f0, GameClientShutdownSystems);
 REBUILD_FUNCTION(GameClient_ShutdownGame, 0x1403e42c0, GameClientShutdownGame);
+REBUILD_FUNCTION(GameClient_GiveTime, 0x1403fa350, GameClientGiveTime);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
