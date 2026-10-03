@@ -398,6 +398,81 @@ void GatewaySendLoginRequest(uint8_t* api) {
   DestroyLoginRequest(&packet);
 }
 
+// 0x14162bf90: unserialize a header-only packet (PacketTunnelPacketToExternalConnection
+// layout) and call the handler.
+void GatewayDispatchHeaderOnly(uint8_t* api, const uint8_t* data, int length, const MemberFn* handler) {
+  GatewayPacket packet{reinterpret_cast<void**>(0x1424be278), 0, 0};
+  bool ok = data + 1 <= data + length;
+  uint8_t header = ok ? data[0] : 0;
+  packet.channel = header >> 5;
+  packet.opcode = header & 0x1F;
+  if (ok) {
+    InvokeMember(api, handler, &packet);
+    return;
+  }
+  LogUnserializeFailed(api, length);
+}
+
+// 0x14162c380 / 0x14162c3f0 / 0x14162c460: Serialize for header-only packets.
+void SerializeHeaderOnly(soeutil::ByteStream** stream, const GatewayPacket* packet) {
+  uint8_t header = static_cast<uint8_t>((packet->opcode & 0x1F) | (packet->channel << 5));
+  soeutil::StreamPut(*stream, &header, 1);
+}
+
+// ~BasePacket-derived destructors with nothing to free (one per packet type).
+void DestroyHeaderOnlyPacket(GatewayPacket* packet) { packet->vtable = reinterpret_cast<void**>(kVtGatewayBasePacket); }
+
+// 0x14162cd40: ~PacketForcedLogout
+void DestroyForcedLogout(PacketForcedLogout* packet) {
+  packet->reason.vtable = reinterpret_cast<void**>(kVtIStringFixed64);
+  soeutil::StringRelease(&packet->reason);
+  packet->reason.data = soeutil::EmptyStringData();
+  packet->reason.length = 0;
+  packet->reason.capacity = 0;
+  packet->reason.vtable = soeutil::IStringVtable();
+  packet->vtable = reinterpret_cast<void**>(kVtGatewayBasePacket);
+}
+
+// 0x14162db20 (vtable override of Send): before the gateway login completes,
+// reliable packets are queued and unreliable ones dropped.
+bool GatewaySend(uint8_t* api, const uint8_t* data, int length, bool reliable) {
+  if (game::Field<bool>(api, kLogRawPackets)) {
+    game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x14162d4e0)(api, data, length);
+  }
+  if (!game::Field<bool>(api, kGatewayLoggedIn)) {
+    if (!reliable) return false;
+    return game::Call<bool (*)(uint8_t*, const uint8_t*, int)>(0x14165aff0)(api + kPendingQueue, data, length);
+  }
+  using SendFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+  return ApiSlot<SendFn>(api, kApiSendSlot)(api, data, length, reliable);
+}
+
+// 0x14162dba0: SendPacketSecure - "heavy encryption" send. Queued packets are
+// encoded now (0x1415f8e70) so the queue never holds plaintext.
+bool GatewaySendSecure(uint8_t* api, const uint8_t* data, int length) {
+  if (game::Field<bool>(api, kLogRawPackets)) {
+    game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x14162d4e0)(api, data, length);
+  }
+  if (game::Field<bool>(api, kGatewayLoggedIn)) {
+    if (!game::Field<void*>(api, 0xD30)) return false;  // no secure channel
+    return ApiSlot<bool (*)(uint8_t*, const uint8_t*, int)>(api, 0xB0 / 8)(api, data, length);
+  }
+  soeutil::ByteArray8k encoded{};
+  encoded.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  bool ok = game::Call<bool (*)(uint8_t*, const uint8_t*, int, soeutil::ByteArray8k*)>(0x1415f8e70)(api, data, length,
+                                                                                                    &encoded);
+  if (ok) {
+    const uint8_t* bytes = encoded.size ? encoded.data : nullptr;
+    bool queued =
+        game::Call<bool (*)(uint8_t*, const uint8_t*, int)>(0x14165aff0)(api + kPendingQueue, bytes, encoded.size);
+    soeutil::ByteArrayDestroy(&encoded);
+    return queued;
+  }
+  LogError(api, reinterpret_cast<const char*>(0x1424be400), length);  // "SendPacketSecure, failed to encode packet ..."
+  soeutil::ByteArrayDestroy(&encoded);
+  return false;
+}
+
 // 0x14162c020: serialize a header-only packet and send it reliably, or queue
 // it until the gateway login completes.
 bool GatewaySendPacket(uint8_t* api, const GatewayPacket* packet) {
@@ -496,6 +571,18 @@ REBUILD_FUNCTION(SoeUtil_WriteString, 0x140467e80, StreamWriteString);
 REBUILD_FUNCTION(Gateway_SerializeLoginRequest, 0x14162c1e0, SerializeLoginRequest);
 REBUILD_FUNCTION(Gateway_DestroyLoginRequest, 0x14162cdd0, DestroyLoginRequest);
 REBUILD_FUNCTION(Gateway_SendLoginRequest, 0x14162d5d0, GatewaySendLoginRequest);
+REBUILD_FUNCTION(Gateway_DispatchHeaderOnly, 0x14162bf90, GatewayDispatchHeaderOnly);
+REBUILD_FUNCTION(Gateway_SerializeHeaderOnly_A, 0x14162c380, SerializeHeaderOnly);
+REBUILD_FUNCTION(Gateway_SerializeHeaderOnly_B, 0x14162c3f0, SerializeHeaderOnly);
+REBUILD_FUNCTION(Gateway_SerializeHeaderOnly_C, 0x14162c460, SerializeHeaderOnly);
+REBUILD_FUNCTION(Gateway_DestroyPacket_A, 0x14162cd30, DestroyHeaderOnlyPacket);
+REBUILD_FUNCTION(Gateway_DestroyPacket_B, 0x14162cdc0, DestroyHeaderOnlyPacket);
+REBUILD_FUNCTION(Gateway_DestroyPacket_C, 0x14162cee0, DestroyHeaderOnlyPacket);
+REBUILD_FUNCTION(Gateway_DestroyPacket_D, 0x14162cef0, DestroyHeaderOnlyPacket);
+REBUILD_FUNCTION(Gateway_DestroyPacket_E, 0x14162cf00, DestroyHeaderOnlyPacket);
+REBUILD_FUNCTION(Gateway_DestroyForcedLogout, 0x14162cd40, DestroyForcedLogout);
+REBUILD_FUNCTION(Gateway_Send, 0x14162db20, GatewaySend);
+REBUILD_FUNCTION(Gateway_SendSecure, 0x14162dba0, GatewaySendSecure);
 REBUILD_FUNCTION(Gateway_SendPacket, 0x14162c020, GatewaySendPacket);
 REBUILD_FUNCTION(Gateway_Init, 0x14162d1e0, GatewayInit);
 REBUILD_FUNCTION(Gateway_Connect, 0x14162d140, GatewayConnect);
