@@ -6,6 +6,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/Memory.h"
 
 namespace rebuild::csc {
 namespace {
@@ -22,6 +23,52 @@ void DeleteObject(void* object) {
 }
 
 }  // namespace
+
+// Crypto::ArraySecure<unsigned char,64,1>: key byte storage {vtable, data, size, capacity}.
+struct SecureByteArray {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+};
+static_assert(sizeof(SecureByteArray) == 0x18);
+
+// 0x1415f9ac0: ArraySecure()
+SecureByteArray* SecureByteArrayConstruct(SecureByteArray* array) {
+  array->data = nullptr;
+  *reinterpret_cast<uint64_t*>(&array->size) = 0;
+  array->vtable = reinterpret_cast<void**>(0x1424b3258);
+  return array;
+}
+
+// 0x1415f9e40: assign key bytes (copy from `source`).
+void SecureByteArrayAssign(SecureByteArray* array, const void* source) {
+  game::Call<void (*)(const void*, SecureByteArray*)>(0x14166ad30)(source, array);
+}
+
+// 0x1415f9ea0: true if any key byte is non-zero.
+bool SecureByteArrayHasKey(const SecureByteArray* array) {
+  int size = array->size;
+  if (size <= 0) return false;
+  int zeros = 0;
+  for (int i = 0; i < size && array->data[i] == 0; ++i) ++zeros;
+  return zeros != size;
+}
+
+// 0x1415fa3d0: cipher factory by type (1, 2, 3); null for unknown types.
+void* CreateCipher(int type) {
+  struct Kind {
+    size_t size;
+    uintptr_t constructor;
+  };
+  Kind kind;
+  if (type == 1) kind = {0x38, 0x1415fc490};
+  else if (type == 2) kind = {0xF8, 0x1415fcaf0};
+  else if (type == 3) kind = {0x20, 0x1415fddf0};
+  else return nullptr;
+  void* memory = soeutil::Allocate(kind.size);
+  return memory ? game::Call<void* (*)(void*)>(kind.constructor)(memory) : nullptr;
+}
 
 // 0x1415f8c20: ~CryptoBaseApi
 void CryptoBaseApiDestroy(uint8_t* api) {
@@ -78,6 +125,10 @@ bool CryptoBaseApiEncodeSecure(uint8_t* api, const uint8_t* data, int length, vo
   return game::Call<EncodeFn>(0x1415f96b0)(data, length, out, 1, cipher) == 1;
 }
 
+REBUILD_FUNCTION(Crypto_ArraySecure_Construct, 0x1415f9ac0, SecureByteArrayConstruct);
+REBUILD_FUNCTION(Crypto_ArraySecure_Assign, 0x1415f9e40, SecureByteArrayAssign);
+REBUILD_FUNCTION(Crypto_ArraySecure_HasKey, 0x1415f9ea0, SecureByteArrayHasKey);
+REBUILD_FUNCTION(Crypto_CreateCipher, 0x1415fa3d0, CreateCipher);
 REBUILD_FUNCTION(CryptoBaseApi_Destroy, 0x1415f8c20, CryptoBaseApiDestroy);
 REBUILD_FUNCTION(CryptoKey_Construct, 0x1415f88b0, CryptoKeyConstruct);
 REBUILD_FUNCTION(CryptoKey_IsValid, 0x1415f8a30, CryptoKeyIsValid);
