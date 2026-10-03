@@ -417,6 +417,23 @@ bool GameClientSlot13(uint8_t* game, void* /*unused*/, void* data, int count) {
   return true;
 }
 
+// Request 0xE1 {guid, id} for an entity the client does not have yet.
+struct EntityRequest {
+  void** vtable;
+  int type;  // 0xE1
+  int padding;
+  uint64_t guid;  // +0x10
+  int id;         // +0x18
+  int padding2;
+};
+static_assert(offsetof(EntityRequest, id) == 0x18);
+
+void SendEntityRequest(uint64_t guid, int id) {
+  EntityRequest request{reinterpret_cast<void**>(0x142063e38), 0xE1, 0, guid, id, 0};
+  void* sender = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19b98), 8);
+  game::Call<void (*)(void*, EntityRequest*, int, bool)>(0x14035fe20)(sender, &request, 0, true);
+}
+
 // 0x1404089c0 (slot 72): act on entity *id via 0x1404193a0 when it exists;
 // otherwise, if 0x14071f880 accepts the id, send request 0xE1 for it.
 bool GameClientSlot72(uint8_t* game, const int* id, void* data, bool flag) {
@@ -425,19 +442,74 @@ bool GameClientSlot72(uint8_t* game, const int* id, void* data, bool flag) {
   if (void* entity = game::Call<void* (*)(void*, int*)>(0x14071f100)(entities, &key))
     return game::Call<bool (*)(uint8_t*, void*, void*, bool)>(0x1404193a0)(game, entity, data, flag);
   key = *id;
-  if (game::Call<bool (*)(void*, int*)>(0x14071f880)(game::Field<void*>(game, 0x38860), &key)) {
-    struct Request {
-      void** vtable;
-      int type;  // 0xE1
-      int padding;
-      uint64_t guid;
-      int id;
-      int padding2;
-    } request{reinterpret_cast<void**>(0x142063e38), 0xE1, 0, *reinterpret_cast<uint64_t*>(0x142b181f8), *id, 0};
-    void* sender = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19b98), 8);
-    game::Call<void (*)(void*, Request*, int, bool)>(0x14035fe20)(sender, &request, 0, true);
-  }
+  if (game::Call<bool (*)(void*, int*)>(0x14071f880)(game::Field<void*>(game, 0x38860), &key))
+    SendEntityRequest(*reinterpret_cast<uint64_t*>(0x142b181f8), *id);
   return true;
+}
+
+// 0x140408a90 (slot 71): slot 72 for a 64-bit id (lookup 0x14071f150 /
+// 0x14071f950; the request carries the id as the guid and *0x142b186ac).
+bool GameClientSlot71(uint8_t* game, const uint64_t* id, void* data, bool flag) {
+  uint64_t key = *id;
+  if (void* entity = game::Call<void* (*)(void*, uint64_t*)>(0x14071f150)(game::Field<void*>(game, 0x38860), &key))
+    return game::Call<bool (*)(uint8_t*, void*, void*, bool)>(0x1404193a0)(game, entity, data, flag);
+  key = *id;
+  if (game::Call<bool (*)(void*, uint64_t*)>(0x14071f950)(game::Field<void*>(game, 0x38860), &key))
+    SendEntityRequest(*id, *reinterpret_cast<int*>(0x142b186ac));
+  return true;
+}
+
+// 0x1403dc8c0 (slot 87): create the 0x2468-byte object at +0x388C8 named
+// `name` (ctor 0x1409bc270 takes a temporary IString).
+void GameClientSlot87(uint8_t* game, const char* name) {
+  void* created = nullptr;
+  if (void* memory = GameAllocate(0x2468)) {
+    soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    soeutil::StringAssign(&text, name);
+    created = game::Call<void* (*)(void*, soeutil::IString*)>(0x1409bc270)(memory, &text);
+    game::Field<void*>(game, 0x388C8) = created;
+    text.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&text);
+    return;
+  }
+  game::Field<void*>(game, 0x388C8) = created;
+}
+
+// 0x14040ec00 (slot 28): store the login details - character id, three
+// strings (null -> ""; the third, at +0x316A8, is the gateway ticket), a
+// fresh Crypto::ArraySecure session key (0x60 bytes) and an int.
+void GameClientSetLoginInfo(uint8_t* game, void* /*unused*/, const uint64_t* characterId, const char* name,
+                            const char* server, const char* ticket, const void* key, int keyType) {
+  const char* empty = reinterpret_cast<const char*>(0x142046fcb);
+  game::Field<uint64_t>(game, 0x38BF0) = *characterId;
+  soeutil::StringAssign(game + 0x38C00, name ? name : empty);
+  soeutil::StringAssign(game + 0x31608, server ? server : empty);
+  soeutil::StringAssign(game + 0x316A8, ticket ? ticket : empty);
+  if (void* old = game::Field<void*>(game, 0x38BE0)) {
+    game::Call<void (*)(void*)>(0x1415f9be0)(old);  // ~ArraySecure
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(old, 0x60);
+  }
+  void* memory = GameAllocate(0x60);
+  void* secure = memory ? game::Call<void* (*)(void*)>(0x1415f9ac0)(memory) : nullptr;
+  game::Field<void*>(game, 0x38BE0) = secure;
+  game::Call<void (*)(void*, const void*)>(0x1415f9e40)(secure, key);  // ArraySecure::Assign (not null-checked)
+  game::Field<int>(game, 0x38BE8) = keyType;
+}
+
+// 0x14046ceb0 (slot 45): take the pending console input line, echo it as
+// "EVENT_PRINT_CONSOLE_INPUT" to the console (*0x143bd4830), then slot 47.
+void GameClientSlot45(uint8_t* game) {
+  auto* item = game::Call<uint8_t* (*)(void*)>(0x1409d6f20)(game::Field<void*>(game, 0x388C8));
+  if (!item) return;
+  if (void* console = *reinterpret_cast<void**>(0x143bd4830)) {
+    void* line = game::Field<void*>(item, 8);
+    const char* event = reinterpret_cast<const char*>(0x14206e5e0);  // "EVENT_PRINT_CONSOLE_INPUT"
+    soeutil::IString name{soeutil::IStringVtable(), const_cast<char*>(event), static_cast<int>(std::strlen(event)), -1};
+    game::Call<void (*)(void*, soeutil::IString*, void**)>(0x140358900)(console, &name, &line);
+    name.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&name);  // literal (capacity -1): nothing to free
+  }
+  reinterpret_cast<void (*)(uint8_t*, void*)>((*reinterpret_cast<void***>(game))[0x178 / 8])(game, game::Field<void*>(item, 8));
 }
 
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
@@ -465,6 +537,10 @@ REBUILD_FUNCTION(AssetHandler_Update, 0x1403e9c70, AssetHandlerUpdate);
 REBUILD_FUNCTION(GameClient_SetLocale, 0x140410940, GameClientSetLocale);
 REBUILD_FUNCTION(GameClient_Slot13, 0x14034e6f0, GameClientSlot13);
 REBUILD_FUNCTION(GameClient_Slot72, 0x1404089c0, GameClientSlot72);
+REBUILD_FUNCTION(GameClient_Slot71, 0x140408a90, GameClientSlot71);
+REBUILD_FUNCTION(GameClient_Slot87, 0x1403dc8c0, GameClientSlot87);
+REBUILD_FUNCTION(GameClient_SetLoginInfo, 0x14040ec00, GameClientSetLoginInfo);
+REBUILD_FUNCTION(GameClient_Slot45, 0x14046ceb0, GameClientSlot45);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
