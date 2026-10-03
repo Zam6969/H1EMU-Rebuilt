@@ -374,6 +374,72 @@ void AssetHandlerUpdate(uint8_t* self) {
   if (scoped && profiler) reinterpret_cast<void (*)(void*)>((*static_cast<void***>(profiler))[2])(profiler);
 }
 
+// 0x140410940 (slot 32): switch the localized string table to `locale`.
+// Recreates the 0x28-byte table (ctor 0x14047fe50 with state+0x1C8) and
+// publishes it at +0x3B6B8, *0x142b19c38 and *0x142b19798 (the table every
+// string lookup uses). Returns false when that locale is already loaded.
+bool GameClientSetLocale(uint8_t* game, int locale) {
+  if (game::Field<void*>(game, 0x3B6B8) && locale == game::Field<int>(game, 0x38E40)) return false;
+  game::Field<int>(game, 0x38E40) = locale;
+  auto& current = *reinterpret_cast<void**>(0x142b19c38);
+  DeleteVirtual(current);
+  current = nullptr;
+  void* table = nullptr;
+  if (void* memory = GameAllocate(0x28))
+    table = game::Call<void* (*)(void*, int, uint8_t*)>(0x14047fe50)(memory, locale,
+                                                                      game::Field<uint8_t*>(game, 0x314A8) + 0x1C8);
+  game::Field<void*>(game, 0x3B6B8) = table;
+  current = table;
+  *reinterpret_cast<void**>(0x142b19798) = game::Field<void*>(game, 0x3B6B8);
+  return true;
+}
+
+// 0x14034e6f0 (slot 13): create the 0x8220-byte object at +0x31418 (ctor
+// 0x14034e8b0 with +0x3142C, +0x31428, count, data), build +0x31410 from it
+// (0x1403519e0 with slots 5 and 8), hand that back (its slot 16), then 0x140351920.
+bool GameClientSlot13(uint8_t* game, void* /*unused*/, void* data, int count) {
+  void* created = nullptr;
+  if (void* memory = GameAllocate(0x8220)) {
+    using CtorFn = void* (*)(void*, uint8_t, int, int, void*);
+    created = game::Call<CtorFn>(0x14034e8b0)(memory, game::Field<uint8_t>(game, 0x3142C), game::Field<int>(game, 0x31428),
+                                              count, data);
+  }
+  game::Field<void*>(game, 0x31418) = created;
+  void** vtable = *reinterpret_cast<void***>(game);
+  void* a = reinterpret_cast<void* (*)(uint8_t*)>(vtable[0x28 / 8])(game);
+  void* b = reinterpret_cast<void* (*)(uint8_t*)>(vtable[0x40 / 8])(game);
+  using BuildFn = void* (*)(uint8_t*, uint8_t*, void*, void*, void*);
+  void* built = game::Call<BuildFn>(0x1403519e0)(game + 0x31480, game + 0x31420, game::Field<void*>(game, 0x31418), b, a);
+  game::Field<void*>(game, 0x31410) = built;
+  void* object = game::Field<void*>(game, 0x31418);
+  reinterpret_cast<void (*)(void*, void*)>((*static_cast<void***>(object))[0x80 / 8])(object, built);
+  game::Call<void (*)(void*, uint8_t*)>(0x140351920)(game::Field<void*>(game, 0x31418), game);
+  return true;
+}
+
+// 0x1404089c0 (slot 72): act on entity *id via 0x1404193a0 when it exists;
+// otherwise, if 0x14071f880 accepts the id, send request 0xE1 for it.
+bool GameClientSlot72(uint8_t* game, const int* id, void* data, bool flag) {
+  void* entities = game::Field<void*>(game, 0x38860);
+  int key = *id;
+  if (void* entity = game::Call<void* (*)(void*, int*)>(0x14071f100)(entities, &key))
+    return game::Call<bool (*)(uint8_t*, void*, void*, bool)>(0x1404193a0)(game, entity, data, flag);
+  key = *id;
+  if (game::Call<bool (*)(void*, int*)>(0x14071f880)(game::Field<void*>(game, 0x38860), &key)) {
+    struct Request {
+      void** vtable;
+      int type;  // 0xE1
+      int padding;
+      uint64_t guid;
+      int id;
+      int padding2;
+    } request{reinterpret_cast<void**>(0x142063e38), 0xE1, 0, *reinterpret_cast<uint64_t*>(0x142b181f8), *id, 0};
+    void* sender = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19b98), 8);
+    game::Call<void (*)(void*, Request*, int, bool)>(0x14035fe20)(sender, &request, 0, true);
+  }
+  return true;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -396,6 +462,9 @@ REBUILD_FUNCTION(GameClient_Shutdown, 0x140473f60, GameClientShutdown);
 REBUILD_FUNCTION(GameClient_CreateZoneClient, 0x1403dd800, GameClientCreateZoneClient);
 REBUILD_FUNCTION(GameClient_SendMountRequest, 0x1404677e0, GameClientSendMountRequest);
 REBUILD_FUNCTION(AssetHandler_Update, 0x1403e9c70, AssetHandlerUpdate);
+REBUILD_FUNCTION(GameClient_SetLocale, 0x140410940, GameClientSetLocale);
+REBUILD_FUNCTION(GameClient_Slot13, 0x14034e6f0, GameClientSlot13);
+REBUILD_FUNCTION(GameClient_Slot72, 0x1404089c0, GameClientSlot72);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
