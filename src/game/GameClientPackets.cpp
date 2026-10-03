@@ -2435,6 +2435,178 @@ void GameClientDrawStatusOverlay(uint8_t* game) {
   soeutil::StringRelease(&text);
 }
 
+// 0x1403db810 (slot 78): CreateAssetSystem - read the [AssetDelivery] settings,
+// build the asset search path (".;<Solo AdditionalPaths>;<AdditionalPaths>"),
+// create the direct and/or indirect asset system at +0x3D3C0, wait up to 600
+// clock ticks for its manifest, then create the asset loader at +0x3D3C8 with
+// a memory budget picked from the machine's memory.
+bool GameClientCreateAssetSystem(uint8_t* game) {
+  const char* section = reinterpret_cast<const char*>(0x14206c140);  // "AssetDelivery"
+  auto ini = [&] { return game::Field<void*>(game, 0x38E30); };
+  using GetIntFn = int (*)(void*, const char*, const char*, int, bool, int, int);
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  using GetStringFn = void (*)(void*, const char*, const char*, const char*, soeutil::IString*, bool, int, int);
+  using ErrorFn = void (*)(const char*, const char*, ...);
+  using LogFn = void (*)(const char*, const char*, ...);
+  const char* percentS = reinterpret_cast<const char*>(0x142046fb8);
+  int threadCount = game::Call<GetIntFn>(0x1403050e0)(ini(), section, reinterpret_cast<const char*>(0x14206c128), 1, true, -1, -1);  // "DirectThreadCount"
+  bool direct = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206c150), true, true, -1, -1);  // "DirectEnabled"
+  bool indirect = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206c160), true, true, -1, -1);  // "IndirectEnabled"
+  soeutil::StringFixed<256> serverAddress;
+  soeutil::InitFixed(serverAddress, reinterpret_cast<void**>(0x142049e08));
+  game::Call<GetStringFn>(0x1403334f0)(ini(), section, reinterpret_cast<const char*>(0x14206c180), reinterpret_cast<const char*>(0x14206c170),
+                                       &serverAddress, true, -1, -1);  // "IndirectServerAddress", "127.0.0.1:23777"
+  game[0x38A38] = game::Call<GetBoolFn>(0x1403051c0)(ini(), reinterpret_cast<const char*>(0x142046fcb), reinterpret_cast<const char*>(0x14206c198), true,
+                                                     false, -1, -1);  // "PreLoadPcModels"
+  const char kDot[2] = {'.', 0};
+  const char* separator = reinterpret_cast<const char*>(0x14206c1c0);  // ";"
+  auto append = [](soeutil::IString* text, const char* more) { game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(text, more); };
+
+  soeutil::StringFixed<2048> paths;
+  soeutil::InitFixed(paths, reinterpret_cast<void**>(0x142049e28));
+  soeutil::StringAssign(&paths, kDot);
+  paths.vtable = reinterpret_cast<void**>(0x142049e48);
+  auto appendExtraPaths = [&](const char* fromSection, soeutil::StringFixed<1024>& extra) {
+    game::Call<GetStringFn>(0x1403334f0)(ini(), fromSection, reinterpret_cast<const char*>(0x14206c1a8), reinterpret_cast<const char*>(0x142046fcb),
+                                         &extra, false, -1, -1);  // "AdditionalPaths"
+    if (extra.length > 0) {
+      append(&paths, separator);
+      append(&paths, extra.data);
+    }
+  };
+  if (game[0x3883A]) {
+    soeutil::StringFixed<1024> soloPaths;
+    soeutil::InitFixed(soloPaths, reinterpret_cast<void**>(0x14204b2f0));
+    appendExtraPaths(reinterpret_cast<const char*>(0x14206c1b8), soloPaths);  // "Solo"
+    soloPaths.vtable = reinterpret_cast<void**>(0x14204b2d0);
+    soeutil::StringRelease(&soloPaths);
+  }
+  soeutil::StringFixed<1024> extraPaths;
+  soeutil::InitFixed(extraPaths, reinterpret_cast<void**>(0x14204b2f0));
+  soeutil::StringFixed<1024> packDirectory;
+  soeutil::InitFixed(packDirectory, reinterpret_cast<void**>(0x14204b2f0));
+  appendExtraPaths(section, extraPaths);
+  game::Call<GetStringFn>(0x140333550)(ini(), section, reinterpret_cast<const char*>(0x14206c1c8), kDot, &packDirectory, false, -1, -1);  // "PackFileDir"
+  soeutil::StringFixed<256> cacheDirectory;
+  soeutil::InitFixed(cacheDirectory, reinterpret_cast<void**>(0x142049e08));
+  (*reinterpret_cast<void (***)(uint8_t*, soeutil::IString*)>(game))[0x290 / 8](game, &cacheDirectory);
+
+  const char* assets = reinterpret_cast<const char*>(0x14206c1d4);  // "Assets"
+  bool ok = false;
+  uint8_t* system = nullptr;
+  bool created = true;
+  if (direct && indirect) {
+    void* memory = GameAllocate(0xC08);
+    system = memory ? game::Call<uint8_t* (*)(void*, const char*, int, const char*, const char*, const char*, const char*, bool)>(0x14136af50)(
+                          memory, paths.data, threadCount, packDirectory.data, assets, serverAddress.data, cacheDirectory.data, false)
+                    : nullptr;
+  } else if (direct) {
+    void* memory = GameAllocate(0x1460);
+    system = memory ? game::Call<uint8_t* (*)(void*, const char*, int, int)>(0x141368ac0)(memory, paths.data, threadCount, 0) : nullptr;
+  } else if (indirect) {
+    void* memory = GameAllocate(0x28AC0);
+    system = memory ? game::Call<uint8_t* (*)(void*, const char*, const char*, const char*, const char*, int)>(0x141360870)(
+                          memory, packDirectory.data, assets, serverAddress.data, cacheDirectory.data, 0)
+                    : nullptr;
+  } else {
+    created = false;
+    game::Call<ErrorFn>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206c1e0));  // "... neither direct or indirect were enabled"
+  }
+
+  if (created) {
+    game::Field<uint8_t*>(game, 0x3D3C0) = system;
+    auto assetSystem = [&] { return game::Field<uint8_t*>(game, 0x3D3C0); };
+    auto vtable = [&] { return *reinterpret_cast<void***>(assetSystem()); };
+    using DescribeFn = void (*)(void*, soeutil::IString*);
+    using FailFn = void (*)(int, const char*, bool, void*);
+    int error = reinterpret_cast<int (*)(void*)>(vtable()[1])(assetSystem());
+    if (error != 0) {
+      soeutil::StringFixed<128> message;
+      soeutil::InitFixed(message, reinterpret_cast<void**>(0x142049dc8));
+      soeutil::StringFixed<128> reason;
+      soeutil::InitFixed(reason, reinterpret_cast<void**>(0x142049dc8));
+      reinterpret_cast<DescribeFn>(vtable()[0x60 / 8])(assetSystem(), &reason);
+      soeutil::StringFormat(&message, reinterpret_cast<const char*>(0x14206c250), error, reason.data);  // "... Error code: %d. Reason: %s"
+      game::Call<ErrorFn>(0x1402baba0)(nullptr, percentS, message.data);
+      if (uint8_t* broken = assetSystem()) (*reinterpret_cast<void (***)(void*, int)>(broken))[0](broken, 1);
+      game::Call<FailFn>(0x1403e1d80)(0x1B, message.data, true, nullptr);
+      reason.vtable = reinterpret_cast<void**>(0x142049da8);
+      soeutil::StringRelease(&reason);
+      message.vtable = reinterpret_cast<void**>(0x142049da8);
+      soeutil::StringRelease(&message);
+    } else {
+      game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206c2b0));  // "Initialized - Asset Delivery"
+      soeutil::StringFixed<128> status;
+      soeutil::InitFixed(status, reinterpret_cast<void**>(0x142049dc8));
+      auto clock = [] {
+        uint64_t value;
+        return *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&value);
+      };
+      auto ready = [&] { return reinterpret_cast<bool (*)(void*)>(vtable()[0x58 / 8])(assetSystem()); };
+      uint64_t start = clock();
+      while (!ready()) {
+        if (static_cast<int>(clock()) - static_cast<int>(start) >= 600 || status.length != 0) break;
+        reinterpret_cast<void (*)(void*, int)>(vtable()[0xD0 / 8])(assetSystem(), -1);
+        reinterpret_cast<DescribeFn>(vtable()[0x60 / 8])(assetSystem(), &status);
+        game::Call<void (*)(unsigned)>(0x14032ec60)(25);  // Sleep(25)
+      }
+      if (!ready()) {
+        soeutil::StringFixed<128> message;
+        soeutil::InitFixed(message, reinterpret_cast<void**>(0x142049dc8));
+        soeutil::StringFormat(&message, reinterpret_cast<const char*>(0x14206c2d0), status.data);  // "... failed to receive manifest: %s"
+        game::Call<ErrorFn>(0x1402baba0)(nullptr, percentS, message.data);
+        if (uint8_t* broken = assetSystem()) (*reinterpret_cast<void (***)(void*, int)>(broken))[0](broken, 1);  // +0x3D3C0 is left dangling, as in the original
+        game::Call<FailFn>(0x1403e1d80)(0x1B, message.data, true, nullptr);
+        game::Call<void (*)(soeutil::IString*)>(0x1402bace0)(&message);  // StringFixed<128> destructor
+      } else {
+        game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206c318));  // "Initialized - Manifest"
+        *reinterpret_cast<uint8_t**>(0x142b19af0) = assetSystem();
+        void** systemVtable = vtable();
+        void* stringTable = game::Call<void* (*)(void*, bool)>(0x140481b20)(game::Field<void*>(game, 0x3B6B8), true);
+        reinterpret_cast<void (*)(void*, void*)>(systemVtable[0xA0 / 8])(assetSystem(), stringTable);
+        game::Call<void (*)(uint8_t*)>(0x14047acd0)(game);
+        // Loader cache budget from physical memory (+1%): 10 MB / 64 MB / 256 MB.
+        uint64_t budget = 0x10000000;
+        int64_t memoryBytes;
+        if (game::Call<bool (*)(int64_t*)>(0x141341e10)(&memoryBytes)) {
+          int64_t padded = memoryBytes * 101 / 100;
+          if (padded <= static_cast<int64_t>(*reinterpret_cast<int*>(0x14219ddf4)) << 30)
+            budget = 0xA00000;
+          else if (padded <= static_cast<int64_t>(*reinterpret_cast<int*>(0x14219ddf8)) << 30)
+            budget = 0x4000000;
+        }
+        void* loaderMemory = GameAllocate(0x96BA8);
+        auto* loader = loaderMemory ? game::Call<uint8_t* (*)(void*, void*)>(0x141355630)(loaderMemory, assetSystem()) : nullptr;
+        game::Field<uint8_t*>(game, 0x3D3C8) = loader;
+        (*reinterpret_cast<void (***)(void*, bool)>(loader))[0x98 / 8](loader, true);
+        game::Field<uint64_t>(game::Field<uint8_t*>(game, 0x3D3C8), 0x30) = budget;
+        game::Field<uint64_t>(game::Field<uint8_t*>(game, 0x3D3C8), 0x50) = 0x800;
+        game::Field<int>(game::Field<uint8_t*>(game, 0x3D3C8), 0x24) = 5000;
+        *reinterpret_cast<uint8_t**>(0x142ae89a8) = game::Field<uint8_t*>(game, 0x3D3C8);
+        *reinterpret_cast<uint8_t**>(0x142b19af8) = game::Field<uint8_t*>(game, 0x3D3C8);
+        alignas(16) uint8_t registration[16];
+        game::Call<void (*)(void*, void*, void*)>(0x14077fde0)(registration, game::Field<void*>(game, 0x3D3C8), game::Field<void*>(game, 0x3D3C0));
+        game::Call<void (*)(void*)>(0x1403a97f0)(registration);
+        ok = true;
+      }
+      status.vtable = reinterpret_cast<void**>(0x142049da8);
+      soeutil::StringRelease(&status);
+    }
+  }
+
+  cacheDirectory.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&cacheDirectory);
+  packDirectory.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&packDirectory);
+  extraPaths.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&extraPaths);
+  paths.vtable = reinterpret_cast<void**>(0x142049e28);
+  soeutil::StringRelease(&paths);
+  serverAddress.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&serverAddress);
+  return ok;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -2492,6 +2664,7 @@ REBUILD_FUNCTION(GameClient_Initialize, 0x140432650, GameClientInitialize);
 REBUILD_FUNCTION(GameClient_HandlePacket83, 0x14040cd70, GameClientHandlePacket83);
 REBUILD_FUNCTION(GameClient_Init, 0x14040ed60, GameClientInit);
 REBUILD_FUNCTION(GameClient_DrawStatusOverlay, 0x1403e7ea0, GameClientDrawStatusOverlay);
+REBUILD_FUNCTION(GameClient_CreateAssetSystem, 0x1403db810, GameClientCreateAssetSystem);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
