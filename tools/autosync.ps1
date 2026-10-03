@@ -1,7 +1,8 @@
 # Commits and pushes the rebuild to GitHub, but only if the current sources
 # are exactly the ones that last passed build.ps1 (compile + hookcheck), so
 # half-written code never reaches the repo. Safe to run on a timer.
-$ErrorActionPreference = "Stop"
+# git prints CRLF/progress notices on stderr; those must not abort the sync.
+$ErrorActionPreference = "Continue"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
@@ -12,7 +13,7 @@ if ($good -ne $current) {
   exit 0
 }
 
-git add -A
+git -c core.safecrlf=false add -A 2>&1 | Out-Null
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
   $count = (Select-String -Path "$root\src\*\*.cpp" -Pattern "REBUILD_FUNCTION(_TOO_SMALL)?\(" | Measure-Object).Count

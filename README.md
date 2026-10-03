@@ -77,8 +77,9 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpConnection` dispatch | ProcessCookedPacket: every protocol opcode (connect/confirm, multi, terminate, clock sync/reflect, reliable/ack routing, group, ordered, unreachable/remap); BufferedSend (00 03 multi-packet batching) |
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
+| Game | packet dispatch | Login::ExternalLoginUdpApi::HandlePacket (10 LoginUdp_11 replies), Gateway::ExternalGatewayApi::HandlePacket (opcode & 0x1F / channel >> 5: LoginReply, ForceDisconnect, TunnelPacket, ChannelIsRoutable, ConnectionIsNotRoutable) |
 
-Total: 260 functions (249 hooked, 11 too small to hook).
+Total: 262 functions (251 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
