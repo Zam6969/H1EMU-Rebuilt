@@ -1071,6 +1071,25 @@ bool GameClientWaitForCharacterLogin(uint8_t* game) {
   return ok;
 }
 
+// 0x14043b860 (slot 43): forward an item to the object at +0x388C8
+// (0x1409de240). The original first converts the item's name through
+// 0x1403309b0 into a local string that is never used; kept for fidelity.
+void GameClientForwardToHandler388C8(uint8_t* game, void* item) {
+  auto* fixedVtable = reinterpret_cast<void**>(0x142049dc8);
+  soeutil::IString name{fixedVtable, soeutil::EmptyStringData(), 0, 0};
+  soeutil::IString converted{fixedVtable, soeutil::EmptyStringData(), 0, 0};
+  game::Call<void (*)(void*, soeutil::IString*)>(0x140ce9690)(item, &name);
+  char buffer[0x800];
+  buffer[0] = 0;
+  game::Call<void (*)(const char*, char*, int, char, bool, bool)>(0x1403309b0)(name.data, buffer, 0x800, ' ', true, true);
+  if (buffer[0]) soeutil::StringAssign(&converted, buffer);
+  game::Call<void (*)(void*, void*)>(0x1409de240)(game::Field<void*>(game, 0x388C8), item);
+  converted.vtable = reinterpret_cast<void**>(0x142049da8);
+  soeutil::StringRelease(&converted);
+  name.vtable = reinterpret_cast<void**>(0x142049da8);
+  soeutil::StringRelease(&name);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1115,6 +1134,7 @@ REBUILD_FUNCTION(GameClient_Log, 0x1404307d0, GameClientLog);
 REBUILD_FUNCTION(GameClient_LoadOptions, 0x14040e7a0, GameClientLoadOptions);
 REBUILD_FUNCTION(GameClient_StartLogging, 0x1404106d0, GameClientStartLogging);
 REBUILD_FUNCTION(GameClient_WaitForCharacterLogin, 0x1403d64a0, GameClientWaitForCharacterLogin);
+REBUILD_FUNCTION(GameClient_ForwardToHandler388C8, 0x14043b860, GameClientForwardToHandler388C8);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
