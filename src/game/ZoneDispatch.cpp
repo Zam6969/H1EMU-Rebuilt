@@ -88,6 +88,17 @@ struct U64Packet {
 };
 static_assert(offsetof(U64Packet, value) == 0x10);
 
+struct BytesPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  const uint8_t* bytes;
+  int size;
+  int padding2;
+};
+static_assert(offsetof(BytesPacket, size) == 0x18);
+
+constexpr size_t kOpcode3DString = 0x38C90;   // IString (meaning not identified yet)
 constexpr size_t kKickReason = 0x3D520;       // IString
 constexpr size_t kOpcode69Value = 0x38DB0;    // int; >= 0x12 sets a flag on the extension object's +0x28 child
 constexpr size_t kLoginFailed = 0x38838;      // bool
@@ -551,16 +562,59 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
         game::Call<void (*)(void*, uint64_t*)>(0x14071c9a0)(Member(game, 0x710C), &packet.value);
       break;
     }
+    case 0x3D: {
+      StringPacket packet{reinterpret_cast<void**>(0x142063cc0), 0x3D, 0,
+                          {reinterpret_cast<void**>(0x142049e08), reinterpret_cast<char*>(0x143e09641), 0, 0}};
+      using ReadFn = bool (*)(StringPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038ae10)(&packet, data, length, false))
+        game::Call<void (*)(uint8_t*, const char*)>(0x1402bd670)(game + kOpcode3DString, packet.text.data);
+      game::Call<void (*)(StringPacket*)>(0x1403b0630)(&packet);
+      break;
+    }
+    case 0xB9: {
+      // Opcode-only packet: must carry nothing after the opcode byte.
+      if (!data || data + 1 > data + length || length - 1 > 0) {
+        result = false;
+        break;
+      }
+      auto* client = static_cast<uint8_t*>(GlobalObject(0x142b19780));
+      auto* a = game::Field<uint8_t*>(client, 0x389E0);
+      auto* b = a ? game::Field<uint8_t*>(a, 0xE8) : nullptr;
+      void* c = b ? game::Field<void*>(b, 0x98) : nullptr;
+      if (c) game::Call<void (*)(void*)>(0x1407fe680)(c);
+      result = false;
+      break;
+    }
+    case 0xE6: {  // server-side byte dump
+      BytesPacket packet{reinterpret_cast<void**>(0x142063ff0), 0xE6, 0, nullptr, 0, 0};
+      using ReadFn = bool (*)(BytesPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x140388840)(&packet, data, length, false)) {
+        game::Call<void (*)(const char*, const char*, int)>(0x1402bab70)(
+            reinterpret_cast<const char*>(0x142054700), reinterpret_cast<const char*>(0x14206e8c8),
+            packet.size);  // "H1Z1.log": "Received %d bytes from server:"
+        auto dump = *reinterpret_cast<void (**)(const uint8_t*, int64_t)>(0x142b176f8);
+        dump(packet.bytes, packet.size);
+      }
+      break;
+    }
+    case 0xEE: {
+      ValuePacket packet{reinterpret_cast<void**>(0x142063ff8), 0xEE, 0, 0};
+      using ReadFn = bool (*)(ValuePacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038bae0)(&packet, data, length, false))
+        game::Call<void (*)(void*, bool, int)>(0x140737600)(Member(game, 0x7170), packet.value == 1, packet.value);
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x25: case 0x2C: case 0x30: case 0x33: case 0x35:
-    case 0x3D: case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
+    case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
     case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAA: case 0xAE:
-    case 0xB0: case 0xB1: case 0xB6: case 0xB9: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
-    case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3: case 0xE6: case 0xEE:
+    case 0xB0: case 0xB1: case 0xB6: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
+    case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
