@@ -98,6 +98,35 @@ struct BytesPacket {
 };
 static_assert(offsetof(BytesPacket, size) == 0x18);
 
+struct ValueFloatPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  int value;
+  float amount;
+};
+static_assert(offsetof(ValueFloatPacket, amount) == 0x14);
+
+struct FlagPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  bool flag;
+};
+static_assert(offsetof(FlagPacket, flag) == 0x10);
+
+// Bounds-checked read cursor (same layout as the zone client's).
+struct PacketReader {
+  const uint8_t* start;
+  int length;
+  const uint8_t* cursor;
+  const uint8_t* end;
+  uint16_t failed;
+};
+static_assert(offsetof(PacketReader, failed) == 0x20);
+
+constexpr size_t kPacket25Size = 0x40;  // ctor 0x1416ffb60 initialises up to +0x3C
+
 constexpr size_t kOpcode3DString = 0x38C90;   // IString (meaning not identified yet)
 constexpr size_t kKickReason = 0x3D520;       // IString
 constexpr size_t kOpcode69Value = 0x38DB0;    // int; >= 0x12 sets a flag on the extension object's +0x28 child
@@ -605,15 +634,61 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x25: {
+      alignas(8) uint8_t packet[kPacket25Size];
+      game::Call<void (*)(uint8_t*)>(0x1416ffb60)(packet);  // vtable, opcode 0x25, defaults
+      if (!data) {
+        result = false;
+        break;
+      }
+      PacketReader reader{data, length, data, data + length, 0};
+      game::Call<void (*)(uint8_t*, PacketReader*)>(0x14036eb60)(packet, &reader);
+      if (static_cast<uint8_t>(reader.failed) || static_cast<int>(reader.end - reader.cursor) > 0) {
+        result = false;  // malformed or trailing bytes
+        break;
+      }
+      game::Call<void (*)(uint8_t*, uint8_t*)>(0x140408280)(game, packet);
+      break;
+    }
+    case 0xAA: {
+      ValueFloatPacket packet{reinterpret_cast<void**>(0x142064388), 0xAA, 0, *reinterpret_cast<int*>(0x142b186ac), 0.0f};
+      using ReadFn = bool (*)(ValueFloatPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038c7a0)(&packet, data, length, false)) {
+        int key = packet.value;
+        auto* object = game::Call<uint8_t* (*)(uint8_t*, int*)>(0x1403f8380)(game, &key);
+        if (object)
+          reinterpret_cast<void (*)(uint8_t*, float)>((*reinterpret_cast<void***>(object))[0x2E8 / 8])(object,
+                                                                                                    packet.amount);
+      }
+      result = false;
+      break;
+    }
+    case 0xB6: {
+      FlagPacket packet{reinterpret_cast<void**>(0x142063e18), 0xB6, 0, false};
+      using ReadFn = bool (*)(FlagPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038bb60)(&packet, data, length, false)) {
+        auto* client = static_cast<uint8_t*>(GlobalObject(0x142b19780));
+        auto* a = game::Field<uint8_t*>(client, 0x389E0);
+        auto* b = a ? game::Field<uint8_t*>(a, 0xE8) : nullptr;
+        void* c = b ? game::Field<void*>(b, 0x98) : nullptr;
+        if (c) {
+          bool flag = packet.flag;
+          game::Call<void (*)(void*, bool)>(0x140800280)(c, flag);
+          if (!flag) game::Call<void (*)(uint8_t*)>(0x140828d60)(a);
+        }
+      }
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x25: case 0x2C: case 0x30: case 0x33: case 0x35:
+    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x33: case 0x35:
     case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
-    case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAA: case 0xAE:
-    case 0xB0: case 0xB1: case 0xB6: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
+    case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAE:
+    case 0xB0: case 0xB1: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
     case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
