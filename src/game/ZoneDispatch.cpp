@@ -204,6 +204,43 @@ struct TimerPacket {
 };
 static_assert(offsetof(TimerPacket, timer) == 0x14 && sizeof(TimerPacket) == 0x18);
 
+struct Packet44 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int stringId;  // +0x10
+  int a;
+  int b;         // +0x18
+  int padding2;
+};
+static_assert(offsetof(Packet44, b) == 0x18 && sizeof(Packet44) == 0x20);
+
+struct Packet61 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int a, b;     // +0x10 -> game+0x38DB4 / +0x38DB8
+  bool flag;    // +0x18 -> game+0x38DBC, true by default
+  float scale;  // +0x1C, 1.0 by default
+  int c, d, e;  // +0x20..+0x28
+  float f, g;   // +0x2C / +0x30 -> game+0x38DC0 / +0x38DC4
+  int padding2;
+};
+static_assert(offsetof(Packet61, scale) == 0x1C && offsetof(Packet61, g) == 0x30 && sizeof(Packet61) == 0x38);
+
+struct Packet65 {
+  void** vtable;
+  int opcode;
+  int padding;
+  int value;    // +0x10, 1
+  int padding2;
+  uint64_t id;  // +0x18
+  uint64_t a;   // +0x20
+  int b;        // +0x28
+  int padding3;
+};
+static_assert(offsetof(Packet65, id) == 0x18 && offsetof(Packet65, b) == 0x28);
+
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
@@ -1020,13 +1057,75 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       }
       break;
     }
+    case 0x44: {
+      Packet44 packet{reinterpret_cast<void**>(0x142063d80), 0x44, 0, 0, 0, 0};
+      if (!data) break;
+      PacketReader reader{data, length, data, data + length, 0};
+      game::Call<void (*)(Packet44*, PacketReader*)>(0x140372e50)(&packet, &reader);
+      if (static_cast<uint8_t>(reader.failed)) break;
+      soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      auto* strings = static_cast<uint8_t*>(GlobalObject(0x142b19798));
+      reinterpret_cast<bool (*)(void*, int, soeutil::IString*)>((*reinterpret_cast<void***>(strings))[2])(
+          strings, packet.stringId, &text);
+      // The local player is not null-checked here in the original.
+      game::Call<void (*)(uint8_t*, const char*, int, int)>(0x140638880)(player, text.data, packet.a, packet.b);
+      text.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&text);
+      break;
+    }
+    case 0x61: {
+      Packet61 packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063d98);
+      packet.opcode = 0x61;
+      packet.flag = true;
+      packet.scale = *reinterpret_cast<float*>(0x1425ba090);  // 1.0
+      if (data) {
+        PacketReader reader{data, length, data, data + length, 0};
+        game::Call<void (*)(Packet61*, PacketReader*)>(0x1403727f0)(&packet, &reader);
+        if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0) {
+          game::Field<int>(game, 0x38DB4) = packet.a;
+          game::Field<int>(game, 0x38DB8) = packet.b;
+          game::Field<bool>(game, 0x38DBC) = packet.flag;
+          game::Call<void (*)(uint8_t*, float)>(0x14046add0)(game, packet.scale);
+          game::Call<void (*)(int)>(0x1416d6f60)(packet.c);
+          game::Call<void (*)(int, int)>(0x1416d78e0)(packet.d, packet.e);
+          game::Field<float>(game, 0x38DC0) = packet.f;
+          game::Field<float>(game, 0x38DC4) = packet.g;
+        }
+      }
+      break;
+    }
+    case 0x65: {
+      ValuePacket header{reinterpret_cast<void**>(0x1420682d8), 0x65, 0, 0};
+      using ReadHeaderFn = bool (*)(ValuePacket*, const uint8_t*, int, bool);
+      if (!game::Call<ReadHeaderFn>(0x14038c980)(&header, data, length, true) || header.value != 1) break;
+      Packet65 packet{reinterpret_cast<void**>(0x1420682e0), 0x65, 0, 1, 0, *reinterpret_cast<uint64_t*>(0x142b181f8), 0, 0, 0};
+      using ReadFn = bool (*)(Packet65*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038e630)(&packet, data, length, false)) break;
+      auto& current = game::Field<void*>(game, 0x3B7C0);
+      if (current) {
+        reinterpret_cast<void (*)(void*, int)>((*static_cast<void***>(current))[0])(current, 1);  // deleting dtor
+        current = nullptr;
+      }
+      uint64_t id = packet.id;
+      auto* target = game::Call<uint8_t* (*)(uint8_t*, uint64_t*)>(0x1403f83f0)(game, &id);
+      if (!target) break;
+      void* created = nullptr;
+      if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x3F50)) {
+        float base = game::Field<float>(Member(game, 0x7112), 0x250);
+        created = game::Call<void* (*)(void*, uint8_t*, Packet65*, float)>(0x1406f4b50)(
+            memory, target, &packet, base + *reinterpret_cast<float*>(0x142072890));  // + pi
+      }
+      current = created;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E: case 0x3F: case 0x40: case 0x44: case 0x61: case 0x62: case 0x65:
+    case 0x3E: case 0x3F: case 0x40: case 0x62:
     case 0x7D: case 0x99:
    
     case 0xDE: case 0xE3:
