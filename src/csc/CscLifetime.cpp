@@ -134,6 +134,119 @@ int BaseApiConnectionValue1C4(uint8_t* api) {
   return value;
 }
 
+// 0x1415f4870: BaseApi field initialisation shared by its constructors.
+void BaseApiInitFields(uint8_t* api) {
+  game::Field<bool>(api, 0x2D9) = false;
+  game::Field<void*>(api, 0x2C0) = nullptr;
+  game::Field<uint16_t>(api, 0x2E0) = 0;  // connecting / connected
+  game::Field<uint8_t*>(api, 0x98) = api ? api + 0x88 : nullptr;
+  game::Field<int>(api, 0x2F0) = 0;
+  game::Field<int64_t>(api, 0x2E8) = *reinterpret_cast<int64_t*>(0x143c77ac0);
+  game::Field<int>(api, 0xB98) = 0;
+  game::Field<int>(api, 0xB9C) = 100;
+  game::Field<int>(api, 0x2F4) = 5000;
+  game::Field<uint64_t>(api, 0x360) = 0;
+  game::Field<int64_t>(api, 0x2C8) = *reinterpret_cast<int64_t*>(0x143c77ac8);
+  auto* manager = game::Field<uint8_t*>(api, 0x2D0);
+  if (manager && game::Field<bool>(manager, 0x288)) {
+    game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(
+        game::Field<void*>(manager, 0x250), reinterpret_cast<const char*>(0x1424b04f0),  // "BaseApi constructed (%s) defaultPort=%d"
+        manager + 0x209, game::Field<int>(api, 0x2DC));
+  }
+}
+
+// 0x1415f5bf0: register the "<prefix>/Udp" metrics group.
+void BaseApiRegisterMetrics(void* /*api*/, void* registry, void* /*unused*/, const char* prefix) {
+  soeutil::StringFixed<256> path;
+  path.data = soeutil::EmptyStringData();
+  path.length = 0;
+  path.capacity = 0;
+  SetVtable(&path, 0x142049e08);  // StringFixed<256>
+  soeutil::StringFormat(&path, reinterpret_cast<const char*>(0x1424b0c0c), prefix);  // "%s/Udp"
+  game::Call<void (*)(void*, const char*, const char*)>(0x1415f8210)(registry, path.data, prefix);
+  SetVtable(&path, 0x142049de8);  // IStringFixed<char,256>
+  soeutil::StringRelease(&path);
+}
+
+// 0x1415f53c0: SoeUtil::Array<IString>::RemoveRange(index, count). Later
+// elements are moved down (stealing unshared buffers), then the tail shrinks.
+void StringArrayRemoveRange(uint8_t* array, int index, int count) {
+  auto* elements = game::Field<soeutil::IString*>(array, 8);
+  int remaining = game::Field<int>(array, 0x10) - (index + count);
+  soeutil::IString* source = elements + (index + count);
+  soeutil::IString* destination = elements + index;
+  for (; remaining != 0; --remaining, ++source, ++destination) {
+    reinterpret_cast<void (*)(soeutil::IString*, int)>(destination->vtable[0])(destination, 0);  // destruct in place
+    destination->vtable = soeutil::IStringVtable();
+    destination->data = soeutil::EmptyStringData();
+    destination->length = 0;
+    destination->capacity = 0;
+    bool steal = source->capacity <= 0 || *reinterpret_cast<int*>(source->data - 4) > 0;
+    if (steal) {
+      destination->data = source->data;
+      destination->length = source->length;
+      destination->capacity = source->capacity;
+      source->vtable = soeutil::IStringVtable();
+      source->data = soeutil::EmptyStringData();
+      source->length = 0;
+      source->capacity = 0;
+    } else {
+      soeutil::StringAssignString(destination, source);
+    }
+  }
+  game::Call<void (*)(uint8_t*, int)>(0x1404595e0)(array, count);  // drop the tail
+}
+
+// SoeUtil::List<IString>: {vtable (slot 2 allocates a node), head, tail, count}.
+struct StringListNode {
+  soeutil::IString value;
+  StringListNode* next;
+  StringListNode* previous;
+};
+static_assert(offsetof(StringListNode, next) == 0x18);
+static_assert(offsetof(StringListNode, previous) == 0x20);
+
+struct StringList {
+  void** vtable;
+  StringListNode* head;
+  StringListNode* tail;
+  int count;
+};
+static_assert(offsetof(StringList, count) == 0x18);
+
+// 0x1415f3130: split `text` into tokens appended to `list`; returns the
+// list's count.
+int SplitIntoStringList(const char* text, StringList* list, const char* delimiters, bool flagA, bool flagB) {
+  soeutil::IString token{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  for (;;) {
+    char buffer[0x800];
+    buffer[0] = '\0';
+    using TokenizeFn = int (*)(const char*, char*, int, const char*, bool, bool);
+    int consumed = game::Call<TokenizeFn>(0x140330780)(text, buffer, 0x800, delimiters, flagA, flagB);
+    soeutil::StringAssign(&token, buffer);
+    if (consumed < 1) break;
+    text += consumed;
+    using AllocFn = StringListNode* (*)(StringList*);
+    StringListNode* node = reinterpret_cast<AllocFn>(list->vtable[2])(list);
+    if (node) {
+      node->value = {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringAssignString(&node->value, &token);
+    }
+    node->previous = list->tail;
+    node->next = nullptr;
+    if (list->tail) {
+      list->tail->next = node;
+    } else {
+      list->head = node;
+    }
+    ++list->count;
+    list->tail = node;
+  }
+  int count = list->count;
+  soeutil::StringRelease(&token);
+  return count;
+}
+
 REBUILD_FUNCTION(UdpCompressionHandler_Destroy, 0x1415f2e30, UdpCompressionHandlerDestroy);
 REBUILD_FUNCTION(UdpCompressionHandler_GetStats, 0x1415f2ef0, UdpCompressionHandlerGetStats);
 REBUILD_FUNCTION(UdpCompressionHandler_ClearStats, 0x1415f2f50, UdpCompressionHandlerClearStats);
@@ -143,6 +256,10 @@ REBUILD_FUNCTION(UdpConnectionHandler_Destroy, 0x1415f3d90, UdpConnectionHandler
 REBUILD_FUNCTION(BaseApi_SetServer, 0x1415f4240, BaseApiSetServer);
 REBUILD_FUNCTION(BaseApi_GetReliableStats, 0x1415f4290, BaseApiGetReliableStats);
 REBUILD_FUNCTION(BaseApi_ConnectionValue1C0, 0x1415f42b0, BaseApiConnectionValue1C0);
+REBUILD_FUNCTION(BaseApi_InitFields, 0x1415f4870, BaseApiInitFields);
+REBUILD_FUNCTION(BaseApi_RegisterMetrics, 0x1415f5bf0, BaseApiRegisterMetrics);
+REBUILD_FUNCTION(SoeUtil_StringArray_RemoveRange, 0x1415f53c0, StringArrayRemoveRange);
+REBUILD_FUNCTION(SoeUtil_SplitIntoStringList, 0x1415f3130, SplitIntoStringList);
 REBUILD_FUNCTION(BaseApi_ConnectionValue1C4, 0x1415f4340, BaseApiConnectionValue1C4);
 
 }  // namespace rebuild::csc
