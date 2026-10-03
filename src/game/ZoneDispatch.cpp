@@ -349,6 +349,38 @@ void ReadAndHandle(uint8_t* game, uint8_t* packet, uintptr_t ctor, uintptr_t rea
   if (dtor) game::Call<void (*)(uint8_t*)>(dtor)(packet + dtorOffset);
 }
 
+// Per-channel {first 8 bytes, length} records kept by HandleZonePacket.
+struct LastPacket {
+  uint8_t firstBytes[8];
+  int length;
+};
+static_assert(sizeof(LastPacket) == 12);
+
+constexpr size_t kLastReceived = 0x96D28;   // LastPacket[8] in the client state block
+constexpr size_t kLastProcessed = 0x96D88;  // LastPacket[8]
+
+// The tail of case 0x2C: dump the channel's last received / processed packet
+// and the current one to "#|BadPackets.txt".
+void LogShutdownPackets(uint8_t* state, int channel, const uint8_t* data, int length) {
+  auto* received = reinterpret_cast<LastPacket*>(state + kLastReceived) + channel;
+  auto* processed = reinterpret_cast<LastPacket*>(state + kLastProcessed) + channel;
+  static const uintptr_t kChannelNames[] = {0x14206e070, 0x14206e078, 0x14206e080, 0x14206e090, 0x14206e0a8};
+  // "Zone", "World", "UpdatePosition", "ShortCircuitZone", "Gateway"; anything else "?"
+  const char* name = GameText(static_cast<unsigned>(channel) < 5 ? kChannelNames[channel] : 0x14206e06c);
+  soeutil::IString text{reinterpret_cast<void**>(0x14204b2f0), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFormat(&text, GameText(0x14206e0b0), channel, name, received->length);
+  using HexDumpFn = void (*)(const void*, int, soeutil::IString*);
+  game::Call<HexDumpFn>(0x14165b970)(received->firstBytes, 8, &text);
+  game::Call<void (*)(soeutil::IString*, const char*, int)>(0x1402ed6c0)(&text, GameText(0x14206e110),
+                                                                         processed->length);  // " Last packet processed: (len:%d) "
+  game::Call<HexDumpFn>(0x14165b970)(processed->firstBytes, 8, &text);
+  game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&text, GameText(0x14206e138));  // " Current packet: "
+  game::Call<HexDumpFn>(0x14165b970)(data, length, &text);
+  game::Call<void (*)(const char*, const char*, const char*)>(0x1402baba0)(GameText(0x14206e150), GameText(0x142046fb8),
+                                                                           text.data);  // "#|BadPackets.txt", "%s"
+  game::Call<void (*)(soeutil::IString*)>(0x1402ef190)(&text);
+}
+
 }  // namespace
 
 // 0x1403fe210: DispatchZonePacket(header, data, length, channel)
@@ -1343,12 +1375,24 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(Packet08*)>(0x1403b10a0)(&packet);
       break;
     }
+    case 0x2C: {  // server shutdown: tell the player, then log the recent packets to BadPackets.txt
+      if (data && data + 1 <= data + length) {
+        void* display = Member(game, 0x71BA);
+        int a = game::Call<int (*)()>(0x1416dfd00)();
+        int b = game::Call<int (*)()>(0x1416dfde0)();
+        using ShowFn = void (*)(void*, const char*, int, int, int, bool, void*, bool);
+        reinterpret_cast<ShowFn>((*static_cast<void***>(display))[0x28 / 8])(
+            display, GameText(0x14206e040), 0, b, a, false, nullptr, true);  // "The server has shutdown and logged you out."
+      }
+      LogShutdownPackets(state, channel, data, length);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x3E: case 0x99: case 0xDE: case 0xE3:
+    case 0x03: case 0x0B: case 0x16: case 0x30: case 0x3E: case 0x99: case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
