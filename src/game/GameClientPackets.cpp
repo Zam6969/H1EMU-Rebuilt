@@ -2149,6 +2149,227 @@ void GameClientHandlePacket83(uint8_t* game, const uint8_t* data, int length) {
   }
 }
 
+// Inlined IString prepend (the game copies the text down, then the prefix in).
+void StringPrepend(soeutil::IString* text, const char* prefix) {
+  int prefixLength = static_cast<int>(std::strlen(prefix));
+  int total = text->length + prefixLength;
+  if (total == 0) {
+    soeutil::StringRelease(text);
+    text->data = soeutil::EmptyStringData();
+    text->length = 0;
+    text->capacity = 0;
+    return;
+  }
+  StringMakeWritable(text, total + 1);
+  std::memmove(text->data + prefixLength, text->data, static_cast<size_t>(text->length + 1));
+  std::memcpy(text->data, prefix, static_cast<size_t>(prefixLength));
+  text->length = total;
+}
+
+template <class T>
+T* ConstructNew(size_t size, uint64_t constructor) {
+  void* memory = GameAllocate(size);
+  return memory ? game::Call<T* (*)(void*)>(constructor)(memory) : nullptr;
+}
+
+// Intrusive handle at 0x142ae85e0: pointer | flag bit 0, object {vtable,
+// refcount +8, ...}; the "SuppressAlerts" handler is a 0x28-byte functor
+// {vtable 0x142046c78, refcount, game, function 0x140428c90, 0}.
+void ReleaseAlertHandler() {
+  auto& handle = *reinterpret_cast<uint64_t*>(0x142ae85e0);
+  if (auto* object = reinterpret_cast<uint8_t*>(handle & ~1ull)) {
+    if (_InterlockedExchangeAdd64(reinterpret_cast<volatile long long*>(object + 8), -1) == 1)
+      (*reinterpret_cast<void (***)(void*, int)>(object))[0](object, 1);
+  }
+  handle &= 1;
+}
+
+// 0x14040ed60 (slot 2): Init(commandLine) - load the client ini (Inifile=,
+// merged with LocalConfig.ini), user options, core state objects, the SoeData
+// driver ("FilesystemRoot=<GraphicsDataPath>"), timers, the asset request
+// handler and the Debug/UsePs4ControlEmulation flag.
+bool GameClientInit(uint8_t* game, const char* commandLine) {
+  using ParseFn = void (*)(void*, const char*);
+  using GetBufferFn = void (*)(void*, const char*, const char*, const char*, char*, int, bool, int, int);
+  const char* empty = reinterpret_cast<const char*>(0x142046fcb);
+  auto* ini = ConstructNew<uint8_t>(0xE98, 0x140331340);
+  game::Field<uint8_t*>(game, 0x38E30) = ini;
+  game::Call<ParseFn>(0x140333e70)(ini, commandLine);
+  const char* defaultIni = game::Call<const char* (*)(uint8_t*)>(0x14047aec0)(game);
+  char iniPath[0x100];
+  game::Call<GetBufferFn>(0x1403331e0)(game::Field<void*>(game, 0x38E30), empty, reinterpret_cast<const char*>(0x14204a3d0), defaultIni, iniPath,
+                                       0x100, false, -1, -1);  // "Inifile"
+  game::Call<void (*)(void*, bool)>(0x1403322c0)(game::Field<void*>(game, 0x38E30), true);
+  soeutil::StringAssign(game + 0x38DF0, iniPath);
+
+  soeutil::IString arguments{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringAssign(&arguments, commandLine);
+  const char* found = arguments.length > 0 ? game::Call<const char* (*)(const char*, const char*)>(0x140304100)(
+                                                 arguments.data, reinterpret_cast<const char*>(0x14204a3d0))
+                                           : nullptr;
+  if (!found || static_cast<int>(found - arguments.data) == -1)
+    game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&arguments, reinterpret_cast<const char*>(0x142070918),
+                                                                           iniPath);  // " Inifile=%s"
+  game::Call<void (*)(uint8_t*, const char*)>(0x14034e580)(game, arguments.data);
+  game::Call<void (*)(int, int)>(0x14032e890)(0, 0);
+  if (!game::Call<bool (*)(void*, const char*)>(0x140334100)(game::Field<void*>(game, 0x38E30), iniPath)) {
+    game::Call<void (*)(const char*, const char*)>(0x140309e00)(reinterpret_cast<const char*>(0x142070930), iniPath);  // "Failed to load the config file ..."
+    game::Call<void (*)(int)>(0x140d5565c)(-1);  // exit
+  }
+  game::Call<ParseFn>(0x140333e70)(game::Field<void*>(game, 0x38E30), commandLine);
+
+  auto* options = ConstructNew<uint8_t>(0x3390, 0x140aadde0);
+  *reinterpret_cast<uint8_t**>(0x142b199f0) = options;
+  game::Call<ParseFn>(0x140aae990)(options, commandLine);
+  game::Call<void (*)(void*)>(0x140aae950)(options);
+  game::Call<void (*)(void*)>(0x140ab7b20)(options);
+  (*reinterpret_cast<void (***)(void*)>(options))[1](options);
+
+  auto* localIni = ConstructNew<uint8_t>(0xE98, 0x140331340);
+  game::Field<uint8_t*>(game, 0x38E38) = localIni;
+  game::Call<ParseFn>(0x140333e70)(localIni, commandLine);
+  char localPath[0x100];
+  game::Call<GetBufferFn>(0x1403331e0)(game::Field<void*>(game, 0x38E38), empty, reinterpret_cast<const char*>(0x142070988),
+                                       reinterpret_cast<const char*>(0x142070978), localPath, 0x100, false, -1, -1);  // "LocalConfig", "LocalConfig.ini"
+  if (game::Call<bool (*)(const char*, bool)>(0x140336bd0)(localPath, false)) {
+    game::Call<bool (*)(void*, const char*)>(0x140334100)(game::Field<void*>(game, 0x38E38), localPath);
+    game::Call<void (*)(void*, void*, int)>(0x140335530)(game::Field<void*>(game, 0x38E30), game::Field<void*>(game, 0x38E38), 0);
+  }
+  game::Call<ParseFn>(0x140333e70)(game::Field<void*>(game, 0x38E38), commandLine);
+
+  *reinterpret_cast<unsigned*>(0x142b176d0) = GetCurrentThreadId();
+  *reinterpret_cast<uint8_t**>(0x142b19780) = game;
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  if ((*reinterpret_cast<bool (***)(uint8_t*)>(game))[0x90 / 8](game) &&
+      game::Call<GetBoolFn>(0x1403051c0)(game::Field<void*>(game, 0x38E30), empty, reinterpret_cast<const char*>(0x142070998), false, false, -1,
+                                         -1)) {  // "SuppressAlerts"
+    ReleaseAlertHandler();
+    ReleaseAlertHandler();
+    auto* functor = static_cast<uint8_t*>(GameAllocate(0x28));
+    if (functor) {
+      game::Field<uint64_t>(functor, 0) = 0x142046c58;
+      _InterlockedExchange64(reinterpret_cast<volatile long long*>(functor + 8), 1);
+      game::Field<uint64_t>(functor, 0) = 0x142046c78;
+      game::Field<uint8_t*>(functor, 0x10) = game;
+      game::Field<uint64_t>(functor, 0x18) = 0x140428c90;
+      game::Field<uint64_t>(functor, 0x20) = 0;
+    }
+    auto& handle = *reinterpret_cast<uint64_t*>(0x142ae85e0);
+    handle = (handle & 1) | reinterpret_cast<uint64_t>(functor);
+  }
+
+  game::Field<void*>(game, 0x31498) = ConstructNew<void>(0xA8, 0x14039f820);
+  void* stateMemory = GameAllocate(0x96DE8);
+  game::Field<void*>(game, 0x314A8) = stateMemory ? game::Call<void* (*)(void*, uint8_t*)>(0x1403998d0)(stateMemory, game) : nullptr;
+  auto now = [] {
+    uint64_t value;
+    return *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fd30)(&value);
+  };
+  auto clock = [] {
+    uint64_t value;
+    return *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&value);
+  };
+  game::Field<uint64_t>(game, 0x38810) = now();
+  game::Field<uint64_t>(game, 0x38800) = now();
+  *reinterpret_cast<void**>(0x142b19790) = ConstructNew<void>(8, 0x1413438b0);
+  auto* listener = static_cast<uint64_t*>(GameAllocate(8));
+  if (listener) *listener = 0x142064da0;
+  game::Field<void*>(game::Field<uint8_t*>(game, 0x314A8), 0x10) = listener;
+  game::Call<void (*)()>(0x141341b90)();
+  game::Field<uint64_t>(game, 0x3B698) = clock();
+  game::Field<uint64_t>(game, 0x3B6A0) = now();
+  game::Field<uint64_t>(game, 0x3B6A8) = clock();
+  *reinterpret_cast<void**>(0x142b19ae0) = ConstructNew<void>(0x58, 0x140ab7b70);
+  game::Field<uint64_t>(game, 0x31420) = 0;
+  game::Field<int>(game, 0x31428) = 3;
+  game[0x3142C] = 0;
+  (*reinterpret_cast<void (***)(uint8_t*)>(game))[0x280 / 8](game);
+  game::Call<void (*)(void*, const char*)>(0x14133dd40)(game::Field<void*>(game, 0x38E30), reinterpret_cast<const char*>(0x142063450));  // "CommandQueue"
+  while (game::Call<int (*)()>(0x14133c270)() != 0) {
+  }
+
+  // SoeData file system driver.
+  auto& dataManager = *reinterpret_cast<uint8_t**>(0x143c76ab8);
+  if (!dataManager) dataManager = ConstructNew<uint8_t>(0x138, 0x1414e71d0);
+  auto* driver = ConstructNew<uint8_t>(0x20, 0x1414f0ce0);
+  soeutil::StringFixed<128> config;
+  soeutil::InitFixed(config, reinterpret_cast<void**>(0x142049dc8));
+  using GetStringFn = void (*)(void*, const char*, const char*, const char*, soeutil::IString*, bool, int, int);
+  game::Call<GetStringFn>(0x1403334f0)(game::Field<void*>(game, 0x38E30), reinterpret_cast<const char*>(0x1420709d0),
+                                       reinterpret_cast<const char*>(0x1420709b8), reinterpret_cast<const char*>(0x1420709a8), &config, false, -1,
+                                       -1);  // "Libraries", "GraphicsDataPath", "../GraphicsData"
+  StringPrepend(&config, reinterpret_cast<const char*>(0x1420709e0));  // "FilesystemRoot=\""
+  game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(
+      &config, reinterpret_cast<const char*>(0x1420709f8));  // "\" ClassDefinition=\"DeepDefinitions\" WatchChanges=false"
+  if (!(*reinterpret_cast<bool (***)(void*, const char*)>(driver))[1](driver, config.data)) {
+    game::Call<void (*)(const char*, const char*)>(0x1403243b0)(nullptr, reinterpret_cast<const char*>(0x142070a30));  // "Failed to initialize SoeData driver"
+    game::Call<void (*)()>(0x14032dc60)();
+  }
+  uint8_t* manager = dataManager;
+  if (!game::Field<void*>(driver, 8) && game::Field<uint8_t*>(manager, 0x28) != driver) {  // push onto the driver list
+    game::Field<uint8_t*>(driver, 0x10) = game::Field<uint8_t*>(manager, 0x28);
+    if (auto* head = game::Field<uint8_t*>(manager, 0x28))
+      game::Field<uint8_t*>(head, 8) = driver;
+    else
+      game::Field<uint8_t*>(manager, 0x30) = driver;
+    game::Field<uint8_t*>(manager, 0x28) = driver;
+    ++game::Field<int>(manager, 0x38);
+    manager = dataManager;
+  }
+  game::Call<void (*)(void*)>(0x1414ebed0)(manager);
+
+  uint64_t value;
+  game::Field<uint64_t>(game, 0x390E8) = *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fc80)(&value);
+  game::Field<uint64_t>(game, 0x390F0) = 0;
+  std::memcpy(game + 0x3B640, reinterpret_cast<const void*>(0x142072930), 16);
+  game::Field<int>(game, 0x38998) = 0x7FFFFFFF;
+  game::Field<uint64_t>(game, 0x38F60) = now();
+  std::memset(game + 0x38F88, 0, 0x390BC - 0x38F88);
+  game::Field<uint64_t>(game, 0x3B6C0) = now();
+  game::Field<uint64_t>(game, 0x31E00) = now();
+  game::Field<uint64_t>(game, 0x3B6D8) = 0;
+  game[0x3B6E0] = 0;
+  game::Field<uint64_t>(game, 0x3B6E8) = now();
+  game[0x3B7DC] = 1;
+
+  // Clock offset: shift the clock by the span {0, 1, 1, 0, 0}, measure it back.
+  uint64_t start = clock();
+  struct ClockSpan {
+    int a, b, c;
+    uint8_t rest[16];
+  } span{0, 1, 1, {}};
+  static_assert(sizeof(ClockSpan) == 0x1C);
+  uint64_t shifted = start;
+  game::Call<void (*)(uint64_t*, ClockSpan*, bool)>(0x14032fbe0)(&shifted, &span, true);
+  uint64_t measured;
+  game::Call<void (*)(uint64_t*, ClockSpan*, bool)>(0x14032fb60)(&measured, &span, false);
+  game::Field<int>(game, 0x38824) = static_cast<int>(measured) - static_cast<int>(start);
+
+  game::Call<void (*)(uint8_t*, int, int, int, const char*)>(0x14166a6f0)(game::Field<uint8_t*>(game, 0x314A8) + 0x96A18, 1, 0, 2,
+                                                                         reinterpret_cast<const char*>(0x142070a58));  // "AssetRequestHandler"
+  game::Call<void (*)(uint8_t*)>(0x14047b900)(game);
+  game::Call<void (*)()>(0x140ac9260)();
+  game::Field<void*>(game, 0x314D8) = ConstructNew<void>(0x60B28, 0x14166d170);
+  game::Call<void (*)(uint8_t*)>(0x14049d110)(game);
+
+  void* rootIni = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19780), 0x38E30);
+  char defaultValue[0x400];
+  game::Call<void (*)(char*, int, int, int)>(0x1403054d0)(defaultValue, 0x400, 0, 0);
+  char rawValue[0x400];
+  game::Call<GetBufferFn>(0x1403334e0)(rootIni, reinterpret_cast<const char*>(0x142070a88), reinterpret_cast<const char*>(0x142070a70), defaultValue,
+                                       rawValue, 0x400, false, -1, -1);  // "Debug", "UsePs4ControlEmulation"
+  char flag[0x800];
+  flag[0] = 0;
+  game::Call<void (*)(const char*, char*, int, char, bool, bool)>(0x1403309b0)(rawValue, flag, 0x800, 0, true, true);
+  game[0x42E40] = flag[0] == '1' || flag[0] == 't' || flag[0] == 'T';
+
+  config.vtable = reinterpret_cast<void**>(0x142049da8);
+  soeutil::StringRelease(&config);
+  arguments.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&arguments);
+  return true;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -2204,6 +2425,7 @@ REBUILD_FUNCTION(GameClient_HandlePacket41, 0x140409ee0, GameClientHandlePacket4
 REBUILD_FUNCTION(GameClient_PresentJob, 0x140431ca0, GameClientPresentJob);
 REBUILD_FUNCTION(GameClient_Initialize, 0x140432650, GameClientInitialize);
 REBUILD_FUNCTION(GameClient_HandlePacket83, 0x14040cd70, GameClientHandlePacket83);
+REBUILD_FUNCTION(GameClient_Init, 0x14040ed60, GameClientInit);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
