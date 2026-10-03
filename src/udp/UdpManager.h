@@ -61,11 +61,13 @@ using ConnectionCodeTable =
 
 struct UdpManager;
 
-// A connection being torn down without a UdpConnection object: re-sends a
-// terminate packet (00 1F + connect code) once a second until it times out.
-struct DisconnectPendingEntry {
-  DisconnectPendingEntry* prev;  // +0x00 list link (offset 0)
-  DisconnectPendingEntry* next;  // +0x08
+// UdpManager::ExpectIncomingEntry: NAT punch-through for a connection the
+// application expects from this address. Sends a probe (00 1F + connect code)
+// once a second until the entry times out, so our NAT accepts the peer's
+// connect request.
+struct ExpectIncomingEntry {
+  ExpectIncomingEntry* prev;  // +0x00 list link (offset 0)
+  ExpectIncomingEntry* next;  // +0x08
   UdpManager* manager;           // +0x10
   UdpIpAddress ip;               // +0x18
   int port;                      // +0x1C
@@ -74,8 +76,8 @@ struct DisconnectPendingEntry {
   int64_t startTime;             // +0x28
   int64_t lastSendTime;          // +0x30
 };
-static_assert(offsetof(DisconnectPendingEntry, timeout) == 0x20);
-static_assert(sizeof(DisconnectPendingEntry) == 0x38);
+static_assert(offsetof(ExpectIncomingEntry, timeout) == 0x20);
+static_assert(sizeof(ExpectIncomingEntry) == 0x38);
 
 // UdpConnection fields the manager reads directly.
 struct UdpConnectionInternals {
@@ -205,7 +207,7 @@ struct UdpManager : UdpGuardedRefCount {
   uint8_t unknown204[0x218 - 0x204];        // +0x204
   UdpConnectionList connectionList;         // +0x218 every connection (link at +0xB0)
   UdpConnectionList disconnectingList;      // +0x240 waiting to reach cStatusDisconnected (link at +0xC0)
-  UdpLinkedList<DisconnectPendingEntry> disconnectPending;  // +0x268
+  UdpLinkedList<ExpectIncomingEntry> expectIncoming;  // +0x268
   ConnectionAddressTable* addressTable;     // +0x288 keyed by ip ^ port
   ConnectionCodeTable* codeTable;           // +0x290 keyed by connect code
   ConnectionPriorityQueue* priorityQueue;   // +0x298 null = give time to every connection
@@ -266,7 +268,7 @@ struct UdpManager : UdpGuardedRefCount {
   UdpPlatformGuardObject& EventPoolGuard() { return guards[4]; }
   UdpPlatformGuardObject& DisconnectingGuard() { return guards[6]; }
   UdpPlatformGuardObject& DeliverEventsGuard() { return guards[10]; }
-  UdpPlatformGuardObject& DisconnectPendingGuard() { return guards[7]; }
+  UdpPlatformGuardObject& ExpectIncomingGuard() { return guards[7]; }
   UdpPlatformGuardObject& GiveTimeGuard() { return guards[9]; }
   UdpPlatformGuardObject& ConnectionGuard() { return guards[11]; }
   // Params fields identified from their uses.
@@ -279,7 +281,7 @@ struct UdpManager : UdpGuardedRefCount {
   bool ProcessIcmpErrors() { return params.At<uint8_t>(0x68) != 0; }
   bool ProcessIcmpErrorsDuringNegotiating() { return params.At<uint8_t>(0x69) != 0; }
   bool EventQueuing() { return params.At<uint8_t>(0x178) != 0; }
-  bool OnlyAcceptPendingAddresses() { return params.At<uint8_t>(0x180) != 0; }
+  bool OnlyAcceptExpectedConnections() { return params.At<uint8_t>(0x180) != 0; }
   int EventPoolMax() { return params.At<int>(0x64); }
 
   int ReceiveBufferCount() { return params.At<int>(0x1C); }
@@ -299,7 +301,7 @@ static_assert(offsetof(UdpManager, receiveBuffers) == 0x1F0);
 static_assert(offsetof(UdpManager, randomSeed) == 0x1FC);
 static_assert(offsetof(UdpManager, connectionList) == 0x218);
 static_assert(offsetof(UdpManager, disconnectingList) == 0x240);
-static_assert(offsetof(UdpManager, disconnectPending) == 0x268);
+static_assert(offsetof(UdpManager, expectIncoming) == 0x268);
 static_assert(offsetof(UdpManager, addressTable) == 0x288);
 static_assert(offsetof(UdpManager, priorityQueue) == 0x298);
 static_assert(offsetof(UdpManager, driver) == 0x2A8);
@@ -365,13 +367,14 @@ int ConnectionGetStatus(UdpConnection* connection);        // 0x1403412c0
 UdpConnection* GetConnectionByCode(UdpManager* self, uint32_t connectCode);  // 0x14033f190
 void Reprioritize(ConnectionPriorityQueue* queue, UdpConnection* connection);  // 0x140342e50
 void ReleaseDisconnectedConnections(UdpManager* self);     // 0x1403427f0
-void ProcessDisconnectPending(UdpManager* self);           // 0x140342900
-bool DisconnectPendingGiveTime(DisconnectPendingEntry* self);  // 0x140341310
+void ProcessExpectIncoming(UdpManager* self);           // 0x140342900
+bool ExpectIncomingGiveTime(ExpectIncomingEntry* self);  // 0x140341310
 SimulateQueueEntry* ConstructSimulateQueueEntry(SimulateQueueEntry* self, const uint8_t* data,
                                                 int length, const UdpIpAddress* ip, int port,
                                                 int64_t queueTime);  // 0x14033bd40
 
 UdpConnection* GetConnection(UdpManager* self, const UdpIpAddress* ip, int port);  // 0x14033e1f0
+bool TakeExpectIncoming(UdpManager* self, const UdpIpAddress* ip, int port);        // 0x1403438d0
 void AddNewConnection(UdpManager* self, UdpConnection* connection);              // 0x14033e090
 
 UdpPacketBuffer* ActualReceive(UdpManager* self);  // 0x14033d970

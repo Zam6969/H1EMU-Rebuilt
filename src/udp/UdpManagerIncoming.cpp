@@ -14,7 +14,7 @@ constexpr uint8_t kPacketTerminate = 0x05;
 constexpr uint8_t kPacketKeepAlive = 0x1C;
 constexpr uint8_t kPacketUnreachableConnection = 0x1D;
 constexpr uint8_t kPacketRequestRemap = 0x1E;
-constexpr uint8_t kPacketPortUnreachableTerminate = 0x1F;
+constexpr uint8_t kPacketExpectIncomingProbe = 0x1F;
 
 constexpr size_t kUdpConnectionSize = 0x450;
 
@@ -42,7 +42,7 @@ UdpConnection* ConstructConnection(void* memory, UdpManager* manager, UdpPacketB
 void ConnectionProcessRawPacket(UdpConnection* connection, UdpPacketBuffer* buffer) {
   game::Call<void (*)(UdpConnection*, UdpPacketBuffer*)>(0x1403491e0)(connection, buffer);
 }
-void ConnectionPortUnreachable(UdpConnection* connection, const UdpIpAddress* ip, int port) {
+void ConnectionOnExpectIncomingProbe(UdpConnection* connection, const UdpIpAddress* ip, int port) {
   game::Call<void (*)(UdpConnection*, const UdpIpAddress*, int)>(0x1403496c0)(connection, ip, port);
 }
 
@@ -73,27 +73,27 @@ UdpConnection* GetConnectionByCode(UdpManager* self, uint32_t connectCode) {
   return found;
 }
 
-// 0x1403438d0. If ip:port has a disconnect-pending entry, unlinks it and
-// returns true. (The entry is not freed here, matching the original.)
-bool TakeDisconnectPending(UdpManager* self, const UdpIpAddress* ip, int port) {
-  for (DisconnectPendingEntry* entry = self->disconnectPending.first; entry;
-       entry = self->disconnectPending.Next(entry)) {
+// 0x1403438d0. If ip:port is expected, unlinks its entry and returns true.
+// (The entry is not freed here, matching the original.)
+bool TakeExpectIncoming(UdpManager* self, const UdpIpAddress* ip, int port) {
+  for (ExpectIncomingEntry* entry = self->expectIncoming.first; entry;
+       entry = self->expectIncoming.Next(entry)) {
     if (entry->ip == *ip && entry->port == port) {
-      self->disconnectPending.Remove(entry);
+      self->expectIncoming.Remove(entry);
       return true;
     }
   }
   return false;
 }
 
-// 0x140342a00. A "port unreachable" terminate from an address with no
-// connection: hand it to the still-negotiating connection with that code.
-void ProcessUnknownTerminate(UdpManager* self, const UdpIpAddress* ip, int port, uint32_t code) {
+// 0x140342a00. A punch-through probe (00 1F + code) from an address with no
+// connection: hand it to our still-negotiating connection with that code.
+void ProcessExpectIncomingProbe(UdpManager* self, const UdpIpAddress* ip, int port, uint32_t code) {
   self->ConnectionGuard().Enter();
   for (UdpConnection* c = self->connectionList.first; c; c = self->connectionList.Next(c)) {
     if (ConnectionGetStatus(c) == 0 && Field<uint32_t>(c, UdpConnectionInternals::kTerminateCode) == code) {
       UdpIpAddress copy = *ip;
-      ConnectionPortUnreachable(c, &copy, port);
+      ConnectionOnExpectIncomingProbe(c, &copy, port);
       break;
     }
   }
@@ -114,9 +114,9 @@ void ProcessRawPacket(UdpManager* self, UdpPacketBuffer* buffer) {
 
   if (buffer->length == 0) return;
 
-  if (buffer->length > 5 && IsOpcode(buffer, kPacketPortUnreachableTerminate)) {
+  if (buffer->length > 5 && IsOpcode(buffer, kPacketExpectIncomingProbe)) {
     UdpIpAddress ip = buffer->ip;
-    ProcessUnknownTerminate(self, &ip, buffer->port, ReadBigEndian32(buffer->data + 2));
+    ProcessExpectIncomingProbe(self, &ip, buffer->port, ReadBigEndian32(buffer->data + 2));
     return;
   }
 
@@ -159,8 +159,8 @@ void ProcessRawPacket(UdpManager* self, UdpPacketBuffer* buffer) {
   if (self->MaxConnections() <= self->connectionList.count) return;
   if (!self->Handler()) return;
   UdpIpAddress ip = buffer->ip;
-  bool wasPending = TakeDisconnectPending(self, &ip, buffer->port);
-  if (self->OnlyAcceptPendingAddresses() && !wasPending) return;
+  bool wasPending = TakeExpectIncoming(self, &ip, buffer->port);
+  if (self->OnlyAcceptExpectedConnections() && !wasPending) return;
 
   void* memory = soeutil::Allocate(kUdpConnectionSize);
   connection = memory ? ConstructConnection(memory, self, buffer) : nullptr;
@@ -178,8 +178,8 @@ static void AddressTableInsert(ConnectionAddressTable* table, UdpConnection* con
 
 REBUILD_FUNCTION(UdpConnection_GetStatus, 0x1403412c0, ConnectionGetStatus);
 REBUILD_FUNCTION(UdpManager_GetConnectionByCode, 0x14033f190, GetConnectionByCode);
-REBUILD_FUNCTION(UdpManager_TakeDisconnectPending, 0x1403438d0, TakeDisconnectPending);
-REBUILD_FUNCTION(UdpManager_ProcessUnknownTerminate, 0x140342a00, ProcessUnknownTerminate);
+REBUILD_FUNCTION(UdpManager_TakeExpectIncoming, 0x1403438d0, TakeExpectIncoming);
+REBUILD_FUNCTION(UdpManager_ProcessExpectIncomingProbe, 0x140342a00, ProcessExpectIncomingProbe);
 REBUILD_FUNCTION(UdpManager_ProcessRawPacket, 0x140342ad0, ProcessRawPacket);
 REBUILD_FUNCTION(UdpManager_AddressTable_Remove, 0x140343350, AddressTableRemove);
 REBUILD_FUNCTION(UdpManager_AddressTable_Insert, 0x140341a20, AddressTableInsert);

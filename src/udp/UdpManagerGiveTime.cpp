@@ -122,8 +122,9 @@ void ReleaseDisconnectedConnections(UdpManager* self) {
   self->DisconnectingGuard().Leave();
 }
 
-// 0x140341310. Returns true once the entry has timed out and can be deleted.
-bool DisconnectPendingGiveTime(DisconnectPendingEntry* self) {
+// 0x140341310. Sends the punch-through probe; returns true once the entry has
+// timed out and can be deleted.
+bool ExpectIncomingGiveTime(ExpectIncomingEntry* self) {
   if (ManagerClockElapsed(self->manager, self->startTime) > self->timeout) return true;
   if (self->connectCode != 0) {
     if (self->lastSendTime != 0 && ManagerClockElapsed(self->manager, self->lastSendTime) <= 1000) return false;
@@ -139,18 +140,18 @@ bool DisconnectPendingGiveTime(DisconnectPendingEntry* self) {
   return false;
 }
 
-// 0x140342900. Runs every disconnect-pending entry and deletes finished ones.
-void ProcessDisconnectPending(UdpManager* self) {
-  self->DisconnectPendingGuard().Enter();
-  for (DisconnectPendingEntry* entry = self->disconnectPending.first; entry;) {
-    DisconnectPendingEntry* next = self->disconnectPending.Next(entry);
-    if (DisconnectPendingGiveTime(entry)) {
-      self->disconnectPending.Remove(entry);
-      if (entry) soeutil::Free(entry, sizeof(DisconnectPendingEntry));
+// 0x140342900. Runs every expect-incoming entry and deletes finished ones.
+void ProcessExpectIncoming(UdpManager* self) {
+  self->ExpectIncomingGuard().Enter();
+  for (ExpectIncomingEntry* entry = self->expectIncoming.first; entry;) {
+    ExpectIncomingEntry* next = self->expectIncoming.Next(entry);
+    if (ExpectIncomingGiveTime(entry)) {
+      self->expectIncoming.Remove(entry);
+      if (entry) soeutil::Free(entry, sizeof(ExpectIncomingEntry));
     }
     entry = next;
   }
-  self->DisconnectPendingGuard().Leave();
+  self->ExpectIncomingGuard().Leave();
 }
 
 namespace {
@@ -159,7 +160,7 @@ void PriorityQueueReprioritize(ConnectionPriorityQueue* queue, UdpConnection* co
   Reprioritize(queue, connection);
 }
 void AfterConnectionsPassA(UdpManager* self) { ReleaseDisconnectedConnections(self); }
-void AfterConnectionsPassB(UdpManager* self) { ProcessDisconnectPending(self); }
+void AfterConnectionsPassB(UdpManager* self) { ProcessExpectIncoming(self); }
 
 // Pops the earliest connection if it is due by `now`, with a reference added.
 UdpConnection* PopDueConnection(UdpManager* self, int64_t now) {
@@ -318,7 +319,7 @@ REBUILD_FUNCTION(UdpManager_ClockElapsed, 0x14033f0a0, ManagerClockElapsed);
 REBUILD_FUNCTION(UdpManager_Reprioritize, 0x140342e50, Reprioritize);
 REBUILD_FUNCTION(UdpManager_NextIncomingPacket, 0x1403449d0, NextIncomingPacket);
 REBUILD_FUNCTION(UdpManager_ReleaseDisconnectedConnections, 0x1403427f0, ReleaseDisconnectedConnections);
-REBUILD_FUNCTION(UdpManager_ProcessDisconnectPending, 0x140342900, ProcessDisconnectPending);
-REBUILD_FUNCTION(UdpManager_DisconnectPendingGiveTime, 0x140341310, DisconnectPendingGiveTime);
+REBUILD_FUNCTION(UdpManager_ProcessExpectIncoming, 0x140342900, ProcessExpectIncoming);
+REBUILD_FUNCTION(UdpManager_ExpectIncomingGiveTime, 0x140341310, ExpectIncomingGiveTime);
 
 }  // namespace rebuild::udp
