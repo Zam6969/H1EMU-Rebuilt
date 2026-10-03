@@ -65,8 +65,8 @@ GatewayConnection* GatewayConnectionConstruct(GatewayConnection* self, const uin
 // 0x1420dd1f0 / 0x1420dd210).
 struct QueuedPacket {
   void** vtable;
-  uint64_t id;      // +0x08
-  int channel;      // +0x10
+  uint8_t* api;     // +0x08, the gateway api to send through
+  int mode;         // +0x10: 0 unreliable, 1 reliable, 2 secure
   int padding;
 };
 static_assert(sizeof(QueuedPacket) == 0x18);
@@ -77,10 +77,10 @@ struct QueuedDataPacket : QueuedPacket {
 static_assert(offsetof(QueuedDataPacket, stream) == 0x18 && sizeof(QueuedDataPacket) == 0x2050);
 
 struct QueuedDataPacketEx : QueuedDataPacket {
-  int extra;  // +0x2050
+  int channel;  // +0x2050, tunnel channel
   int padding2;
 };
-static_assert(offsetof(QueuedDataPacketEx, extra) == 0x2050 && sizeof(QueuedDataPacketEx) == 0x2058);
+static_assert(offsetof(QueuedDataPacketEx, channel) == 0x2050 && sizeof(QueuedDataPacketEx) == 0x2058);
 
 constexpr uintptr_t kVtQueuedPacket = 0x1420dd1d0;
 constexpr uintptr_t kVtQueuedDataPacketEx = 0x1420dd210;
@@ -108,11 +108,11 @@ QueuedDataPacketEx* QueuedDataPacketExDeletingDestructor(QueuedDataPacketEx* sel
   return self;
 }
 
-// 0x14063b590: QueuedDataPacketEx(id, data, length, extra, channel).
-QueuedDataPacketEx* QueuedDataPacketExConstruct(QueuedDataPacketEx* self, uint64_t id, const void* data, int length,
-                                                int extra, int channel) {
-  self->id = id;
-  self->channel = channel;
+// 0x14063b590: QueuedDataPacketEx(api, data, length, channel, mode).
+QueuedDataPacketEx* QueuedDataPacketExConstruct(QueuedDataPacketEx* self, uint8_t* api, const void* data, int length,
+                                                int channel, int mode) {
+  self->api = api;
+  self->mode = mode;
   self->vtable = reinterpret_cast<void**>(kVtQueuedDataPacketEx);
   soeutil::ByteStream& stream = self->stream;
   stream.inlineArray.data = nullptr;
@@ -123,10 +123,46 @@ QueuedDataPacketEx* QueuedDataPacketExConstruct(QueuedDataPacketEx* self, uint64
   stream.writePos = 0;
   stream.array = &stream.inlineArray;
   stream.maxSize = soeutil::kByteStreamMaxSize;
-  self->extra = extra;
+  self->channel = channel;
   soeutil::StreamPut(&stream, data, length);
   return self;
 }
+
+const uint8_t* StreamBytes(const soeutil::ByteStream& stream) {
+  return stream.array->size != 0 ? stream.array->data : nullptr;
+}
+
+// 0x14063bf20 (QueuedDataPacket slot 1): send through the gateway api.
+bool QueuedDataPacketSend(QueuedDataPacket* self) {
+  int mode = self->mode;
+  if (mode < 0) return false;
+  int size = self->stream.array->size;
+  if (mode <= 1) return game::Call<bool (*)(uint8_t*, const uint8_t*, int, bool)>(0x14162db20)(self->api, StreamBytes(self->stream), size, mode == 1);
+  if (mode == 2) return game::Call<bool (*)(uint8_t*, const uint8_t*, int)>(0x14162dba0)(self->api, StreamBytes(self->stream), size);
+  return false;
+}
+
+// 0x14063bf90 (QueuedDataPacketEx slot 1): send as a tunnel packet.
+bool QueuedDataPacketExSend(QueuedDataPacketEx* self) {
+  int mode = self->mode;
+  if (mode < 0) return false;
+  using TunnelFn = bool (*)(uint8_t*, const uint8_t*, int, uint8_t, bool, bool);
+  int size = self->stream.array->size;
+  if (mode <= 1)
+    return game::Call<TunnelFn>(0x14162dcc0)(self->api, StreamBytes(self->stream), size,
+                                             static_cast<uint8_t>(self->channel), mode == 1, false);
+  if (mode == 2)
+    return game::Call<TunnelFn>(0x14162dcc0)(self->api, StreamBytes(self->stream), size,
+                                             static_cast<uint8_t>(self->channel), true, true);
+  return false;
+}
+
+// Slot 2: 8 for the base/data packets, the channel for tunnel packets.
+int QueuedPacketKind(QueuedPacket*) { return 8; }                              // 0x14063bbc0
+int QueuedDataPacketExChannel(QueuedDataPacketEx* self) { return self->channel; }  // 0x14063bbd0
+// Slot 3: the payload stream (none for the base/data variants).
+void* QueuedPacketStreamNone(QueuedPacket*) { return nullptr; }                   // 0x14063bc80
+soeutil::ByteStream* QueuedDataPacketExStream(QueuedDataPacketEx* self) { return &self->stream; }  // 0x14063bc90
 
 // Intrusive list of queued packets at connection+0x10 (vtable 0x1420dd230).
 struct PacketListNode {
@@ -142,6 +178,27 @@ struct PacketList {
   int padding;
 };
 static_assert(sizeof(PacketList) == 0x20);
+
+bool ThreadAllocatorActive() { return *reinterpret_cast<uint64_t*>(0x143e09638) != 0; }
+
+// 0x14063b8c0 (PacketList slot 2): allocate a 0x18-byte node.
+void* PacketListAllocateNode(PacketList*) {
+  if (!ThreadAllocatorActive())
+    return game::Call<void* (*)(size_t, const void*)>(0x1402fc150)(0x18, reinterpret_cast<const void*>(0x143c46658));  // new[](nothrow)
+  return game::Call<void* (*)(size_t, size_t)>(0x14032f910)(0x18, 8);
+}
+
+// 0x14063bba0 (PacketList slot 3): free a node.
+void PacketListFreeNode(PacketList*, PacketListNode* node) {
+  if (!ThreadAllocatorActive()) {
+    soeutil::FreeArray(node);
+    return;
+  }
+  game::Call<void (*)(void*, size_t, void*)>(0x14032f980)(node, 8, node);
+}
+
+// 0x14063be00 (PacketList slot 1): always true.
+bool PacketListAlwaysTrue(PacketList*) { return true; }
 
 // 0x14063b640: unlink and free every node (slot 3 frees a node).
 void PacketListDestroy(PacketList* list) {
@@ -238,6 +295,15 @@ REBUILD_FUNCTION(GatewayQueuedPacket_DeletingDestructor, 0x14063b750, QueuedPack
 REBUILD_FUNCTION(GatewayQueuedDataPacket_DeletingDestructor, 0x14063b780, QueuedDataPacketDeletingDestructor);
 REBUILD_FUNCTION(GatewayQueuedDataPacketEx_DeletingDestructor, 0x14063b7d0, QueuedDataPacketExDeletingDestructor);
 REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Construct, 0x14063b590, QueuedDataPacketExConstruct);
+REBUILD_FUNCTION(GatewayQueuedDataPacket_Send, 0x14063bf20, QueuedDataPacketSend);
+REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Send, 0x14063bf90, QueuedDataPacketExSend);
+REBUILD_FUNCTION(GatewayQueuedPacket_Kind, 0x14063bbc0, QueuedPacketKind);
+REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Channel, 0x14063bbd0, QueuedDataPacketExChannel);
+REBUILD_FUNCTION_TOO_SMALL(GatewayQueuedPacket_StreamNone, 0x14063bc80, QueuedPacketStreamNone);
+REBUILD_FUNCTION(GatewayQueuedDataPacketEx_Stream, 0x14063bc90, QueuedDataPacketExStream);
+REBUILD_FUNCTION(GatewayPacketList_AllocateNode, 0x14063b8c0, PacketListAllocateNode);
+REBUILD_FUNCTION(GatewayPacketList_FreeNode, 0x14063bba0, PacketListFreeNode);
+REBUILD_FUNCTION_TOO_SMALL(GatewayPacketList_AlwaysTrue, 0x14063be00, PacketListAlwaysTrue);
 REBUILD_FUNCTION(GatewayConnection_GetReliableStats, 0x14063bbe0, GatewayConnectionGetReliableStats);
 REBUILD_FUNCTION(GatewayConnection_Value1C0, 0x14063bbf0, GatewayConnectionValue1C0);
 REBUILD_FUNCTION(GatewayConnection_Value1C4, 0x14063bc50, GatewayConnectionValue1C4);
