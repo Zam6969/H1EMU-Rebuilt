@@ -274,6 +274,52 @@ void ZoneClientDestroy(uint8_t* self) {
   game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd620);
 }
 
+// Container node allocation, matching FreeContainerStorage: SoeUtil allocator
+// (8-aligned) while any thread has its own, else new[](nothrow).
+void* AllocateContainerStorage(size_t size) {
+  if (*reinterpret_cast<uint64_t*>(0x143e09638) == 0)
+    return game::Call<void* (*)(size_t, const void*)>(0x1402fc150)(size, reinterpret_cast<const void*>(0x143c46658));
+  return soeutil::MemoryAllocate(static_cast<int>(size), 8);
+}
+
+// Vtable slot 3 of the three zone client containers: free one node.
+void ZoneContainerFreeNode(void*, void* node) { FreeContainerStorage(node); }  // 0x14063d750/770/790
+
+// Slot 2 of the two lists: allocate a node.
+void* ZoneListAllocateNode(void*) { return AllocateContainerStorage(0x20); }          // 0x14063d530
+void* ZoneStreamListAllocateNode(void*) { return AllocateContainerStorage(0x2048); }  // 0x14063d560
+
+// Scalar deleting destructors.
+ZoneArray* ZoneArrayDeletingDestructor(ZoneArray* self, unsigned flags) {  // 0x14063d1f0
+  ZoneArrayDestroy(self);
+  if (flags & 1) soeutil::Free(self, sizeof(ZoneArray));
+  return self;
+}
+uint8_t* ZoneListDeletingDestructor(uint8_t* self, unsigned flags) {  // 0x14063d260
+  ZoneListDestroy(self);
+  if (flags & 1) soeutil::Free(self, 0x20);
+  return self;
+}
+uint8_t* ZoneStreamListDeletingDestructor(uint8_t* self, unsigned flags) {  // 0x14063d2a0
+  game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd6c0);
+  ZoneStreamListClear(self);
+  if (flags & 1) soeutil::Free(self, 0x20);
+  return self;
+}
+uint8_t* ZoneClientDeletingDestructor(uint8_t* self, unsigned flags) {  // 0x14063d370
+  ZoneClientDestroy(self);
+  if (flags & 1) soeutil::Free(self, 0x2B8);
+  return self;
+}
+// 0x14063d3b0: the gateway listener base (vtable 0x1420dd620, 8 bytes).
+uint8_t* GatewayListenerDeletingDestructor(uint8_t* self, unsigned flags) {
+  game::Field<void*>(self, 0) = reinterpret_cast<void*>(0x1420dd620);
+  if (flags & 1) soeutil::Free(self, 8);
+  return self;
+}
+
+bool ZoneAlwaysTrue(void*) { return true; }  // 0x14063db30 / 0x14063db40
+
 // Slots 3, 4, 5, 9: `ret 0` - nothing to do.
 void ZoneClientIgnore() {}
 
@@ -283,6 +329,22 @@ REBUILD_FUNCTION(ZoneClient_RecordDestroy, 0x14063cf70, ZoneRecordDestroy);
 REBUILD_FUNCTION(ZoneClient_ArrayDestroy, 0x14063ce60, ZoneArrayDestroy);
 REBUILD_FUNCTION(ZoneClient_ListDestroy, 0x14063cec0, ZoneListDestroy);
 REBUILD_FUNCTION(ZoneClient_StreamListClear, 0x14063e1c0, ZoneStreamListClear);
+REBUILD_FUNCTION(ZoneClient_DeletingDestructor, 0x14063d370, ZoneClientDeletingDestructor);
+REBUILD_FUNCTION(GatewayListener_DeletingDestructor, 0x14063d3b0, GatewayListenerDeletingDestructor);
+REBUILD_FUNCTION(ZoneClient_ArrayDeletingDestructor, 0x14063d1f0, ZoneArrayDeletingDestructor);
+REBUILD_FUNCTION(ZoneClient_ListDeletingDestructor, 0x14063d260, ZoneListDeletingDestructor);
+REBUILD_FUNCTION(ZoneClient_StreamListDeletingDestructor, 0x14063d2a0, ZoneStreamListDeletingDestructor);
+REBUILD_FUNCTION(ZoneClient_ArrayFreeNode, 0x14063d750, ZoneContainerFreeNode);
+REBUILD_FUNCTION(ZoneClient_ListFreeNode, 0x14063d770, ZoneContainerFreeNode);
+REBUILD_FUNCTION(ZoneClient_StreamListFreeNode, 0x14063d790, ZoneContainerFreeNode);
+REBUILD_FUNCTION(ZoneClient_ListAllocateNode, 0x14063d530, ZoneListAllocateNode);
+REBUILD_FUNCTION(ZoneClient_StreamListAllocateNode, 0x14063d560, ZoneStreamListAllocateNode);
+REBUILD_FUNCTION_TOO_SMALL(ZoneClient_ListAlwaysTrue, 0x14063db30, ZoneAlwaysTrue);
+REBUILD_FUNCTION_TOO_SMALL(ZoneClient_StreamListAlwaysTrue, 0x14063db40, ZoneAlwaysTrue);
+REBUILD_FUNCTION_TOO_SMALL(GatewayListener_Slot1, 0x14063dbf0, ZoneClientIgnore);
+REBUILD_FUNCTION_TOO_SMALL(GatewayListener_Slot2, 0x14063de10, ZoneClientIgnore);
+REBUILD_FUNCTION_TOO_SMALL(GatewayListener_Slot3, 0x14063de30, ZoneClientIgnore);
+REBUILD_FUNCTION_TOO_SMALL(ZoneClient_ArraySlot3, 0x14063db50, ZoneClientIgnore);
 REBUILD_FUNCTION(ZoneClient_OnConnect, 0x14063dbb0, ZoneClientOnConnect);
 REBUILD_FUNCTION(ZoneClient_OnChannelIsRoutable, 0x14063db80, ZoneClientOnChannelIsRoutable);
 REBUILD_FUNCTION(ZoneClient_OnConnectionIsNotRoutable, 0x14063dc00, ZoneClientOnConnectionIsNotRoutable);
