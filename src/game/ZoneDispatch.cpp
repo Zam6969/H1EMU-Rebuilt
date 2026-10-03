@@ -7,6 +7,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/String.h"
 
 namespace rebuild::game_net {
 namespace {
@@ -147,6 +148,30 @@ struct Packet3Strings {
 };
 static_assert(offsetof(Packet3Strings, value) == 0x58);
 
+struct FlagStringPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  bool flag;
+  soeutil::IString text;  // +0x18
+};
+static_assert(offsetof(FlagStringPacket, text) == 0x18 && sizeof(FlagStringPacket) == 0x30);
+
+struct IdListPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  void** arrayVtable;  // +0x10
+  uint64_t* ids;
+  int count;
+  int capacity;
+  int mode;   // 2: one action, else action(mode == 1, value)
+  int value;
+};
+static_assert(offsetof(IdListPacket, mode) == 0x28 && sizeof(IdListPacket) == 0x30);
+
+constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
+
 constexpr size_t kPacket33Size = 0x450;  // two StringFixed<512> at +0x10 / +0x230
 // Packets whose nested constructors are not sized yet get this much room
 // (over-allocating stack is harmless; under-allocating is not).
@@ -187,7 +212,7 @@ void ReadAndHandle(uint8_t* game, uint8_t* packet, uintptr_t ctor, uintptr_t rea
     if (!static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0)
       game::Call<void (*)(uint8_t*, uint8_t*)>(handler)(game, packet);
   }
-  game::Call<void (*)(uint8_t*)>(dtor)(packet + dtorOffset);
+  if (dtor) game::Call<void (*)(uint8_t*)>(dtor)(packet + dtorOffset);
 }
 
 }  // namespace
@@ -835,6 +860,57 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       ReadAndHandle(game, opaque, 0x14039aa10, 0x1403675a0, 0x140409a60, 0x1403ad0b0, 0, data, length);
       result = false;
       break;
+    case 0xC5: {
+      FlagStringPacket packet{reinterpret_cast<void**>(0x142063c90), 0xC5, 0, false,
+                              {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0}};
+      using ReadFn = bool (*)(FlagStringPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038dfc0)(&packet, data, length, false)) {
+        int reason;
+        if (packet.flag) {
+          auto* text = reinterpret_cast<soeutil::IString*>(game + kOpcodeC5String);
+          soeutil::StringAssignString(text, &packet.text);
+          game::Call<void (*)(void*, soeutil::IString*)>(0x1407385d0)(Member(game, 0x7170), text);
+          game::Field<bool>(Member(game, 0x7170), 0x158) = true;
+          reason = 0x1E;
+        } else {
+          *reinterpret_cast<int*>(0x142b176c4) = 7;
+          reason = 0x23;
+        }
+        game::Call<void (*)(uint8_t*, int)>(0x140474de0)(game, reason);
+      }
+      game::Call<void (*)(FlagStringPacket*)>(0x1403b04e0)(&packet);
+      break;
+    }
+    case 0xD5: {
+      IdListPacket packet{reinterpret_cast<void**>(0x142064308), 0xD5, 0, reinterpret_cast<void**>(0x1420642e8),
+                          nullptr, 0, 0, 0, 0};
+      using ReadFn = bool (*)(IdListPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038bf90)(&packet, data, length, false)) {
+        for (int i = 0; i < packet.count; ++i) {
+          uint64_t id = packet.ids[i];
+          auto* object = game::Call<uint8_t* (*)(uint8_t*, uint64_t*)>(0x1403f83f0)(game, &id);
+          if (!object) continue;
+          if (packet.mode == 2)
+            game::Call<void (*)(uint8_t*)>(0x140533080)(object);
+          else
+            game::Call<void (*)(uint8_t*, bool, int)>(0x1405361e0)(object, packet.mode == 1, packet.value);
+        }
+      }
+      game::Call<void (*)(IdListPacket*)>(0x1403b0e70)(&packet);
+      result = false;
+      break;
+    }
+    case 0xD8: {
+      ReadAndHandle(game, opaque, 0x14039a080, 0x1403664d0, 0x1403fdd60, 0, 0, data, length);
+      // Inlined member destructors, then the shared packet destructor.
+      auto* text = reinterpret_cast<soeutil::IString*>(opaque + 0x360);
+      text->vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(text);
+      game::Call<void (*)(uint8_t*)>(0x1417f2750)(opaque + 0x1C0);
+      game::Call<void (*)(uint8_t*)>(0x1403ac9f0)(opaque);
+      result = false;
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
@@ -843,8 +919,8 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30: case 0x35:
     case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
     case 0x78: case 0x7D: case 0x99:
-    case 0xC5: case 0xD5:
-    case 0xD8: case 0xDE: case 0xE3:
+   
+    case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
