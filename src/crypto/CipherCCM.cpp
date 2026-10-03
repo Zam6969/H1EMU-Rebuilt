@@ -1,7 +1,8 @@
 // Crypto::CipherCCM (cipher type 2): AES-CCM authenticated encryption with a
 // 13-byte nonce (PRNG part + send counter) and a 16-byte tag appended to each
-// message; receive side rejects replays by nonce counter. Encode / Decode are
-// not rebuilt yet; the CCM primitives are a bundled crypto library.
+// message; receive side rejects replays by nonce counter. The CCM primitives
+// themselves (0x141604450 encrypt+tag, 0x141604330 decrypt+verify) are a
+// bundled crypto library and are still called by address.
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -49,6 +50,7 @@ constexpr int kCipherTypeCCM = 2;
 constexpr int kOverhead = 0x1D;  // 16-byte tag + 13-byte nonce
 
 uint64_t InitialCounter() { return *reinterpret_cast<uint64_t*>(0x143c77cb0); }
+
 
 }  // namespace
 
@@ -184,6 +186,116 @@ void CipherCCMCountBlocks(CipherCCM* cipher, int length) {
   if (cipher->blocks <= before) ++cipher->blockWraps;
 }
 
+// SoeUtil::Array<unsigned char,16,1>: the CCM tag with 16 inline bytes.
+struct TagArray {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+  uint8_t inlineBytes[16];
+};
+static_assert(offsetof(TagArray, inlineBytes) == 0x18);
+
+constexpr uintptr_t kVtTagArray = 0x1424b3b30;
+constexpr int kNonceBytes = 13;
+constexpr int kTagBytes = 16;
+
+void WriteBytes(void* array, int position, const void* source, int count) {
+  game::Call<void (*)(void*, int, const void*, int)>(0x14030d520)(array, position, source, count);
+}
+
+// Wipes the nonce's 13 bytes (not null-checked, as in the original).
+void WipeNonce(NonceArray* nonce) {
+  uint8_t* bytes = nonce->size != 0 ? nonce->data : nullptr;
+  *reinterpret_cast<uint64_t*>(bytes) = 0;
+  *reinterpret_cast<uint32_t*>(bytes + 8) = 0;
+  bytes[12] = 0;
+}
+
+// 0x1415fd520 (slot 4): Encode(plain, length, out) -> out = ciphertext | tag |
+// nonce. Returns 1, or -4 if the CCM primitive fails.
+int CipherCCMEncode(CipherCCM* cipher, const uint8_t* plain, int length, ByteArray* out) {
+  int size = reinterpret_cast<int (*)(CipherCCM*, int)>(cipher->vtable[2])(cipher, length);
+  if (size > out->size)
+    game::Call<void (*)(ByteArray*, int)>(0x140339a70)(out, size);  // Array::Resize
+  else
+    out->size = size;
+  uint64_t randomSlot;
+  using RandomFn = uint64_t* (*)(uint8_t*, uint64_t*, int);
+  uint64_t random = *reinterpret_cast<RandomFn>((*reinterpret_cast<void***>(cipher->prng))[2])(cipher->prng, &randomSlot, 8);
+  uint64_t counter = ++cipher->sendCounter;
+  uint32_t random32 = static_cast<uint32_t>(random);
+  NonceArray nonce;
+  BuildNonce(&nonce, &counter, &random32, static_cast<uint8_t>(random >> 32));
+  uint8_t* outBytes = out->size != 0 ? out->data : nullptr;
+  const uint8_t* nonceBytes = nonce.size != 0 ? nonce.data : nullptr;
+  using EncryptFn = int (*)(const uint8_t*, int, const uint8_t*, int, const uint8_t*, int, uint8_t*, uint8_t*, int, uint8_t*);
+  int result;
+  if (game::Call<EncryptFn>(0x141604450)(nonceBytes, kNonceBytes, nullptr, 0, plain, length, outBytes,
+                                         outBytes + length, kTagBytes, cipher->context) != 0) {
+    result = -4;
+  } else {
+    WriteBytes(out, length + kTagBytes, nonce.size != 0 ? nonce.data : nullptr, kNonceBytes);
+    CipherCCMCountBlocks(cipher, length);
+    result = 1;
+  }
+  WipeNonce(&nonce);
+  DestroyNonce(&nonce);
+  return result;
+}
+
+bool MatchesStatic(const uint8_t* bytes, uintptr_t reference, int count) {
+  return std::memcmp(bytes, reinterpret_cast<const void*>(reference), count) == 0;
+}
+
+// 0x1415fd200 (slot 5): Decode(data, length, &plainLength) in place. Returns
+// 1; -2 bad/zero nonce, -1 bad/zero tag, -3 replayed counter, -4 auth failure.
+int CipherCCMDecode(CipherCCM* cipher, uint8_t* data, int length, int* plainLength) {
+  int plain = length - (kTagBytes + kNonceBytes);
+  const uint8_t* trailer = data + plain;
+  TagArray tag{reinterpret_cast<void**>(kVtTagArray), nullptr, 0, 0, {}};
+  WriteBytes(&tag, 0, trailer, kTagBytes);
+  NonceArray nonce;
+  nonce.vtable = reinterpret_cast<void**>(kVtNonceArray);
+  nonce.data = nullptr;
+  nonce.size = 0;
+  nonce.capacity = 0;
+  WriteBytes(&nonce, 0, trailer + kTagBytes, kNonceBytes);
+  int result;
+  // Compare against the all-zero nonce / tag constants (8+4+1 and 8+8 bytes).
+  if (nonce.size != kNonceBytes || (MatchesStatic(nonce.data, 0x143c77c80, 8) && MatchesStatic(nonce.data + 8, 0x143c77c88, 4) &&
+                                    nonce.data[12] == *reinterpret_cast<const uint8_t*>(0x143c77c8c))) {
+    result = -2;
+  } else if (tag.size != kTagBytes ||
+             (MatchesStatic(tag.data, 0x143c77c70, 8) && MatchesStatic(tag.data + 8, 0x143c77c78, 8))) {
+    result = -1;
+  } else {
+    uint64_t counter = *reinterpret_cast<uint64_t*>(nonce.data);
+    if (counter <= cipher->lastReceived) {
+      result = -3;
+    } else {
+      using DecryptFn = int (*)(const uint8_t*, int, const uint8_t*, int, const uint8_t*, int, uint8_t*, const uint8_t*, int, uint8_t*);
+      if (game::Call<DecryptFn>(0x141604330)(nonce.data, kNonceBytes, nullptr, 0, data, plain, data, tag.data, kTagBytes,
+                                             cipher->context) != 0) {
+        result = -4;
+      } else {
+        const uint8_t* bytes = nonce.size != 0 ? nonce.data : nullptr;
+        cipher->lastReceived = bytes + 8 <= bytes + nonce.size ? *reinterpret_cast<const uint64_t*>(bytes) : 0;
+        *plainLength = plain;
+        CipherCCMCountBlocks(cipher, plain);
+        result = 1;
+      }
+    }
+  }
+  WipeNonce(&nonce);
+  DestroyNonce(&nonce);
+  uint8_t* tagBytes = tag.size != 0 ? tag.data : nullptr;
+  *reinterpret_cast<uint64_t*>(tagBytes) = 0;
+  *reinterpret_cast<uint64_t*>(tagBytes + 8) = 0;
+  game::Call<void (*)(TagArray*)>(0x1415fcdd0)(&tag);
+  return result;
+}
+
 REBUILD_FUNCTION(Crypto_CipherCCM_Construct, 0x1415fcaf0, CipherCCMConstruct);
 REBUILD_FUNCTION(Crypto_CipherCCM_Destroy, 0x1415fd130, CipherCCMDestroy);
 REBUILD_FUNCTION(Crypto_CipherCCM_Init, 0x1415fd910, CipherCCMInit);
@@ -196,6 +308,8 @@ REBUILD_FUNCTION(Crypto_CipherCCM_NeedsRekey, 0x1415fdcc0, CipherCCMNeedsRekey);
 REBUILD_FUNCTION(Crypto_CipherCCM_BuildNonce, 0x1415fcbb0, BuildNonce);
 REBUILD_FUNCTION(Crypto_NonceArray_Destroy, 0x1415fce70, DestroyNonce);
 REBUILD_FUNCTION(Crypto_CipherCCM_CountBlocks, 0x1415fd8d0, CipherCCMCountBlocks);
+REBUILD_FUNCTION(Crypto_CipherCCM_Encode, 0x1415fd520, CipherCCMEncode);
+REBUILD_FUNCTION(Crypto_CipherCCM_Decode, 0x1415fd200, CipherCCMDecode);
 REBUILD_FUNCTION_TOO_SMALL(Crypto_CipherCCM_False, 0x1415fdae0, CipherCCMFalse);
 
 }  // namespace rebuild::crypto
