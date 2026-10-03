@@ -56,6 +56,40 @@ struct ValuePacket {
 };
 static_assert(offsetof(ValuePacket, value) == 0x10);
 
+// Stack packet with one IString (e.g. KickedFromServer).
+struct PacketString {
+  void** vtable;
+  char* data;
+  int length;
+  int capacity;
+};
+struct StringPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  PacketString text;
+};
+static_assert(offsetof(StringPacket, text) == 0x10 && sizeof(StringPacket) == 0x28);
+
+struct ValueFlagPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  int value;
+  bool flag;
+  uint8_t reserved[0x43];  // slack: the packet's full size is not pinned down yet
+};
+static_assert(offsetof(ValueFlagPacket, flag) == 0x14);
+
+struct U64Packet {
+  void** vtable;
+  uint64_t opcode;  // written as a qword
+  uint64_t value;
+};
+static_assert(offsetof(U64Packet, value) == 0x10);
+
+constexpr size_t kKickReason = 0x3D520;       // IString
+constexpr size_t kOpcode69Value = 0x38DB0;    // int; >= 0x12 sets a flag on the extension object's +0x28 child
 constexpr size_t kLoginFailed = 0x38838;      // bool
 constexpr size_t kInitialDataDone = 0x3883B;  // bool, set by ZoneDoneSendingInitialData
 constexpr size_t kOpcode32Value = 0x38BEC;    // int (meaning not identified yet)
@@ -475,15 +509,57 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       if (!player) break;
       Route(0x140662370, game::Field<void*>(state, 0x96BE8), data, length);
       break;
+    case 0x2F: {  // KickedFromServer
+      StringPacket packet{reinterpret_cast<void**>(0x142063c58), 0x2F, 0,
+                          {reinterpret_cast<void**>(0x142049dc8), reinterpret_cast<char*>(0x143e09641), 0, 0}};
+      using ReadFn = bool (*)(StringPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038b000)(&packet, data, length, true)) {
+        game::Call<void (*)(uint8_t*, const char*)>(0x1402bd670)(game + kKickReason, packet.text.data);
+        game::Call<void (*)(const char*, const char*, const char*)>(0x1402bab70)(
+            reinterpret_cast<const char*>(0x142054710), reinterpret_cast<const char*>(0x14206dfc8),
+            packet.text.data);  // "RECEIVED=KickedFromServer: %s"
+      }
+      game::Call<void (*)(StringPacket*)>(0x1403b0700)(&packet);
+      break;
+    }
+    case 0x69: {
+      ValuePacket packet{reinterpret_cast<void**>(0x142063da8), 0x69, 0, 0};
+      using ReadFn = bool (*)(ValuePacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038c3d0)(&packet, data, length, true)) {
+        game::Field<int>(game, kOpcode69Value) = packet.value;
+        auto* target = game::Field<uint8_t*>(GlobalObject(0x142b19cc0), 0x28);
+        game::Field<bool>(target, 0x80) = packet.value >= 0x12;
+        reinterpret_cast<void (*)(uint8_t*)>((*reinterpret_cast<void***>(target))[5])(target);
+      }
+      break;
+    }
+    case 0xAB: {
+      ValueFlagPacket packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142064390);
+      packet.opcode = 0xAB;
+      packet.value = *reinterpret_cast<int*>(0x142b186ac);
+      packet.flag = false;
+      using ReadFn = bool (*)(ValueFlagPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x140389300)(&packet, data, length, false))
+        reinterpret_cast<void (*)(uint8_t*, ValueFlagPacket*)>((*reinterpret_cast<void***>(game))[0x250 / 8])(game, &packet);
+      break;
+    }
+    case 0xAF: {
+      U64Packet packet{reinterpret_cast<void**>(0x1420643a0), 0xAF, *reinterpret_cast<uint64_t*>(0x142b181f8)};
+      using ReadFn = bool (*)(U64Packet*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x140388b40)(&packet, data, length, false))
+        game::Call<void (*)(void*, uint64_t*)>(0x14071c9a0)(Member(game, 0x710C), &packet.value);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x25: case 0x2C: case 0x2F: case 0x30: case 0x33: case 0x35:
+    case 0x03: case 0x08: case 0x0B: case 0x16: case 0x25: case 0x2C: case 0x30: case 0x33: case 0x35:
     case 0x3D: case 0x3E: case 0x3F: case 0x40: case 0x43: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
-    case 0x69: case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAA: case 0xAB: case 0xAE:
-    case 0xAF: case 0xB0: case 0xB1: case 0xB6: case 0xB9: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
+    case 0x78: case 0x79: case 0x7D: case 0x97: case 0x99: case 0xA8: case 0xAA: case 0xAE:
+    case 0xB0: case 0xB1: case 0xB6: case 0xB9: case 0xC5: case 0xCB: case 0xD5: case 0xD6: case 0xD7:
     case 0xD8: case 0xDB: case 0xDC: case 0xDE: case 0xE3: case 0xE6: case 0xEE:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
