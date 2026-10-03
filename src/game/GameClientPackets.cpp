@@ -945,6 +945,82 @@ void GameClientLog(uint8_t* game, int level, const char* channel, const char* fo
   soeutil::MutexUnlock(mutex);
 }
 
+// 0x14040e7a0 (slot 81): read the client options from the ini at +0x38E30
+// (global section ""): Country ("US"), LoadingScreenId, SpecialLoadingScreenId,
+// LiveGamer (true), Steam_Enabled, UseNewUI, ShowSplashScreens (true).
+void GameClientLoadOptions(uint8_t* game) {
+  const char* section = reinterpret_cast<const char*>(0x142046fcb);  // ""
+  auto ini = [&] { return game::Field<void*>(game, 0x38E30); };
+  soeutil::StringFixed<8> country;
+  country.vtable = reinterpret_cast<void**>(0x1424b9f98);
+  country.data = soeutil::EmptyStringData();
+  country.length = 0;
+  country.capacity = 0;
+  using GetStringFn = void (*)(void*, const char*, const char*, const char*, soeutil::IString*, bool, int, int);
+  game::Call<GetStringFn>(0x1403334f0)(ini(), section, reinterpret_cast<const char*>(0x14206ced8),
+                                       reinterpret_cast<const char*>(0x14206bad8), &country, false, -1, -1);  // "Country", "US"
+  using GetIntFn = int (*)(void*, const char*, const char*, int, bool, int, int);
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  int loadingScreen = game::Call<GetIntFn>(0x1403050e0)(ini(), section, reinterpret_cast<const char*>(0x14206cee0), -1, false, -1, -1);
+  int specialScreen = game::Call<GetIntFn>(0x1403050e0)(ini(), section, reinterpret_cast<const char*>(0x14206cef0), -1, false, -1, -1);
+  bool liveGamer = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206cf08), true, false, -1, -1);
+  bool steam = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206cf18), false, false, -1, -1);
+  bool newUi = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206cf28), false, false, -1, -1);
+  bool splash = game::Call<GetBoolFn>(0x1403051c0)(ini(), section, reinterpret_cast<const char*>(0x14206cf38), true, false, -1, -1);
+  game::Field<int>(game, 0x38E80) = loadingScreen;
+  game::Field<int>(game, 0x38E84) = specialScreen;
+  soeutil::StringAssign(game + 0x38E88, country.data);
+  game::Field<bool>(game, 0x38EB0) = liveGamer;
+  game::Field<bool>(game, 0x38EB1) = steam;
+  game::Field<bool>(game, 0x38EB2) = newUi;
+  game::Field<bool>(game, 0x38EB4) = splash;
+  country.vtable = reinterpret_cast<void**>(0x1424b9ee0);  // IStringFixed<char,8>
+  soeutil::StringRelease(&country);
+}
+
+// 0x1404106d0 (slot 80): start logging - open "H1Z1.log" in the log folder
+// (default "./Logs", optionally wiped first), apply the log settings, and
+// write the startup lines (version, command line, launcher).
+void GameClientStartLogging(uint8_t* game) {
+  void* console = game::Field<void*>(game, 0x10);
+  game::Call<void (*)(void*, const char*)>(0x140310480)(console, reinterpret_cast<const char*>(0x142054700));  // "H1Z1.log"
+  auto* baseVtable = reinterpret_cast<void**>(0x142049da8);
+  auto* fixedVtable = reinterpret_cast<void**>(0x142049dc8);
+  // Plain IStrings: the base vtable (0x142049da8) while assigning, then 0x142049dc8.
+  soeutil::IString folder{baseVtable, soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringAssign(&folder, reinterpret_cast<const char*>(0x14206ce58));  // "./Logs"
+  folder.vtable = fixedVtable;
+  auto* settings = static_cast<uint8_t*>(*reinterpret_cast<void**>(0x142b199f0));
+  soeutil::IString configured;
+  soeutil::IString* path = game::Call<soeutil::IString* (*)(void*, soeutil::IString*)>(0x1403f6ba0)(settings, &configured);
+  soeutil::StringAssignString(&folder, path);
+  configured.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&configured);
+  settings = static_cast<uint8_t*>(*reinterpret_cast<void**>(0x142b199f0));
+  game::Call<void (*)(void*, int)>(0x140310570)(console, game::Field<int>(settings, 0x334C));
+  game::Call<void (*)(void*, int)>(0x140310840)(console, game::Field<int>(settings, 0x3348));
+  game::Call<void (*)(void*, int)>(0x140310470)(console, game::Field<int>(settings, 0x3350));
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  if (game::Call<GetBoolFn>(0x1403051c0)(game::Field<void*>(game, 0x38E30), reinterpret_cast<const char*>(0x142046fcb),
+                                         reinterpret_cast<const char*>(0x14206ce60), true, false, -1, -1))  // "DeleteExistingLogs"
+    game::Call<void (*)(const char*, bool)>(0x1403382e0)(folder.data, true);
+  game::Call<void (*)(void*, const char*)>(0x140310580)(console, folder.data);
+  using LogFn = void (*)(const char*, const char*, ...);
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206ce78));  // "Starting the game client."
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206ce98),
+                                 *reinterpret_cast<const char**>(0x1429fbd88));  // "Client version: %s"
+  auto getCommandLine = *reinterpret_cast<const char* (**)()>(0x1440a0140);
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206ceb0), getCommandLine());  // "Command line: %s"
+  soeutil::IString launcher{fixedVtable, soeutil::EmptyStringData(), 0, 0};
+  int unused = 0;
+  game::Call<void (*)(soeutil::IString*, int*)>(0x1413432d0)(&launcher, &unused);
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206cec8), launcher.data);  // "Launched by: %s"
+  launcher.vtable = baseVtable;
+  soeutil::StringRelease(&launcher);
+  folder.vtable = baseVtable;
+  soeutil::StringRelease(&folder);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -986,6 +1062,8 @@ REBUILD_FUNCTION(GameClient_HandlePacket6F, 0x140408b70, GameClientHandlePacket6
 REBUILD_FUNCTION(GameClient_HandlePacket42, 0x140409d50, GameClientHandlePacket42);
 REBUILD_FUNCTION(GameClient_HandlePacketE2, 0x14040bee0, GameClientHandlePacketE2);
 REBUILD_FUNCTION(GameClient_Log, 0x1404307d0, GameClientLog);
+REBUILD_FUNCTION(GameClient_LoadOptions, 0x14040e7a0, GameClientLoadOptions);
+REBUILD_FUNCTION(GameClient_StartLogging, 0x1404106d0, GameClientStartLogging);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
