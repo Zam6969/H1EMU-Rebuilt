@@ -12,6 +12,7 @@
 #include "soeutil/Allocator.h"
 #include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
+#include "soeutil/Mutex.h"
 
 namespace rebuild::crypto {
 namespace {
@@ -296,6 +297,71 @@ int CipherCCMDecode(CipherCCM* cipher, uint8_t* data, int length, int* plainLeng
   return result;
 }
 
+
+// Crypto::ArraySecure<unsigned char,32,1> as built on the stack by the seeder.
+struct SeedArray {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+  uint8_t inlineBytes[32];
+};
+static_assert(offsetof(SeedArray, inlineBytes) == 0x18 && sizeof(SeedArray) == 0x38);
+
+void FreeSeedStorage(void* memory) {
+  if (*reinterpret_cast<uint64_t*>(0x143e09638) == 0)
+    soeutil::FreeArray(memory);
+  else
+    soeutil::MemoryFree(memory, 1);
+}
+
+// 0x1415fdaf0: seed the nonce PRNG (slot 1 of the Prng at +0x38) with 8 words
+// from SoeUtil's shared LCG (0x142b06c38, guarded by 0x142b06bf0), each XORed
+// with 0x14032e6c0().
+bool CipherCCMSeedPrng(CipherCCM* cipher) {
+  uint32_t salt = static_cast<uint32_t>(game::Call<uint64_t (*)()>(0x14032e6c0)());
+  SeedArray seed{reinterpret_cast<void**>(0x1424b3ba8), nullptr, 0, 0, {}};
+  auto* mutex = reinterpret_cast<CRITICAL_SECTION*>(0x142b06bf0);
+  auto& state = *reinterpret_cast<uint32_t*>(0x142b06c38);
+  for (int i = 0; i < 8; ++i) {
+    soeutil::MutexLock(mutex);
+    uint32_t word = state * 0x7FF8A3ED + 0x2AA01D31;
+    state = word;
+    soeutil::MutexUnlock(mutex);
+    word ^= salt;
+    if (seed.size + 4 > seed.capacity) {
+      int capacity;
+      using AllocFn = uint8_t* (*)(SeedArray*, int, int*, bool);
+      uint8_t* grown = reinterpret_cast<AllocFn>(seed.vtable[1])(&seed, seed.size + 4, &capacity, false);
+      if (grown != seed.data) {
+        if (seed.data) {
+          game::Call<void (*)(void*, const void*, size_t)>(0x140d11e20)(grown, seed.data, seed.size);  // memcpy
+          reinterpret_cast<void (*)(SeedArray*, uint8_t*, int)>(seed.vtable[2])(&seed, seed.data, seed.capacity);
+        }
+        seed.data = grown;
+        seed.capacity = capacity;
+      }
+    }
+    *reinterpret_cast<uint32_t*>(seed.data + seed.size) = word;
+    seed.size += 4;
+  }
+  using SeedFn = bool (*)(uint8_t*, SeedArray*);
+  bool ok = reinterpret_cast<SeedFn>((*reinterpret_cast<void***>(cipher->prng))[1])(cipher->prng, &seed);
+  // Inlined ~ArraySecure<uchar,32,1> / ~Array<uchar,32,1> / ~Array<uchar,0,1>.
+  seed.vtable = reinterpret_cast<void**>(0x1424b3ba8);
+  seed.size = 0;
+  if (seed.data != seed.inlineBytes) FreeSeedStorage(seed.data);
+  seed.data = nullptr;
+  seed.vtable = reinterpret_cast<void**>(0x1424b3b80);
+  seed.size = 0;
+  FreeSeedStorage(nullptr);
+  seed.data = nullptr;
+  seed.vtable = reinterpret_cast<void**>(0x14204adc8);
+  seed.size = 0;
+  FreeSeedStorage(nullptr);
+  return ok;
+}
+
 REBUILD_FUNCTION(Crypto_CipherCCM_Construct, 0x1415fcaf0, CipherCCMConstruct);
 REBUILD_FUNCTION(Crypto_CipherCCM_Destroy, 0x1415fd130, CipherCCMDestroy);
 REBUILD_FUNCTION(Crypto_CipherCCM_Init, 0x1415fd910, CipherCCMInit);
@@ -310,6 +376,7 @@ REBUILD_FUNCTION(Crypto_NonceArray_Destroy, 0x1415fce70, DestroyNonce);
 REBUILD_FUNCTION(Crypto_CipherCCM_CountBlocks, 0x1415fd8d0, CipherCCMCountBlocks);
 REBUILD_FUNCTION(Crypto_CipherCCM_Encode, 0x1415fd520, CipherCCMEncode);
 REBUILD_FUNCTION(Crypto_CipherCCM_Decode, 0x1415fd200, CipherCCMDecode);
+REBUILD_FUNCTION(Crypto_CipherCCM_SeedPrng, 0x1415fdaf0, CipherCCMSeedPrng);
 REBUILD_FUNCTION_TOO_SMALL(Crypto_CipherCCM_False, 0x1415fdae0, CipherCCMFalse);
 
 }  // namespace rebuild::crypto
