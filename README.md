@@ -69,6 +69,7 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpManager::Params` | constructor with all 5 role presets |
 | SoeUtil | `Mutex` | Construct (named, spin count), Lock, Unlock (critical section or Win32 mutex mode) |
 | SoeUtil | `Time` | TimeNow (QueryPerformanceCounter ms) |
+| SoeUtil | `ByteStream` | layout (Array<uchar,8192,1> + cap + cursor, 0x2038) and the inlined stack/pooled stream setup, Put, teardown |
 | ClientServerCore | `UdpCompressionHandler` | Encrypt/Decrypt = packet compression (flag byte 01 deflate level 6 / 00 stored) |
 | UdpLibrary | `UdpManager` | constructor (params fix-up, driver, receive ring, packet pool prefill, memory pools, hash tables, priority queue, port-range bind), ClearStatistics, destructor (incl. memory-pool teardown), OpenSocket, EstablishConnection, ExpectIncoming (NAT punch-through, 00 1F probes), DisconnectAll, PopEvent, DumpPacketHistory, list teardown helpers (5), GiveTime, ProcessRawPacket (incoming dispatch: connect, remap, unknown-terminate, unreachable reply), ActualReceive/Send/SendHelper, NextIncomingPacket, CreatePacket, connection lookup (by address and code), AddNewConnection, address/code hash tables (resize, insert, remove), event queue (alloc, clear, release, queue, DeliverEvents), all 6 handler callbacks, packet pool (3), clock (2), bandwidth buckets (2), priority-queue reprioritize, disconnect cleanup (4), SimulateQueueEntry ctor |
 | UdpLibrary | `UdpConnection` tick | both constructors (incoming / outgoing), destructor, deleting destructor, InternalGiveTime (connect retries, clock sync, reliable channels, multi-buffer hold, keep-alive, port-alive, disconnect drain, no-data timeout), ProcessApplicationPacket, Age, TotalPendingBytes, SetOtherSideTerminated; sync stamps + SyncStampShortDelta; manager SendPortAlive |
@@ -78,10 +79,10 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
 | Game | packet dispatch | Login::ExternalLoginUdpApi::HandlePacket (10 LoginUdp_11 replies), Gateway::ExternalGatewayApi::HandlePacket (opcode & 0x1F / channel >> 5: LoginReply, ForceDisconnect, TunnelPacket, ChannelIsRoutable, ConnectionIsNotRoutable) |
-| Game | `Gateway::ExternalGatewayApi` handlers | LoginReply / ChannelIsRoutable unserializers, OnChannelIsRoutable, OnConnectionIsNotRoutable, OnForcedLogout, OnTunnelPacket (listener at +0x1058) |
+| Game | `Gateway::ExternalGatewayApi` | SendPacket (header-only packets, queued in the DataQueue until login), Logout, OnConnect / OnDisconnect / OnFailed, OnLoginReply (flushes queued packets), LoginReply / ChannelIsRoutable unserializers, OnChannelIsRoutable, OnConnectionIsNotRoutable, OnForcedLogout, OnTunnelPacket (listener at +0x1058) |
 | Game | `Login::ExternalLoginUdpApi` handlers | all 10 reply handlers: LoginReply, ForceDisconnect, CharacterCreate/Login/Delete/SelectInfo/TransferReply, ServerListReply, ServerUpdate, TunnelAppPacketServerToClient (listener at +0x10) |
 
-Total: 278 functions (267 hooked, 11 too small to hook).
+Total: 284 functions (273 hooked, 11 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
