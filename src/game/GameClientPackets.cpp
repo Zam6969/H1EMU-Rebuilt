@@ -1643,6 +1643,120 @@ bool GameClientHandlePacket41(uint8_t* game, const uint8_t* data, int length) {
   }
 }
 
+// A StringFixed<256> starting empty with the given vtable.
+void InitString256(soeutil::StringFixed<256>& text, uint64_t vtable) {
+  text.vtable = reinterpret_cast<void**>(vtable);
+  text.data = soeutil::EmptyStringData();
+  text.length = 0;
+  text.capacity = 0;
+}
+
+// Script argument list with 0xA8-byte values (vtable 0x14206d930):
+// {vtable, values, count}. 0x140418710 inserts a value at an index.
+struct ScriptArgList {
+  void** vtable;
+  uint8_t* values;
+  int count;
+  int capacity;
+};
+static_assert(sizeof(ScriptArgList) == 0x18);
+constexpr int kScriptValueSize = 0xA8;
+
+uint8_t* ScriptArgAt(ScriptArgList* args, int index) {
+  if (index == 0 || args->count <= index) {
+    if (auto* type = game::Call<int* (*)(ScriptArgList*, int)>(0x140418710)(args, index)) *type = 0;
+  }
+  return args->values + index * kScriptValueSize;
+}
+void ScriptArgSetInt(ScriptArgList* args, int index, int value) {
+  uint8_t* slot = ScriptArgAt(args, index);
+  game::Call<void (*)(uint8_t*, int)>(0x14046d7b0)(slot, value);
+}
+void ScriptArgSetString(ScriptArgList* args, int index, const char* value) {
+  uint8_t* slot = ScriptArgAt(args, index);
+  game::Call<void (*)(uint8_t*, const char*)>(0x14046d850)(slot, value);
+}
+
+// 0x140431ca0 (slot 50): show one of the player's jobs in the job browser -
+// "<HandlerJobBrowser>:SetJob"(id, title, description, value +0x18, rank,
+// 0, 0, 0x1403f5290 value) then "<HandlerJobBrowser>:PresentJob".
+// Job node: {id +4, title string id +8, description string id +0xC, +0x18,
+// next +0xA8}.
+void GameClientPresentJob(uint8_t* game, int jobId) {
+  soeutil::IString handler{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
+  auto player = [&] { return game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+  uint8_t* job = nullptr;
+  if (game::Call<FindHandlerFn>(0x14048a5c0)(UiRoot(), reinterpret_cast<const char*>(0x14206d950), &handler) && player()) {  // "HandlerJobBrowser"
+    for (job = game::Field<uint8_t*>(player(), 0x208); job && game::Field<int>(job, 4) != jobId; job = game::Field<uint8_t*>(job, 0xA8)) {
+    }
+  }
+  if (job) {
+    soeutil::StringFixed<256> title;
+    InitString256(title, 0x14206d918);
+    soeutil::StringFixed<256> description;
+    InitString256(description, 0x14206d918);
+    using LookupFn = soeutil::IString* (*)(void*, soeutil::IString*, int);
+    auto lookup = [&](soeutil::IString* target, int offset) {
+      soeutil::IString text;
+      soeutil::StringAssignString(target, game::Call<LookupFn>(0x140484160)(game::Field<void*>(game, 0x3B6B8), &text, game::Field<int>(job, offset)));
+      text.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&text);
+    };
+    lookup(&title, 8);
+    lookup(&description, 0xC);
+    soeutil::IString function{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    soeutil::StringAssignString(&function, &handler);
+    game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&function, reinterpret_cast<const char*>(0x14206d968));  // ":SetJob"
+    ScriptArgList args{reinterpret_cast<void**>(0x14206d930), nullptr, 0, 0};
+    ScriptArgSetInt(&args, 0, game::Field<int>(job, 4));
+    ScriptArgSetString(&args, 1, title.data);
+    ScriptArgSetString(&args, 2, description.data);
+    ScriptArgSetInt(&args, 3, game::Field<int>(job, 0x18));
+    // Rank: the single cached entry (+0xDD80) when the flag at 0x142ab8228
+    // is set, else the 16-bucket hash at +0xDD98 {value +0xC, key +0x30, next +0x38}; default 1.
+    int rank = 1;
+    uint8_t* self = player();
+    if (*reinterpret_cast<int*>(0x142ab8228) != 0) {
+      if (auto* cached = game::Field<uint8_t*>(self, 0xDD80)) rank = game::Field<int>(cached, 0xC);
+    } else {
+      int id = game::Field<int>(job, 4);
+      for (auto* node = game::Field<uint8_t*>(self, 0xDD98 + (id & 0xF) * 8); node; node = game::Field<uint8_t*>(node, 0x38)) {
+        if (game::Field<int>(node, 0x30) == id) {
+          rank = game::Field<int>(node, 0xC);
+          break;
+        }
+      }
+    }
+    ScriptArgSetInt(&args, 4, rank);
+    ScriptArgSetInt(&args, 5, 0);
+    ScriptArgSetInt(&args, 6, 0);
+    int id = game::Field<int>(job, 4);
+    self = player();
+    ScriptArgAt(&args, 7);
+    int extra = game::Call<int (*)(uint8_t*, int)>(0x1403f5290)(self + 0xDD70, id);
+    game::Call<void (*)(uint8_t*, int)>(0x14046d7b0)(args.values + 7 * kScriptValueSize, extra);
+    game::Call<bool (*)(void*, const char*, ScriptArgList*, void*)>(0x140488cc0)(UiRoot(), function.data, &args, nullptr);
+    game::Call<void (*)(ScriptArgList*)>(0x1403a0ae0)(&args);
+    function.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&function);
+    soeutil::StringFixed<256> present;
+    InitString256(present, 0x142049de8);
+    soeutil::StringAssignString(&present, &handler);
+    present.vtable = reinterpret_cast<void**>(0x142049e08);
+    game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&present, reinterpret_cast<const char*>(0x14206d970));  // ":PresentJob"
+    game::Call<bool (*)(void*, const char*, void*, void*)>(0x140488cc0)(UiRoot(), present.data, nullptr, nullptr);
+    present.vtable = reinterpret_cast<void**>(0x142049de8);
+    soeutil::StringRelease(&present);
+    description.vtable = reinterpret_cast<void**>(0x14206d900);
+    soeutil::StringRelease(&description);
+    title.vtable = reinterpret_cast<void**>(0x14206d900);
+    soeutil::StringRelease(&title);
+  }
+  handler.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&handler);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1695,6 +1809,7 @@ REBUILD_FUNCTION(GameClient_RefreshJobBrowser, 0x14046fa20, GameClientRefreshJob
 REBUILD_FUNCTION(GameClient_ConnectToGateway, 0x14046e660, GameClientConnectToGateway);
 REBUILD_FUNCTION(GameClient_OnLoginFailed, 0x14042c3f0, GameClientOnLoginFailed);
 REBUILD_FUNCTION(GameClient_HandlePacket41, 0x140409ee0, GameClientHandlePacket41);
+REBUILD_FUNCTION(GameClient_PresentJob, 0x140431ca0, GameClientPresentJob);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
