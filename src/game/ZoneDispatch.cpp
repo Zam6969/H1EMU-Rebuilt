@@ -2,8 +2,10 @@
 // zone packet to the game subsystem that owns it. Rebuilt opcode by opcode -
 // cases not rebuilt yet are handed to the original function through its
 // trampoline, which runs its own copy of the common exit.
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -240,6 +242,26 @@ struct Packet65 {
   int padding3;
 };
 static_assert(offsetof(Packet65, id) == 0x18 && offsetof(Packet65, b) == 0x28);
+
+struct Packet7D {
+  void** vtable;
+  int opcode;
+  int padding;
+  float amount;  // +0x10, -1.0 by default
+  int padding2;
+  uint64_t id;   // +0x18
+  int a;         // +0x20 -> entity+0x8F8
+  int b;         // +0x24 -> entity+0x8FC
+};
+static_assert(offsetof(Packet7D, b) == 0x24 && sizeof(Packet7D) == 0x28);
+
+// Argument list passed to UI script commands (element accessor 0x1403b4810, dtor 0x1403a0770).
+struct UiArgs {
+  void** vtable;
+  void* begin;
+  void* end;
+};
+static_assert(sizeof(UiArgs) == 0x18);
 
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
@@ -1119,6 +1141,34 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       current = created;
       break;
     }
+    case 0x7D: {  // loyalty info -> MarketplaceHandler:OnLoyaltyInfo
+      Packet7D packet{};
+      packet.vtable = reinterpret_cast<void**>(0x142063dc8);
+      packet.opcode = 0x7D;
+      packet.amount = *reinterpret_cast<float*>(0x1425ba0e4);  // -1.0
+      packet.id = *reinterpret_cast<uint64_t*>(0x142b181f8);
+      using ReadFn = bool (*)(Packet7D*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038b0e0)(&packet, data, length, false)) break;
+      uint64_t id = packet.id;
+      auto* entity = game::Call<uint8_t* (*)(uint8_t*, uint64_t*)>(0x1403f83f0)(game, &id);
+      if (!entity) break;
+      float amount = packet.amount;
+      game::Call<void (*)(uint8_t*, float)>(0x140536650)(entity, amount);
+      game::Field<int>(entity, 0x8FC) = packet.b;
+      game::Field<int>(entity, 0x8F8) = packet.a;
+      game::Call<void (*)(uint8_t*)>(0x14053f190)(entity);
+      uint8_t* inner = entity + 0x20;
+      if (!reinterpret_cast<bool (*)(uint8_t*)>((*reinterpret_cast<void***>(inner))[0xE0 / 8])(inner)) break;
+      UiArgs args{reinterpret_cast<void**>(0x14206d328), nullptr, nullptr};
+      using ArgFn = void* (*)(UiArgs*, int);
+      game::Call<void (*)(void*, int)>(0x14046d7b0)(game::Call<ArgFn>(0x1403b4810)(&args, 0), static_cast<int>(amount));
+      double fraction = amount - std::floor(amount);
+      game::Call<void (*)(void*, double)>(0x14046d800)(game::Call<ArgFn>(0x1403b4810)(&args, 1), fraction);
+      game::Call<void (*)(void*, const char*, UiArgs*, void*)>(0x140488cc0)(
+          *reinterpret_cast<void**>(0x143c45470), GameText(0x14206e2a8), &args, nullptr);  // "MarketplaceHandler:OnLoyaltyInfo"
+      game::Call<void (*)(UiArgs*)>(0x1403a0770)(&args);
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
@@ -1126,7 +1176,7 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
     case 0x3E: case 0x3F: case 0x40: case 0x62:
-    case 0x7D: case 0x99:
+    case 0x99:
    
     case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
