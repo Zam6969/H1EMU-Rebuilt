@@ -21,6 +21,8 @@ constexpr size_t kLocalPlayer = 0xF80;  // in the client state block
 // Game client members holding the subsystem objects packets are routed to.
 void* Member(uint8_t* game, size_t index) { return game::Field<void*>(game, index * 8); }
 
+const char* GameText(uintptr_t address) { return reinterpret_cast<const char*>(address); }
+
 void* GlobalObject(uintptr_t address) { return *reinterpret_cast<void**>(address); }
 
 using RouteFn = void (*)(void*, const uint8_t*, int);
@@ -192,6 +194,15 @@ struct Packet43 {
   int kind;               // +0x34, 3 by default
 };
 static_assert(offsetof(Packet43, text) == 0x18 && offsetof(Packet43, kind) == 0x34 && sizeof(Packet43) == 0x38);
+
+struct TimerPacket {
+  void** vtable;
+  int opcode;
+  int padding;
+  bool start;  // +0x10: start vs stop/reset
+  int timer;   // +0x14: 0 race timer, 1 checkpoint flash timer
+};
+static_assert(offsetof(TimerPacket, timer) == 0x14 && sizeof(TimerPacket) == 0x18);
 
 constexpr size_t kOpcodeC5String = 0x31A28;  // IString on the game client
 
@@ -969,14 +980,54 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       game::Call<void (*)(Packet43*)>(0x1403b0ed0)(&packet);
       break;
     }
+    case 0x4F: {
+      FlagStringPacket packet{reinterpret_cast<void**>(0x142063c80), 0x4F, 0, false,
+                              {soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0}};
+      using ReadFn = bool (*)(FlagStringPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038e0c0)(&packet, data, length, false)) {
+        uint8_t* message = opaque;
+        game::Call<void (*)(uint8_t*, const char*)>(0x140396ad0)(message, packet.text.data);
+        void* target = game::Field<void*>(Member(game, 0x713C), 0x11A4D0);
+        game::Call<void (*)(void*, bool, uint8_t*)>(0x1416107d0)(target, packet.flag, message);
+        game::Field<void*>(message, 0) = reinterpret_cast<void*>(0x1424bb930);
+        game::Call<void (*)(uint8_t*)>(0x1403a6400)(message);
+      }
+      game::Call<void (*)(FlagStringPacket*)>(0x1403b0980)(&packet);
+      break;
+    }
+    case 0x78: {  // race / checkpoint stopwatch UI
+      TimerPacket packet{reinterpret_cast<void**>(0x142063dc0), 0x78, 0, false, 0};
+      using ReadFn = bool (*)(TimerPacket*, const uint8_t*, int, bool);
+      if (game::Call<ReadFn>(0x14038aef0)(&packet, data, length, false)) {
+        soeutil::IString command{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+        const char* start = nullptr;
+        const char* stop = nullptr;
+        if (packet.timer == 0) {
+          start = GameText(0x14206e278);  // "RaceTimer:StartStopWatch"
+          stop = GameText(0x14206e298);   // "RaceTimer:Stop"
+        } else if (packet.timer == 1) {
+          start = GameText(0x14206e228);  // "FlashTimer:StartCheckpointStopWatch"
+          stop = GameText(0x14206e250);   // "FlashTimer:ResetCheckpointStopWatch"
+        }
+        if (start) {
+          soeutil::StringAssign(&command, packet.start ? start : stop);
+          if (command.length > 0)
+            game::Call<void (*)(void*, const char*, void*, void*)>(0x140488cc0)(
+                *reinterpret_cast<void**>(0x143c45470), command.data, nullptr, nullptr);
+        }
+        command.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&command);
+      }
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
     case 0x03: case 0x08: case 0x0B: case 0x16: case 0x2C: case 0x30:
-    case 0x3E: case 0x3F: case 0x40: case 0x44: case 0x4F: case 0x61: case 0x62: case 0x65:
-    case 0x78: case 0x7D: case 0x99:
+    case 0x3E: case 0x3F: case 0x40: case 0x44: case 0x61: case 0x62: case 0x65:
+    case 0x7D: case 0x99:
    
     case 0xDE: case 0xE3:
       return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
