@@ -182,6 +182,58 @@ void AddStatBytes(uint8_t* api, int length) {
 }  // namespace
 
 void ConnectionDisconnectGuarded(udp::UdpConnection* connection, int flushTimeout);  // 0x1415f41c0
+void BaseUdpManagerServiceStart(uint8_t* manager);  // BaseUdpManager.cpp
+void BaseUdpManagerServiceStop(uint8_t* manager);
+
+// Server address list: singly linked {.., +0x08 text, .., +0x18 next}.
+constexpr size_t kApiAddressHead = 0xBE8;
+constexpr size_t kApiAddressCurrent = 0xC00;
+constexpr size_t kApiAddressString = 0xC08;  // IString (data = kApiAddressText)
+constexpr size_t kApiPort = 0x2DC;
+constexpr size_t kApiLastDisconnectReason = 0x300;  // IString
+constexpr size_t kApiOnFailedSlot = 0x78 / 8;
+
+// 0x1415f4660: Connect. Rotates to the next server address, starts the
+// shared UdpManager service and begins establishing the connection.
+void BaseApiConnect(uint8_t* api) {
+  auto*& current = game::Field<uint8_t*>(api, kApiAddressCurrent);
+  if (!current || !(current = *reinterpret_cast<uint8_t**>(current + 0x18))) {
+    current = game::Field<uint8_t*>(api, kApiAddressHead);
+  }
+  const char* address = current ? *reinterpret_cast<const char**>(current + 8) : nullptr;
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(api + kApiAddressString), address);
+  game::Field<uint64_t>(api, 0x360) = 0;
+  auto* reason = reinterpret_cast<soeutil::IString*>(api + kApiLastDisconnectReason);
+  soeutil::StringRelease(reason);
+  reason->data = soeutil::EmptyStringData();
+  reason->length = 0;
+  reason->capacity = 0;
+  int64_t now;
+  game::Field<int64_t>(api, kApiReconnectStart) = *soeutil::TimeNow(&now);
+  BaseUdpManagerServiceStart(game::Field<uint8_t*>(api, kApiLogContext));
+  game::Field<bool>(api, kApiAttempting) = true;
+  uint8_t* manager = game::Field<uint8_t*>(api, kApiLogContext);
+  using EstablishFn = udp::UdpConnection* (*)(void*, const char*, int, int);
+  udp::UdpConnection* connection = game::Call<EstablishFn>(0x14033fda0)(
+      game::Field<void*>(manager, 0x240), game::Field<const char*>(api, kApiAddressText),
+      game::Field<int>(api, kApiPort), game::Field<int>(api, kApiTimeoutMs));
+  game::Field<udp::UdpConnection*>(api, kApiConnection) = connection;
+  if (!connection) {
+    manager = game::Field<uint8_t*>(api, kApiLogContext);
+    game::Call<void (*)(void*, const char*, ...)>(0x1402baba0)(
+        game::Field<void*>(manager, 0x250), reinterpret_cast<const char*>(0x1424b05f0),  // "BaseApi EstablishConnection failed ..."
+        manager + 0x209, game::Field<const char*>(api, kApiAddressText));
+    ApiVirtual<void (*)(uint8_t*)>(api, kApiOnFailedSlot)(api);
+    game::Field<bool>(api, kApiAttempting) = false;
+    BaseUdpManagerServiceStop(game::Field<uint8_t*>(api, kApiLogContext));
+    return;
+  }
+  auto* guard = reinterpret_cast<udp::UdpPlatformGuardObject*>(reinterpret_cast<uint8_t*>(connection) + 0x2E8);
+  guard->Enter();
+  game::Field<uint8_t*>(connection, 0x2B0) = api + kSubobjectToBaseApi;  // connection handler
+  guard->Leave();
+  game::Field<bool>(api, kApiConnecting) = true;
+}
 
 // 0x1415f49f0 (slot 11)
 bool BaseApiIsConnecting(uint8_t* api) { return game::Field<bool>(api, kApiConnecting); }
@@ -233,7 +285,7 @@ void BaseApiDisconnect(uint8_t* api) {
 // 0x1415f5350 (slot 7): Reconnect(autoReconnect)
 void BaseApiReconnect(uint8_t* api, bool autoReconnect) {
   game::Field<bool>(api, kApiAutoReconnect) = autoReconnect;
-  game::Call<void (*)(uint8_t*)>(0x1415f4660)(api);  // Connect
+  BaseApiConnect(api);
   ApiLog(game::Field<uint8_t*>(api, kApiLogContext), reinterpret_cast<const char*>(0x1424b0520),
          game::Field<const char*>(api, kApiAddressText), game::Field<int>(api, kApiTimeoutMs),
          static_cast<int>(game::Field<bool>(api, kApiAutoReconnect)));
@@ -247,7 +299,7 @@ void BaseApiGiveTime(uint8_t* api, int maxPollingMs) {
     if (ElapsedMsSince(game::Field<int64_t>(api, kApiReconnectStart)) < game::Field<int>(api, kApiTimeoutMs)) return;
     ApiLog(game::Field<uint8_t*>(api, kApiLogContext), reinterpret_cast<const char*>(0x1424b06f0),
            game::Field<const char*>(api, kApiAddressText));  // "BaseApi auto-reconnect initiated (%s) address=%s"
-    game::Call<void (*)(uint8_t*)>(0x1415f4660)(api);  // Connect
+    BaseApiConnect(api);
     return;
   }
   if (game::Field<bool>(api, kApiManagerOwned)) ManagerGiveTime(api, maxPollingMs);
@@ -412,6 +464,7 @@ REBUILD_FUNCTION(BaseApi_SendLogical, 0x1415f4980, BaseApiSendLogical);
 REBUILD_FUNCTION(BaseApi_OnConnectComplete, 0x1415f4b30, BaseApiOnConnectComplete);
 REBUILD_FUNCTION(BaseApi_Disconnect, 0x1415f4160, BaseApiDisconnect);
 REBUILD_FUNCTION(BaseApi_Reconnect, 0x1415f5350, BaseApiReconnect);
+REBUILD_FUNCTION(BaseApi_Connect, 0x1415f4660, BaseApiConnect);
 REBUILD_FUNCTION(BaseApi_GiveTime, 0x1415f43a0, BaseApiGiveTime);
 REBUILD_FUNCTION(BaseApi_WaitForDisconnect, 0x1415f5de0, BaseApiWaitForDisconnect);
 REBUILD_FUNCTION(BaseApi_WaitForConnect, 0x1415f5ca0, BaseApiWaitForConnect);
