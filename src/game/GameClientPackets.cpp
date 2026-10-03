@@ -72,6 +72,17 @@ bool GameClientHandleZonePacket(uint8_t* game, int channel, void* header, const 
   return handled;
 }
 
+// 0x14040b750 (game client slot 73): channel-2 packets (opcode 0x79) built by
+// the zone client: forward {value, body} to slot 72.
+bool GameClientHandleChannel2Packet(uint8_t* game, uint8_t* packet) {
+  uint8_t* body = game::Field<uint8_t*>(packet, 0x1B0);
+  if (!body) return false;
+  int value = game::Field<int>(packet, 0x1B8);
+  using Slot72Fn = bool (*)(uint8_t*, int*, uint8_t*, void*);
+  return reinterpret_cast<Slot72Fn>((*reinterpret_cast<void***>(game))[0x240 / 8])(game, &value, body, nullptr);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
+REBUILD_FUNCTION(GameClient_HandleChannel2Packet, 0x14040b750, GameClientHandleChannel2Packet);
 
 }  // namespace rebuild::game_net

@@ -60,12 +60,12 @@ struct Channel2Packet {
   void** vtable;
   int opcode;
   int padding;
-  uint8_t body[0x1D0];  // +0x10, ctor 0x1417f2640 / dtor 0x1417f2750
-  uint8_t* bodyPtr;     // +0x1E0
-  int value;            // +0x1E8
+  uint8_t body[0x1A0];  // +0x10, ctor 0x1417f2640 / dtor 0x1417f2750
+  uint8_t* bodyPtr;     // +0x1B0 (read by game client slot 73, 0x14040b750)
+  int value;            // +0x1B8
 };
-static_assert(offsetof(Channel2Packet, bodyPtr) == 0x1E0);
-static_assert(offsetof(Channel2Packet, value) == 0x1E8);
+static_assert(offsetof(Channel2Packet, bodyPtr) == 0x1B0);
+static_assert(offsetof(Channel2Packet, value) == 0x1B8);
 
 // Header-only view of an incoming zone packet passed to the game.
 struct ZonePacketHeader {
