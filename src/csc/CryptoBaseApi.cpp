@@ -1,4 +1,4 @@
-// ClientServerCrypto::CryptoBaseApi: BaseApi plus two cipher objects - the
+﻿// ClientServerCrypto::CryptoBaseApi: BaseApi plus two cipher objects - the
 // session cipher (+0xD28) and the "heavy encryption" cipher used by
 // SendPacketSecure (+0xD30). Login and gateway APIs derive from it.
 #include <cstddef>
@@ -6,6 +6,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/ByteStream.h"
 #include "soeutil/Memory.h"
 
 namespace rebuild::csc {
@@ -132,7 +133,78 @@ REBUILD_FUNCTION(Crypto_CreateCipher, 0x1415fa3d0, CreateCipher);
 REBUILD_FUNCTION(CryptoBaseApi_Destroy, 0x1415f8c20, CryptoBaseApiDestroy);
 REBUILD_FUNCTION(CryptoKey_Construct, 0x1415f88b0, CryptoKeyConstruct);
 REBUILD_FUNCTION(CryptoKey_IsValid, 0x1415f8a30, CryptoKeyIsValid);
+// SoeUtil::Array<unsigned char,0,1> as passed to WrapPacket.
+struct PacketBytes {
+  void** vtable;
+  uint8_t* data;
+  int size;
+  int capacity;
+};
+
+constexpr uint64_t kWrapMagic0 = 0x62D0E3EF56D9433Aull;
+constexpr uint64_t kWrapMagic1 = 0xBC20ED3ABCB2CC08ull;
+
+void PacketBytesWrite(PacketBytes* array, int position, const void* source, int count) {
+  game::Call<void (*)(PacketBytes*, int, const void*, int)>(0x14030d520)(array, position, source, count);
+}
+void PacketBytesAppend(PacketBytes* array, const void* source, int count) {
+  game::Call<void (*)(PacketBytes*, const void*, int)>(0x140313f70)(array, source, count);
+}
+
+// The 17-byte wrap footer {u8 cipher type, 16-byte magic} appended to out.
+void AppendWrapFooter(PacketBytes* out, uint8_t cipherType) {
+  soeutil::ByteStream stream;
+  stream.inlineArray.data = nullptr;
+  stream.inlineArray.size = 0;
+  stream.inlineArray.unknown14 = 0;
+  stream.inlineArray.vtable = reinterpret_cast<void**>(soeutil::kVtByteArray8k);
+  stream.unknown202C = 0;
+  stream.maxSize = soeutil::kByteStreamMaxSize;
+  stream.writePos = 0;
+  stream.array = &stream.inlineArray;
+  soeutil::ByteArrayWrite(&stream.inlineArray, 0, &cipherType, 1);  // unclamped
+  stream.writePos += 1;
+  uint64_t magic = kWrapMagic0;
+  soeutil::StreamPut(&stream, &magic, 8);
+  magic = kWrapMagic1;
+  soeutil::StreamPut(&stream, &magic, 8);
+  int size = stream.array->size;
+  PacketBytesAppend(out, size != 0 ? stream.array->data : nullptr, size);
+  soeutil::ByteArrayDestroy(&stream.inlineArray);
+}
+
+// 0x1415f96b0: PacketUtils::WrapPacket(data, length, out, cipherType, cipher).
+// Type 0 copies a packet that already ends in the magic and appends the
+// footer (returns 2 when it does not); other types encrypt with `cipher`
+// (slot 6 ready, slot 4 Encode) then append the footer. Returns 1 on success.
+int WrapPacket(const uint8_t* data, int length, PacketBytes* out, int cipherType, uint8_t* cipher) {
+  if (cipherType == 0) {
+    if (length < 0x11 || *reinterpret_cast<const uint64_t*>(data + (length - 0x10)) != kWrapMagic0 ||
+        *reinterpret_cast<const uint64_t*>(data + (length - 8)) != kWrapMagic1)
+      return 2;
+    // Reserve room for data + footer, copy, then append the footer.
+    game::Call<void (*)(PacketBytes*, int, bool)>(0x14030fea0)(out, 0x11 + length, true);
+    PacketBytesWrite(out, 0, data, length);
+    AppendWrapFooter(out, 0);
+    return 1;
+  }
+  if (!cipher) return 0;
+  void** vtable = *reinterpret_cast<void***>(cipher);
+  if (!reinterpret_cast<bool (*)(uint8_t*)>(vtable[0x30 / 8])(cipher)) return 0;
+  PacketBytesWrite(out, 0, data, length);
+  int result = reinterpret_cast<int (*)(uint8_t*, const uint8_t*, int, PacketBytes*)>(vtable[0x20 / 8])(cipher, data, length, out);
+  if (result != 1) {
+    out->size = 0;
+    game::Call<void (*)(const char*, const char*, int)>(0x1402bab70)(
+        nullptr, reinterpret_cast<const char*>(0x1424b31c8), result);  // "PacketUtils::WrapPacket - Failed to encrypt data (%d)."
+    return 0;
+  }
+  AppendWrapFooter(out, static_cast<uint8_t>(cipherType));
+  return 1;
+}
+
 REBUILD_FUNCTION(CryptoBaseApi_SetSessionKey, 0x1415f8d00, CryptoBaseApiSetSessionKey);
+REBUILD_FUNCTION(PacketUtils_WrapPacket, 0x1415f96b0, WrapPacket);
 REBUILD_FUNCTION(CryptoBaseApi_EncodeSecure, 0x1415f8e70, CryptoBaseApiEncodeSecure);
 
 }  // namespace rebuild::csc

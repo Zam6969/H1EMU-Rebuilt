@@ -79,7 +79,7 @@ carry RTTI; most engine classes were built without it.
 | ClientServerCore | RPC plumbing | RpcRouter ctor/dtor/RemoveHandler, handler table Clear/Remove, ByteStream::Put, RpcHandlerTable ctor, 11 u16 id serializers (LE + big-endian template instances), BasePacket dtor, ByteStream dtor |
 | ClientServerCore | lifetime + accessors | BaseApi destructor (flush, release, owned-manager delete), UdpCompressionHandler ctor, BaseApi constructors (shared or own manager: RpcRouter, rate trackers, strings, address list), BaseApi field init, metrics group registration, address-list splitter (SoeUtil List<IString>), Array<IString>::RemoveRange, ~BaseUdpManager, ~RpcManagerHandler, ~UdpConnectionHandler, BaseApi SetServer, reliable-channel stats (resend ratios), cached connection counters |
 | ClientServerCore | `BaseApi` diagnostics | DumpStats (manager / connection / reliable channel log dump), ReportMetrics (Udp rate / size / pending / event-queue metrics) |
-| ClientServerCrypto | `CryptoBaseApi` | both constructors (shared / own manager), cipher factory (types 1-3), ArraySecure key storage ctor / assign / HasKey, destructor (session + secure ciphers), SetSessionKey (cipher factory + init), EncodeSecure; CryptoKey ctor / IsValid |
+| ClientServerCrypto | `CryptoBaseApi` | both constructors (shared / own manager), cipher factory (types 1-3), PacketUtils::WrapPacket (encrypt + 17-byte {type, magic} footer), ArraySecure key storage ctor / assign / HasKey, destructor (session + secure ciphers), SetSessionKey (cipher factory + init), EncodeSecure; CryptoKey ctor / IsValid |
 | Crypto | `CipherRC4` (type 3) + `Cipher` base | complete: RC4 key schedule + keystream, ctor, dtor, Init (per-direction states), Encode / Decode, size / type / ready queries, Rekey; Cipher base dtor |
 | Crypto | `CipherAES` (type 1) | complete class: ctor / dtor (key wipe), Init (enc + dec key schedules), padded ECB Encode / Decode, block counters + NeedsRekey limits, size / type / ready queries (AES block + key-schedule primitives still called by address) |
 | Crypto | `CipherCCM` (type 2) | ctor / dtor, 13-byte nonce builder + Array<uchar,13> dtor, block counter, Init (PRNG seed + CCM key), size / type / ready / key-size queries, NeedsRekey, Encode (ciphertext + 16-byte tag + 13-byte nonce, counter++, block count) and Decode (in place; rejects zero nonce/tag, replayed counters, auth failures). The PRNG seeding helper 0x1415fdaf0 is still original |
@@ -103,7 +103,7 @@ carry RTTI; most engine classes were built without it.
 | Game | packet stream helpers | u8/u16 writers, tunnel-message header+byte(+chunk list) writers, packed-byte writer, chunk-list writer, channel-2 packet readers, {opcode,int} packet reader, pooled stream holder ctor |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 668 functions (639 hooked, 29 too small to hook).
+Total: 669 functions (640 hooked, 29 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
