@@ -12,6 +12,10 @@
 #include "soeutil/Memory.h"
 #include "soeutil/String.h"
 
+namespace rebuild::csc {
+void BaseApiConnectTo(uint8_t* api, const char* addresses, int timeoutMs, bool autoReconnect);  // CscLifetime.cpp
+}
+
 namespace rebuild::game_net {
 namespace {
 
@@ -412,6 +416,40 @@ bool GatewaySendPacket(uint8_t* api, const GatewayPacket* packet) {
   return ApiSlot<SendFn>(api, kApiSendSlot)(api, data, length, true);
 }
 
+// The gateway log prefix ("ExternalGatewayApi(<character>, -, <address>) - ")
+// stored in the logger at +0xD48.
+void UpdateLogPrefix(uint8_t* api) {
+  auto* prefix = api + 0xD48;
+  uint64_t characterId = game::Field<uint64_t>(api, kCharacterId);
+  const char* address = game::Field<const char*>(api, 0xF88);  // data of the address IString at +0xF80
+  if (characterId == *reinterpret_cast<uint64_t*>(0x143c77ff8)) {  // invalid id
+    soeutil::StringFormat(prefix, reinterpret_cast<const char*>(0x1424be3b8), address);  // "ExternalGatewayApi(-, -, %s) - "
+  } else {
+    soeutil::StringFormat(prefix, reinterpret_cast<const char*>(0x1424be3d8), characterId, address);  // "(%llu, -, %s) - "
+  }
+}
+
+// 0x14162d1e0: Init(characterId, ticket, clientProtocol, clientBuild)
+void GatewayInit(uint8_t* api, const uint64_t* characterId, const char* ticket, const char* clientProtocol,
+                 const char* clientBuild) {
+  game::Field<uint64_t>(api, kCharacterId) = *characterId;
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(api + kTicket), ticket);
+  const char* empty = reinterpret_cast<const char*>(0x142046fcb);
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(api + kClientProtocol), clientProtocol ? clientProtocol : empty);
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(api + kClientBuild), clientBuild ? clientBuild : empty);
+  game::Field<void*>(api, kListener) = nullptr;
+  game::Field<bool>(api, kGatewayLoggedIn) = false;
+  UpdateLogPrefix(api);
+}
+
+// 0x14162d140 (slot 6): Connect - remembers the address for the log prefix,
+// then BaseApi::Connect.
+void GatewayConnect(uint8_t* api, const char* addresses, int timeoutMs, bool autoReconnect) {
+  soeutil::StringAssign(reinterpret_cast<soeutil::IString*>(api + 0xF80), addresses);
+  UpdateLogPrefix(api);
+  csc::BaseApiConnectTo(api, addresses, timeoutMs, autoReconnect);
+}
+
 // 0x14162d7d0: Logout(disconnectTimeoutMs, forceDisconnectOnTimeout).
 void GatewayLogout(uint8_t* api, int disconnectTimeoutMs, bool forceDisconnectOnTimeout) {
   if (game::Field<bool>(api, kGatewayLoggedIn) && ApiSlot<bool (*)(uint8_t*)>(api, kApiIsConnected)(api)) {
@@ -459,6 +497,8 @@ REBUILD_FUNCTION(Gateway_SerializeLoginRequest, 0x14162c1e0, SerializeLoginReque
 REBUILD_FUNCTION(Gateway_DestroyLoginRequest, 0x14162cdd0, DestroyLoginRequest);
 REBUILD_FUNCTION(Gateway_SendLoginRequest, 0x14162d5d0, GatewaySendLoginRequest);
 REBUILD_FUNCTION(Gateway_SendPacket, 0x14162c020, GatewaySendPacket);
+REBUILD_FUNCTION(Gateway_Init, 0x14162d1e0, GatewayInit);
+REBUILD_FUNCTION(Gateway_Connect, 0x14162d140, GatewayConnect);
 REBUILD_FUNCTION(Gateway_Logout, 0x14162d7d0, GatewayLogout);
 REBUILD_FUNCTION(Gateway_OnConnect, 0x14162d8a0, GatewayOnConnect);
 REBUILD_FUNCTION(Gateway_OnDisconnect, 0x14162d8e0, GatewayOnDisconnect);
