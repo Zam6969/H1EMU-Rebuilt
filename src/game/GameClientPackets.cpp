@@ -1762,6 +1762,161 @@ void GameClientPresentJob(uint8_t* game, int jobId) {
   soeutil::StringRelease(&handler);
 }
 
+// 0x140432650 (slot 31): initialize the game client once the zone is known -
+// rebuild the +0x388E0 helper, init the game world for the zone name at
+// +0x38988 (Shutdown 0x16 "Failed to init the game world for: %s" on
+// failure), place the camera, start the web browser from the "WebBrowser"
+// ini section, apply the user options (*0x142b199f0) to the subsystems and
+// read the "WallOfData" settings.
+bool GameClientInitialize(uint8_t* game) {
+  game::Field<uint64_t>(game, 0x38B88) = *reinterpret_cast<uint64_t*>(0x142b17e20);
+  game::Call<void (*)(uint8_t*, int)>(0x1403d7290)(game, 0);
+  if (void* old = game::Field<void*>(game, 0x388E0)) (*reinterpret_cast<void (***)(void*, int)>(old))[0](old, 1);
+  void* memory = GameAllocate(0x58);
+  game::Field<void*>(game, 0x388E0) = memory ? game::Call<void* (*)(void*)>(0x1408dc830)(memory) : nullptr;
+  auto player = [&] { return game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+  if (uint8_t* self = player()) game::Call<void (*)(uint8_t*)>(0x1404ce1e0)(self + 0x5658);
+
+  auto* world = game::Field<uint8_t*>(game, 0x3D3E0);
+  uint8_t savedLoading = world[0x3B648];
+  world[0x3B648] = 1;
+  using InitWorldFn = bool (*)(void*, const char*, int);
+  if (!game::Call<InitWorldFn>(0x1418687a0)(game::Field<void*>(game, 0x3B6F8), game::Field<const char*>(game, 0x38988),
+                                            game::Field<int>(game, 0x38998))) {
+    soeutil::StringFixed<128> message;
+    soeutil::InitFixed(message, reinterpret_cast<void**>(0x142049dc8));
+    soeutil::StringFormat(&message, reinterpret_cast<const char*>(0x14206d000),
+                          game::Field<const char*>(game, 0x38988));  // "Failed to init the game world for: %s.  Exiting."
+    using ShutdownFn = void (*)(uint8_t*, bool, int, const char*, const char*);
+    (*reinterpret_cast<ShutdownFn**>(game))[0xD8 / 8](game, true, 0x16, message.data, nullptr);
+    game::Call<void (*)(const char*, const char*, ...)>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x142046fb8), message.data);
+    message.vtable = reinterpret_cast<void**>(0x142049da8);
+    soeutil::StringRelease(&message);
+    return false;
+  }
+  game::Field<uint8_t*>(game, 0x3D3E0)[0x3B648] = savedLoading;
+  game::Call<void (*)(uint8_t*)>(0x14046e470)(game);
+  game::Call<void (*)(void*, const char*, void*, bool, int)>(0x140675470)(
+      game::Field<void*>(game, 0x38B58), game::Field<const char*>(game, 0x38988), game::Field<void*>(game, 0x38AF0), true,
+      game::Field<int>(game, 0x3899C));
+  alignas(16) uint8_t orientation[16];
+  std::memcpy(orientation, reinterpret_cast<const void*>(0x142b06ac0), sizeof(orientation));
+  void* position = player() ? static_cast<void*>(player() + 0x2E0)
+                            : game::Call<void* (*)(void*)>(0x1404d5400)(game::Field<void*>(game, 0x38890));
+  game::Call<void (*)(uint8_t*, void*, void*)>(0x14042adb0)(game, position, orientation);
+  game::Call<void (*)(uint8_t*)>(0x1403dd960)(game);
+
+  if (auto* root = *reinterpret_cast<uint8_t**>(0x142b19cc0)) {
+    game::Call<void (*)(void*)>(0x14079c160)(game::Field<void*>(root, 0xB8));
+    game::Call<void (*)(void*)>(0x14079fbc0)(game::Field<void*>(root, 0x130));
+    if (uint8_t* self = player()) {
+      uint64_t id = game::Field<uint64_t>(self, 0x18);
+      game::Call<void (*)(void*, uint64_t*, int)>(0x14079eb10)(game::Field<void*>(root, 0x20), &id, 0x2A);
+    }
+  }
+
+  if (*reinterpret_cast<void**>(0x142b195c8)) {  // web browser
+    using GetStringFn = void (*)(void*, const char*, const char*, const char*, soeutil::IString*, bool, int, int);
+    const char* section = reinterpret_cast<const char*>(0x142065fc8);  // "WebBrowser"
+    soeutil::StringFixed<512> assets, resources, userData, logs;
+    soeutil::StringFixed<512>* settings[] = {&assets, &resources, &userData, &logs};
+    static const uint64_t kKeys[][2] = {
+        {0x14206d050, 0x14206d038},  // "AssetListFilename", "WebBrowserAssets.txt"
+        {0x14206d068, 0x14206d064},  // "ResourceDirectory", ""
+        {0x14206d0a0, 0x14206d080},  // "UserDataDirectory", "./Resources/WebBrowser/UserData"
+        {0x14206d0d8, 0x14206d0b8},  // "LogDirectory", "./Resources/WebBrowser/Logs"
+    };
+    for (int i = 0; i < 4; ++i) {
+      soeutil::InitFixed(*settings[i], reinterpret_cast<void**>(0x14204aea0));
+      game::Call<GetStringFn>(0x1403334f0)(game::Field<void*>(game, 0x38E30), section, reinterpret_cast<const char*>(kKeys[i][0]),
+                                           reinterpret_cast<const char*>(kKeys[i][1]), settings[i], false, -1, -1);
+    }
+    game::Call<void (*)(void*, const char*, const char*, const char*, const char*)>(0x14078ab10)(
+        *reinterpret_cast<void**>(0x142b195c8), assets.data, resources.data, userData.data, logs.data);
+    for (int i = 3; i >= 0; --i) {
+      settings[i]->vtable = reinterpret_cast<void**>(0x14204ae80);
+      soeutil::StringRelease(settings[i]);
+    }
+  }
+
+  auto options = [] { return *reinterpret_cast<uint8_t**>(0x142b199f0); };
+  game::Call<void (*)(void*, int)>(0x140ab2e50)(options(), 0);
+  game[0x3B6D4] = options()[0x2CB6];
+  game[0x3B808] = options()[0x2CB7];
+  void* display = game::Field<void*>(game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x38890), 0x40), 8);
+  auto displayValue = [&](int slot) { return (*reinterpret_cast<int (***)(void*)>(display))[slot](display); };
+  int third = displayValue(0xF8 / 8);
+  int second = displayValue(0xF0 / 8);
+  int first = displayValue(0x110 / 8);
+  game::Call<void (*)(void*, int, int, int)>(0x1416ca600)(game::Field<void*>(game, 0x3B728), first, second, third);
+  game::Call<void (*)(uint8_t*, int)>(0x14049c530)(game, game::Call<int (*)(void*)>(0x140aae8c0)(options()));
+  game::Call<void (*)(uint8_t*, int)>(0x14049c1d0)(game, game::Field<int>(options(), 0x320C));
+  game::Call<void (*)(uint8_t*, int)>(0x14049c180)(game, game::Field<int>(options(), 0x3210));
+  game::Call<void (*)(uint8_t*, float)>(0x14049c210)(game, game::Field<float>(options(), 0x3218));
+  game::Call<void (*)(uint8_t*, float)>(0x14049c5a0)(game, game::Field<float>(options(), 0x3214));
+  soeutil::IString setting{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringAssign(&setting, game::Field<const char*>(options(), 0x3170));
+  game::Call<void (*)(uint8_t*, const char*)>(0x14049c680)(game, setting.data);
+  game[0x3B730] = 1;
+  game::Field<int>(game::Field<uint8_t*>(game, 0x388A0), 0x12590) = options()[0x32D4] != 0;
+  game::Field<int>(game::Field<uint8_t*>(game, 0x388A0), 0x12594) = options()[0x32D5] != 0;
+  bool flag = options()[0x32D6] != 0;
+  void* subsystem = (*reinterpret_cast<void* (***)(uint8_t*)>(game))[0x88 / 8](game);
+  (*reinterpret_cast<void (***)(void*, bool)>(subsystem))[0x70 / 8](subsystem, flag);
+  uint8_t controlFlag = options()[0x32D7];
+  if (auto* controls = game::Field<uint8_t*>(game, 0x388A0)) {
+    controls[0x12570] = controlFlag;
+    static const uint64_t kControlSets[][2] = {{0x14206d0e8, 0x2CB8}, {0x14206d0f8, 0x2D58}, {0x14206d108, 0x2DF8}};  // Infantry, GroundVehicle, Aircraft
+    for (const auto& set : kControlSets) {
+      soeutil::IString name{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      soeutil::StringAssign(&name, reinterpret_cast<const char*>(set[0]));
+      game::Call<void (*)(void*, soeutil::IString*, uint8_t*)>(0x1406144a0)(controls, &name, options() + set[1]);
+      name.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&name);
+    }
+  }
+  if (uint8_t* self = player()) {
+    uint8_t* camera = self + 0x9418;
+    game::Call<void (*)(uint8_t*, uint8_t)>(0x1405fb7e0)(camera, options()[0x3281]);
+    game::Call<void (*)(uint8_t*, uint8_t)>(0x1405fb7d0)(camera, options()[0x3282]);
+    game::Call<void (*)(uint8_t*, uint8_t)>(0x1405fb7f0)(camera, options()[0x3283]);
+    game::Call<void (*)(uint8_t*, uint8_t)>(0x1405fb800)(camera, options()[0x3284]);
+  }
+
+  // "WallOfData" telemetry settings, defaulting to the current values.
+  void* wallIni = options() + 0x1D38;
+  const char* wallSection = reinterpret_cast<const char*>(0x14206d128);  // "WallOfData"
+  using GetBoolFn = bool (*)(void*, const char*, const char*, bool, bool, int, int);
+  using GetIntFn = int (*)(void*, const char*, const char*, int, bool, int, int);
+  game[0x3B65E] = game::Call<GetBoolFn>(0x1403051c0)(wallIni, wallSection, reinterpret_cast<const char*>(0x14206d118), game[0x3B65E] != 0,
+                                                     false, -1, -1);  // "Collecting"
+  if (game::Call<GetBoolFn>(0x1403051c0)(wallIni, wallSection, reinterpret_cast<const char*>(0x14206d134), (game[0x3B65F] >> 7) != 0, false, -1,
+                                         -1))  // "Input"
+    game[0x3B65F] |= 0x80;
+  else
+    game[0x3B65F] &= 0x7F;
+  if (game::Call<GetBoolFn>(0x1403051c0)(wallIni, wallSection, reinterpret_cast<const char*>(0x14206d140), ((game[0x3B65F] >> 6) & 1) != 0,
+                                         false, -1, -1))  // "Framerate"
+    game[0x3B65F] |= 0x40;
+  else
+    game[0x3B65F] &= 0xBF;
+  game::Field<int>(game, 0x3B660) = game::Call<GetIntFn>(0x1403050e0)(wallIni, wallSection, reinterpret_cast<const char*>(0x14206d150),
+                                                                      game::Field<int>(game, 0x3B660), false, -1, -1);  // "SampleRate"
+
+  game::Call<void (*)(void*, int, bool)>(0x1406f1140)(game::Field<void*>(game, 0x38AE8), 0, true);
+  if (void* audio = game::Field<void*>(game, 0x389E0)) {
+    game::Call<void (*)(void*)>(0x1408174c0)(audio);
+    game::Field<uint8_t*>(game, 0x389E0)[0x11E9D2] = 1;
+  }
+  using LogFn = void (*)(const char*, const char*, ...);
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206d160));  // "Initialized - Devices"
+  game::Call<void (*)(uint8_t*, int)>(0x14046be80)(game, 0x10);
+  game::Call<LogFn>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x14206d178));  // "Successfully initialized the game client."
+  setting.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&setting);
+  return true;
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1815,6 +1970,7 @@ REBUILD_FUNCTION(GameClient_ConnectToGateway, 0x14046e660, GameClientConnectToGa
 REBUILD_FUNCTION(GameClient_OnLoginFailed, 0x14042c3f0, GameClientOnLoginFailed);
 REBUILD_FUNCTION(GameClient_HandlePacket41, 0x140409ee0, GameClientHandlePacket41);
 REBUILD_FUNCTION(GameClient_PresentJob, 0x140431ca0, GameClientPresentJob);
+REBUILD_FUNCTION(GameClient_Initialize, 0x140432650, GameClientInitialize);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
