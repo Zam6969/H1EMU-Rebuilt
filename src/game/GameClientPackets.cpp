@@ -1478,6 +1478,171 @@ void GameClientOnLoginFailed(uint8_t* game, int code, uint8_t* details) {
   soeutil::StringRelease(&extra);
 }
 
+// Packet 0x41 (slot 97): {vtable, opcode, subType, payload}.
+struct Packet41 {
+  void** vtable;
+  int opcode;  // 0x41
+  int pad0C;
+  int subType;
+  int pad14;
+  uint64_t payload[2];
+};
+static_assert(offsetof(Packet41, subType) == 0x10);
+static_assert(offsetof(Packet41, payload) == 0x18);
+
+// Inline bounded reads used by slot 97 (a read past the end yields 0 and
+// leaves the cursor at the end).
+const uint8_t* SkipOpcodeAndSubType(const uint8_t* data, const uint8_t* end) { return data + 2 > end ? end : data + 2; }
+int ReadIntOrZero(const uint8_t*& cursor, const uint8_t* end) {
+  if (cursor + 4 > end) {
+    cursor = end;
+    return 0;
+  }
+  int value;
+  std::memcpy(&value, cursor, 4);
+  cursor += 4;
+  return value;
+}
+// {int length, bytes}: an out-of-range length yields {nullptr, 0}.
+void ReadBlob(const uint8_t* cursor, const uint8_t* end, const uint8_t*& blob, int& length) {
+  length = ReadIntOrZero(cursor, end);
+  blob = cursor;
+  if (length < 0 || length > static_cast<int>(end - cursor)) {
+    blob = nullptr;
+    length = 0;
+  }
+}
+
+// 0x140409ee0 (slot 97): packet 0x41 - the object at +0x38E68 (created by
+// sub-type 6, destroyed by 7) and its entries; each change refreshes the UI
+// at +0x388E8 (0x14098dcb0).
+bool GameClientHandlePacket41(uint8_t* game, const uint8_t* data, int length) {
+  const uint8_t* end = data + length;
+  const uint8_t* afterOpcode = data + 1 > end ? end : data + 1;
+  int subType = afterOpcode + 1 > end ? 0 : static_cast<int8_t>(*afterOpcode);
+  auto object = [&] { return game::Field<uint8_t*>(game, 0x38E68); };
+  auto refreshUi = [&] {
+    if (void* ui = game::Field<void*>(game, 0x388E8)) game::Call<void (*)(void*)>(0x14098dcb0)(ui);
+  };
+  auto refreshUiWith = [&](uint64_t first) {
+    if (void* ui = game::Field<void*>(game, 0x388E8)) {
+      game::Call<void (*)(void*)>(first)(ui);
+      game::Call<void (*)(void*)>(0x14098dcb0)(game::Field<void*>(game, 0x388E8));
+    }
+  };
+  using SelectFn = void (*)(void*, int);
+  using EntryFn = void* (*)(void*, int);
+  auto removeEntry = [](void* owner, void* entry) { (*reinterpret_cast<void (***)(void*, void*)>(owner))[0x18 / 8](owner, entry); };
+  Packet41 packet{};
+  packet.opcode = 0x41;
+  packet.subType = subType;
+  switch (subType) {
+    case 1: {  // select (first, second)
+      packet.vtable = reinterpret_cast<void**>(0x1420682f8);
+      const uint8_t* cursor = SkipOpcodeAndSubType(data, end);
+      int first = ReadIntOrZero(cursor, end);
+      int second = ReadIntOrZero(cursor, end);
+      packet.payload[0] = static_cast<uint32_t>(first) | (static_cast<uint64_t>(static_cast<uint32_t>(second)) << 32);
+      if (uint8_t* owner = object()) {
+        game::Call<SelectFn>(0x140a0e290)(owner, first);
+        refreshUi();
+      }
+      return true;
+    }
+    case 2: {
+      packet.vtable = reinterpret_cast<void**>(0x142068300);
+      ClientReader reader{data, length, data, end, 0};
+      game::Call<void (*)(Packet41*, ClientReader*)>(0x140370450)(&packet, &reader);
+      if (uint8_t* owner = object()) {
+        game::Call<SelectFn>(0x140a0e290)(owner, 0);
+        refreshUi();
+      }
+      return true;
+    }
+    case 3: {
+      packet.vtable = reinterpret_cast<void**>(0x142068308);
+      ClientReader reader{data, length, data, end, 0};
+      game::Call<void (*)(Packet41*, ClientReader*)>(0x140377400)(&packet, &reader);
+      if (object()) refreshUiWith(0x14098dac0);
+      return true;
+    }
+    case 4: {  // add/replace one entry
+      packet.vtable = reinterpret_cast<void**>(0x142068310);
+      const uint8_t* blob;
+      int blobLength;
+      ReadBlob(SkipOpcodeAndSubType(data, end), end, blob, blobLength);
+      if (!object()) return true;
+      void* memory = GameAllocate(0x1E0);
+      auto* entry = memory ? game::Call<uint8_t* (*)(void*)>(0x141704630)(memory) : nullptr;
+      ClientReader reader{blob, blobLength, blob, blob + blobLength, 0};
+      game::Call<void (*)(uint8_t*, ClientReader*)>(0x140370f20)(entry, &reader);
+      if (void* existing = game::Call<EntryFn>(0x141704cd0)(object(), game::Field<int>(entry, 0x68))) removeEntry(object(), existing);
+      game::Call<void (*)(void*, uint8_t*)>(0x141704bb0)(object(), entry);
+      auto* self = game::Call<uint8_t* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860));
+      void* identity = self + 0x630;
+      uint64_t scratch;
+      uint64_t* selfId = (*reinterpret_cast<uint64_t* (***)(void*, uint64_t*)>(identity))[0x68 / 8](identity, &scratch);
+      if (game::Field<uint64_t>(entry, 0x80) == *selfId) game::Call<SelectFn>(0x140a0e290)(object(), game::Field<int>(entry, 0x68));
+      refreshUi();
+      return true;
+    }
+    case 6: {  // (re)create the object
+      packet.vtable = reinterpret_cast<void**>(0x142068318);
+      const uint8_t* blob;
+      int blobLength;
+      ReadBlob(SkipOpcodeAndSubType(data, end), end, blob, blobLength);
+      if (uint8_t* old = object()) (*reinterpret_cast<void (***)(void*, int)>(old))[0](old, 1);
+      void* memory = GameAllocate(0x6A0);
+      auto* created = memory ? game::Call<uint8_t* (*)(void*)>(0x140a0d540)(memory) : nullptr;
+      game::Field<uint8_t*>(game, 0x38E68) = created;
+      ClientReader reader{blob, blobLength, blob, blob + blobLength, 0};
+      game::Call<void (*)(ClientReader*, uint8_t*)>(0x1403859e0)(&reader, created + 8);
+      int trailing = 0;
+      if (reader.cursor + 4 <= reader.end) std::memcpy(&trailing, reader.cursor, 4);
+      game::Field<int>(created, 0x348) = trailing;
+      refreshUiWith(0x14098d950);
+      return true;
+    }
+    case 7:  // destroy the object
+      packet.vtable = reinterpret_cast<void**>(0x142068320);
+      if (uint8_t* owner = object()) {
+        (*reinterpret_cast<void (***)(void*, int)>(owner))[0](owner, 1);
+        game::Field<uint8_t*>(game, 0x38E68) = nullptr;
+        refreshUi();
+      }
+      return true;
+    case 8: {  // remove an entry
+      packet.vtable = reinterpret_cast<void**>(0x142068328);
+      const uint8_t* cursor = SkipOpcodeAndSubType(data, end);
+      int id = ReadIntOrZero(cursor, end);
+      if (uint8_t* owner = object()) {
+        if (void* existing = game::Call<EntryFn>(0x141704cd0)(owner, id)) removeEntry(object(), existing);
+        if (game::Field<int>(object(), 0x69C) == id) game::Call<SelectFn>(0x140a0e290)(object(), 0);
+        refreshUi();
+      }
+      return true;
+    }
+    case 11: {
+      packet.vtable = reinterpret_cast<void**>(0x142068330);
+      game::Call<void (*)(const uint8_t*, int, Packet41*)>(0x140387c10)(data, length, &packet);
+      if (uint8_t* owner = object()) {
+        (*reinterpret_cast<void (***)(void*, int)>(owner))[0x78 / 8](owner, static_cast<int>(packet.payload[0]));
+        refreshUi();
+      }
+      return true;
+    }
+    case 12: {
+      packet.vtable = reinterpret_cast<void**>(0x142068338);
+      ClientReader reader{data, length, data, end, 0};
+      game::Call<void (*)(Packet41*, ClientReader*)>(0x140376b00)(&packet, &reader);
+      if (object()) refreshUiWith(0x14098d950);
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1529,6 +1694,7 @@ REBUILD_FUNCTION(GameClient_DisconnectFromServer, 0x1403e7a50, GameClientDisconn
 REBUILD_FUNCTION(GameClient_RefreshJobBrowser, 0x14046fa20, GameClientRefreshJobBrowser);
 REBUILD_FUNCTION(GameClient_ConnectToGateway, 0x14046e660, GameClientConnectToGateway);
 REBUILD_FUNCTION(GameClient_OnLoginFailed, 0x14042c3f0, GameClientOnLoginFailed);
+REBUILD_FUNCTION(GameClient_HandlePacket41, 0x140409ee0, GameClientHandlePacket41);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
