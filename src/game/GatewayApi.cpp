@@ -473,6 +473,59 @@ bool GatewaySendSecure(uint8_t* api, const uint8_t* data, int length) {
   return false;
 }
 
+// 0x14162dcc0: send a game packet through the gateway tunnel
+// (PacketTunnelPacketFromExternalConnection: header opcode 6 | channel << 5,
+// then the payload).
+bool GatewaySendTunnelPacket(uint8_t* api, const uint8_t* data, int length, uint8_t channel, bool reliable,
+                             bool secure) {
+  constexpr uint8_t kOpcodeTunnelFromExternal = 6;
+  soeutil::ScopedByteStream stream;
+  uint8_t header = static_cast<uint8_t>(channel << 5 | kOpcodeTunnelFromExternal);
+  stream.Put(&header, 1);
+  stream.Put(data, length);
+  if (!secure) return GatewaySend(api, stream.Data(), stream.Size(), reliable);
+  return GatewaySendSecure(api, stream.Data(), stream.Size());
+}
+
+// 0x14162c4d0: Serialize a u64 member.
+void SerializeU64(soeutil::ByteStream** stream, const uint64_t* value) {
+  uint64_t copy = *value;
+  soeutil::StreamPut(*stream, &copy, 8);
+}
+
+// 0x14162c750: PacketForcedLogout::Read(data, length) - returns true on failure.
+bool ReadForcedLogout(const uint8_t* data, int length, PacketForcedLogout* packet) {
+  const uint8_t* end = data + length;
+  const uint8_t* cursor = data + 1;
+  bool failed = !(cursor <= end);
+  uint8_t header = 0;
+  if (failed) cursor = end; else header = data[0];
+  packet->channel = header >> 5;
+  packet->opcode = header & 0x1F;
+  int textLength;
+  if (end < cursor + 4) {
+    textLength = 0;
+    failed = true;
+    cursor = end;
+  } else {
+    textLength = *reinterpret_cast<const int*>(cursor);
+    cursor += 4;
+    if (textLength < 0) return true;
+  }
+  if (textLength <= static_cast<int>(reinterpret_cast<uintptr_t>(end)) - static_cast<int>(reinterpret_cast<uintptr_t>(cursor))) {
+    soeutil::StringAssignN(&packet->reason, reinterpret_cast<const char*>(cursor), textLength);
+    return failed;
+  }
+  return true;
+}
+
+// 0x14162cf50 (slot 0): ExternalGatewayApi scalar deleting destructor.
+uint8_t* GatewayDeletingDestructor(uint8_t* api, unsigned flags) {
+  game::Call<void (*)(uint8_t*)>(0x14162cb70)(api);  // ~ExternalGatewayApi
+  if (flags & 1) soeutil::Free(api, 0x1068);
+  return api;
+}
+
 // 0x14162c020: serialize a header-only packet and send it reliably, or queue
 // it until the gateway login completes.
 bool GatewaySendPacket(uint8_t* api, const GatewayPacket* packet) {
@@ -583,6 +636,10 @@ REBUILD_FUNCTION(Gateway_DestroyPacket_E, 0x14162cf00, DestroyHeaderOnlyPacket);
 REBUILD_FUNCTION(Gateway_DestroyForcedLogout, 0x14162cd40, DestroyForcedLogout);
 REBUILD_FUNCTION(Gateway_Send, 0x14162db20, GatewaySend);
 REBUILD_FUNCTION(Gateway_SendSecure, 0x14162dba0, GatewaySendSecure);
+REBUILD_FUNCTION(Gateway_SendTunnelPacket, 0x14162dcc0, GatewaySendTunnelPacket);
+REBUILD_FUNCTION(Gateway_SerializeU64, 0x14162c4d0, SerializeU64);
+REBUILD_FUNCTION(Gateway_ReadForcedLogout, 0x14162c750, ReadForcedLogout);
+REBUILD_FUNCTION(Gateway_DeletingDestructor, 0x14162cf50, GatewayDeletingDestructor);
 REBUILD_FUNCTION(Gateway_SendPacket, 0x14162c020, GatewaySendPacket);
 REBUILD_FUNCTION(Gateway_Init, 0x14162d1e0, GatewayInit);
 REBUILD_FUNCTION(Gateway_Connect, 0x14162d140, GatewayConnect);
