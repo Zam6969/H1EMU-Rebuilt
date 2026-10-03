@@ -1273,6 +1273,52 @@ void GameClientDisconnectFromServer(uint8_t* game, const char* reason) {
   }
 }
 
+// 0x14046fa20 (slot 49): refresh the job browser - "<HandlerJobBrowser>:SetJobCount"
+// with the player's job count, one 0x14046b320 call per job in the player's
+// list, then slot 50 with the value stored for the current job id (5-bucket
+// hash at player+0x220, node {value +4, next +0x90, key +0x98}).
+void GameClientRefreshJobBrowser(uint8_t* game) {
+  soeutil::IString handler{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  using FindHandlerFn = bool (*)(void*, const char*, soeutil::IString*);
+  if (game::Call<FindHandlerFn>(0x14048a5c0)(UiRoot(), reinterpret_cast<const char*>(0x14206d950), &handler)) {  // "HandlerJobBrowser"
+    soeutil::IString function{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+    soeutil::StringAssignString(&function, &handler);
+    game::Call<void (*)(soeutil::IString*, const char*)>(0x1402bd730)(&function, reinterpret_cast<const char*>(0x14206d980));  // ":SetJobCount"
+    ScriptArgs args{reinterpret_cast<void**>(0x14206c548), nullptr, nullptr};
+    auto player = [&] { return game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+    int count = game::Field<int>(player(), 0x218);
+    if (auto* slot = game::Call<int* (*)(ScriptArgs*, int)>(0x140418710)(&args, 0)) *slot = 0;
+    // Script value {type, payload}: types 3, 7, 8 and 9 own an object at +8.
+    auto* value = static_cast<uint8_t*>(args.begin);
+    int type = game::Field<int>(value, 0);
+    if (type == 3 || type == 7 || type == 8 || type == 9) {
+      void* owned = value + 8;
+      (*reinterpret_cast<void (***)(void*, int)>(owned))[0](owned, 0);
+    }
+    game::Field<int>(value, 0) = 1;  // integer
+    game::Field<int>(value, 8) = count;
+    game::Call<bool (*)(void*, const char*, ScriptArgs*, void*)>(0x140488cc0)(UiRoot(), function.data, &args, nullptr);
+    int index = 0;
+    for (auto* job = game::Field<uint8_t*>(player(), 0x208); job; job = game::Field<uint8_t*>(job, 0xA8), ++index)
+      game::Call<void (*)(uint8_t*, int, const char*, uint8_t*)>(0x14046b320)(game, index, handler.data, job);
+    game::Call<void (*)(ScriptArgs*)>(0x1403a06c0)(&args);
+    function.vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(&function);
+    uint8_t* self = player();
+    unsigned key = game::Field<unsigned>(self, 0x2D0);
+    int current = 0;
+    for (auto* node = game::Field<uint8_t*>(self, 0x220 + static_cast<int>(key % 5) * 8); node; node = game::Field<uint8_t*>(node, 0x90)) {
+      if (game::Field<unsigned>(node, 0x98) == key) {
+        current = game::Field<int>(node, 4);
+        break;
+      }
+    }
+    (*reinterpret_cast<void (***)(uint8_t*, int)>(game))[0x190 / 8](game, current);
+  }
+  handler.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&handler);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -1321,6 +1367,7 @@ REBUILD_FUNCTION(GameClient_ForwardToHandler388C8, 0x14043b860, GameClientForwar
 REBUILD_FUNCTION(GameClient_HandlePacket17, 0x14040bba0, GameClientHandlePacket17);
 REBUILD_FUNCTION(GameClient_SetChatText, 0x140468e00, GameClientSetChatText);
 REBUILD_FUNCTION(GameClient_DisconnectFromServer, 0x1403e7a50, GameClientDisconnectFromServer);
+REBUILD_FUNCTION(GameClient_RefreshJobBrowser, 0x14046fa20, GameClientRefreshJobBrowser);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
