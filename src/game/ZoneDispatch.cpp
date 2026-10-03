@@ -1735,13 +1735,52 @@ bool GameClientDispatchZonePacket(uint8_t* game, uint8_t* header, const uint8_t*
       result = false;
       break;
     }
+    case 0x03: {  // SendSelfToClient: rebuild the local player from the payload
+      BytesPacket packet{reinterpret_cast<void**>(0x142063c28), 3, 0, nullptr, 0, 0};
+      using ReadFn = bool (*)(BytesPacket*, const uint8_t*, int, bool);
+      if (!game::Call<ReadFn>(0x14038bd30)(&packet, data, length, false)) {
+        void* display = Member(game, 0x71BA);
+        reinterpret_cast<void (*)(void*, const char*, int, int)>((*static_cast<void***>(display))[3])(
+            display, GameText(0x14206deb8), 0, 0);  // "cPacketIdSendSelfToClient UnserializePacket error..."
+        break;
+      }
+      auto& localPlayer = game::Field<uint8_t*>(state, kLocalPlayer);
+      auto& localPlayerGlobal = *reinterpret_cast<uint8_t**>(0x142b19ba0);
+      if (localPlayer) {
+        reinterpret_cast<void (*)(uint8_t*, int)>((*reinterpret_cast<void***>(localPlayer))[2])(localPlayer, 1);  // delete
+        localPlayer = nullptr;
+        localPlayerGlobal = nullptr;
+      }
+      uint64_t timeSlot;
+      game::Field<uint64_t>(game, 0x38858) = *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&timeSlot);
+      uint8_t* created = nullptr;
+      if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x10A70))
+        created = game::Call<uint8_t* (*)(void*)>(0x1406230d0)(memory);
+      localPlayer = created;
+      localPlayerGlobal = localPlayer;
+      game::Call<void (*)(uint8_t*)>(0x14043e6d0)(game);
+      PacketReader reader{packet.bytes, packet.size, packet.bytes, packet.bytes + packet.size, 0};
+      game::Call<void (*)(uint8_t*, PacketReader*)>(0x140368e10)(localPlayer, &reader);  // result not checked
+      game::Field<int>(game, 0x38BF8) = game::Field<int>(localPlayer, 0x20);
+      game::Call<void (*)(uint8_t*, int)>(0x1406383a0)(localPlayer, game::Field<int>(localPlayer, 0x2D0));
+      game::Call<void (*)(uint8_t*)>(0x14062bfa0)(localPlayer);
+      if (auto* self = static_cast<uint8_t*>(game::Call<void* (*)(void*)>(0x14071e830)(Member(game, 0x710C)))) {
+        if ((game::Field<uint64_t>(self, 0x1AD8) >> 37) & 1) {
+          game::Call<void (*)(uint8_t*)>(0x140520c80)(self);
+          reinterpret_cast<void (*)(uint8_t*)>((*reinterpret_cast<void***>(self))[0x3F8 / 8])(self);
+        }
+      }
+      auto* name = game::Call<uint8_t* (*)(uint8_t*)>(0x1416cb000)(localPlayer + 0x28);
+      game::Call<void (*)(const char*, const char*, uint64_t, const char*)>(0x1402bab70)(
+          GameText(0x142054710), GameText(0x14206de98), game::Field<uint64_t>(localPlayer, 0x18),
+          game::Field<const char*>(name, 8));  // "RECEIVED=ClientSent - %llu - %s"
+      break;
+    }
     case 0x76:
       break;
     case 0x63: case 0x70: case 0xC3:
       result = false;
       break;
-    case 0x03:
-      return g_originalDispatch(game, header, data, length, channel);  // not rebuilt yet
     default:  // no built-in case
       return OfferToExtension(state, header, data, length, channel);
   }
