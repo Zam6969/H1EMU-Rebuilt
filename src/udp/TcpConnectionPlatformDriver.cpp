@@ -358,6 +358,88 @@ bool TcpConnectionPlatformDriverStartSslHandshake(TcpConnectionPlatformDriver* s
   return ok;
 }
 
+// 0x141ebead0: SendEncrypted - Schannel EncryptMessage into a pooled send
+// buffer ({header, data, trailer} stream buffers) and send it; whatever the
+// socket does not take is queued on the connection (0x141ebc710). Returns
+// the bytes actually sent.
+int TcpConnectionPlatformDriverSendEncrypted(TcpConnectionPlatformDriver* self, const void* data, int length) {
+  soeutil::StringFixed<256> statusText;
+  soeutil::InitFixed(statusText, reinterpret_cast<void**>(0x142049e08));
+  int64_t started = TimeNow();
+  void* context = reinterpret_cast<uint8_t*>(self) + 0x38;
+  struct StreamSizes {
+    unsigned long header, trailer, maximumMessage, buffers, blockSize;
+  } sizes;
+  using QueryFn = int (*)(void*, unsigned long, void*);
+  int status = (*reinterpret_cast<QueryFn*>(SslFunctions(self) + 0x58))(context, 4, &sizes);  // SECPKG_ATTR_STREAM_SIZES
+  int sentBytes = 0;
+  if (status != 0) {
+    const char* text = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(status, &statusText);
+    game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425abf58), text);  // "Error reading SECPKG_ATTR_STREAM_SIZES - %s"
+  } else {
+    // Pooled byte buffer {vtable, data +8, size +0x10, capacity +0x14,
+    // shared base +0x18, counts +0x20}.
+    auto* buffer = game::Call<uint8_t* (*)(void*)>(0x141ec21a0)(*reinterpret_cast<void**>(static_cast<uint8_t*>(self->owner) + 0x40));
+    auto& bytes = *reinterpret_cast<uint8_t**>(buffer + 8);
+    auto& size = *reinterpret_cast<int*>(buffer + 0x10);
+    auto& capacity = *reinterpret_cast<int*>(buffer + 0x14);
+    int needed = static_cast<int>(sizes.header + sizes.trailer) + length;
+    if (needed > capacity) {
+      int newCapacity;
+      void** vtable = *reinterpret_cast<void***>(buffer);
+      auto* grown = reinterpret_cast<uint8_t* (*)(uint8_t*, int, int*, bool)>(vtable[1])(buffer, needed, &newCapacity, true);
+      if (grown != bytes) {
+        if (bytes) {
+          std::memcpy(grown, bytes, static_cast<size_t>(size));
+          reinterpret_cast<void (*)(uint8_t*, uint8_t*, int)>((*reinterpret_cast<void***>(buffer))[2])(buffer, bytes, capacity);
+        }
+        bytes = grown;
+        capacity = newCapacity;
+      }
+    }
+    game::Call<void (*)(uint8_t*, unsigned long, const void*, int)>(0x14030d520)(buffer, sizes.header, data, length);  // write at offset
+    uint8_t* base = size != 0 ? bytes : nullptr;
+    SecBuffer streams[4] = {{sizes.header, 7, size != 0 ? bytes : nullptr},  // SECBUFFER_STREAM_HEADER
+                            {static_cast<unsigned long>(length), 1, base + sizes.header},  // SECBUFFER_DATA
+                            {sizes.trailer, 6, base + sizes.header + length},  // SECBUFFER_STREAM_TRAILER
+                            {0, 0, nullptr}};
+    SecBufferDesc description{0, 4, streams};
+    using EncryptFn = int (*)(void*, unsigned long, SecBufferDesc*, unsigned long);
+    status = (*reinterpret_cast<EncryptFn*>(SslFunctions(self) + 0xC8))(context, 0, &description, 0);
+    if (status < 0) {
+      const char* text = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(status, &statusText);
+      game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425abfa8), text);  // "Error returned by EncryptMessage - %s."
+    } else {
+      unsigned total = streams[2].size + streams[1].size + streams[0].size;
+      int sent = send(self->socket, reinterpret_cast<const char*>(size != 0 ? bytes : nullptr), static_cast<int>(total), 0);
+      sentBytes = sent < 0 ? 0 : sent;
+      if (static_cast<unsigned>(sentBytes) < total) {
+        uint8_t* owner = static_cast<uint8_t*>(self->owner);
+        game::Call<void (*)(void*, int, const uint8_t*, unsigned)>(0x141ebc710)(owner + 0x2100, *reinterpret_cast<int*>(owner + 0x2148),
+                                                                                (size != 0 ? bytes : nullptr) + sentBytes, total - sentBytes);
+      }
+      game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425abf88), sentBytes,
+                                     total - sentBytes);  // "%d bytes sent, %d bytes queued"
+    }
+    // Drop the pooled buffer's shared reference.
+    auto* counts = *reinterpret_cast<volatile long**>(buffer + 0x20);
+    bool lastStrong = _InterlockedExchangeAdd(&counts[0], -1) == 1;
+    if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts)
+      game::Call<void (*)(void*, size_t)>(0x140d0fb84)(const_cast<long*>(counts), 0x10);
+    if (lastStrong) {
+      uint8_t* shared = buffer + 0x18;
+      (*reinterpret_cast<void (***)(uint8_t*)>(shared))[1](shared);
+    }
+    int64_t delta = TimeNow() - started;
+    int elapsed = delta > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(delta);
+    if (elapsed > 1000)
+      game::Call<LogFn>(0x1402ef740)(SslErrorLog(), reinterpret_cast<const char*>(0x1425abfd0), elapsed);  // "Warning! SendEncrypted took %d ms."
+  }
+  statusText.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&statusText);
+  return sentBytes;
+}
+
 }  // namespace rebuild::udp
 
 using namespace rebuild::udp;
@@ -371,3 +453,4 @@ REBUILD_FUNCTION(TcpConnectionPlatformDriver_GetLocalPort, 0x141ebdab0, TcpConne
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_GiveTime, 0x141ebdf20, TcpConnectionPlatformDriverGiveTime);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_TerminateSsl, 0x141ebf360, TcpConnectionPlatformDriverTerminateSsl);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_StartSslHandshake, 0x141ebefe0, TcpConnectionPlatformDriverStartSslHandshake);
+REBUILD_FUNCTION(TcpConnectionPlatformDriver_SendEncrypted, 0x141ebead0, TcpConnectionPlatformDriverSendEncrypted);
