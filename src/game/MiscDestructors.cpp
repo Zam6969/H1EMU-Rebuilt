@@ -634,3 +634,87 @@ REBUILD_FUNCTION(moneypunct_T1e5ca9_DeletingDestructor_141913e04, 0x141913e04, (
 REBUILD_FUNCTION(_Mpunct_Tc7d76e_DeletingDestructor_14192cc48, 0x14192cc48, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
 REBUILD_FUNCTION(moneypunct_Te54cb2_DeletingDestructor_14192cde8, 0x14192cde8, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
 REBUILD_FUNCTION(moneypunct_T29e7aa_DeletingDestructor_14192cd80, 0x14192cd80, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
+
+namespace rebuild::game_misc {
+// SoeUtil::Array<T> storage policy (vtable slot): pick the new capacity for
+// `count` elements and allocate it, or return the current buffer when it is
+// kept. exact: capacity == count. Otherwise grow to count*5/4, keep while
+// capacity <= count*4/3, else shrink to count*6/5. Allocates through the
+// thread allocator (0x14032f910, aligned) when one is installed, else the
+// tagged heap (0x1402fc150, tag 0x143c46658). 32-bit wrapping arithmetic as
+// in the original.
+template <int Element, uint64_t Tag>
+void* ArrayReallocate(uint8_t* self, int count, int* newCapacity, bool exact) {
+  int capacity = *reinterpret_cast<int*>(self + 0x14);
+  int chosen;
+  if (exact) {
+    if (capacity == count) {
+      *newCapacity = capacity;
+      return *reinterpret_cast<void**>(self + 8);
+    }
+    if (count == 0) {
+      *newCapacity = 0;
+      return nullptr;
+    }
+    chosen = count;
+  } else if (count > capacity) {
+    chosen = static_cast<int>(static_cast<uint32_t>(count) * 5u) / 4;
+  } else if (static_cast<int>(static_cast<uint32_t>(count) * 4u) / 3 >= capacity) {
+    *newCapacity = capacity;
+    return *reinterpret_cast<void**>(self + 8);
+  } else {
+    chosen = static_cast<int>(static_cast<uint32_t>(count) * 6u) / 5;
+  }
+  *newCapacity = chosen;
+  uint32_t bytes = static_cast<uint32_t>(chosen) * Element;
+  if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
+    return game::Call<void* (*)(size_t, size_t)>(0x14032f910)(bytes, Element);
+  return game::Call<void* (*)(int64_t, void*)>(0x1402fc150)(static_cast<int32_t>(bytes), reinterpret_cast<void*>(Tag));
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(Array_Tbdc477_Reallocate_141623040, 0x141623040, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tdc6556_Reallocate_1403cc120, 0x1403cc120, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T588403_Reallocate_140ac3a60, 0x140ac3a60, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T67e985_Reallocate_14162a250, 0x14162a250, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tf14bc3_Reallocate_14164dfc0, 0x14164dfc0, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tfe86e4_Reallocate_14164e090, 0x14164e090, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T659cd7_Reallocate_14164e1a0, 0x14164e1a0, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T82f82e_Reallocate_14165a240, 0x14165a240, (ArrayReallocate<4, 0x143c46658>));
+REBUILD_FUNCTION(Array_T14d15e_Reallocate_141668eb0, 0x141668eb0, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T043ee0_Reallocate_14166dcf0, 0x14166dcf0, (ArrayReallocate<4, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tae3129_Reallocate_1416749b0, 0x1416749b0, (ArrayReallocate<4, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tb50686_Reallocate_1416748c0, 0x1416748c0, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_Tfe35cd_Reallocate_141ebfd60, 0x141ebfd60, (ArrayReallocate<8, 0x143c46658>));
+
+namespace rebuild::game_misc {
+// Classes with a class-level operator delete (GameCommerce definitions):
+// reset to the base vtable; on (flags & 1) free through the sized pool
+// (0x1402ec800) when (flags & 4) is set, else the thread allocator
+// (0x14032f980) if installed, else operator delete (0x1402fc170).
+template <uint64_t Vtable, size_t Size>
+void* PoolDeletingDestructor(void* self, unsigned flags) {
+  *static_cast<uint64_t*>(self) = Vtable;
+  if (flags & 1) {
+    if (flags & 4)
+      game::Call<void (*)(void*, size_t)>(0x1402ec800)(self, Size);
+    else if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
+      game::Call<void (*)(void*, int)>(0x14032f980)(self, 0);
+    else
+      game::Call<void (*)(void*)>(0x1402fc170)(self);
+  }
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(StringSecure_Tc47e52_DeletingDestructor_1408146e0, 0x1408146e0, (VtableDeletingDestructor<0x1424b9ed0, 0x140810b50, 0x40>));
+REBUILD_FUNCTION(StringSecure_T8190b9_DeletingDestructor_1408146a0, 0x1408146a0, (VtableDeletingDestructor<0x1424b9f10, 0x140810ad0, 0x30>));
+REBUILD_FUNCTION(StringSecure_Tedee12_DeletingDestructor_1403c05a0, 0x1403c05a0, (VtableDeletingDestructor<0x1424bb930, 0x1403a6400, 0x128>));
+REBUILD_FUNCTION(StringSecure_T9ee84a_DeletingDestructor_141615c60, 0x141615c60, (VtableDeletingDestructor<0x1424bbca0, 0x1416153a0, 0x428>));
+REBUILD_FUNCTION(GameCore__GameClientConfig_DeletingDestructor_141683370, 0x141683370, (VtableDeletingDestructor<0x1424c72c0, 0x14030a210, 0x35d0>));
+REBUILD_FUNCTION(GameCommerce__BaseDefinition_DeletingDestructor_1407f27e0, 0x1407f27e0, (PoolDeletingDestructor<0x1424bc080, 0x8>));
+REBUILD_FUNCTION(GameCommerce__MarketingBundleDefinition__Tag_DeletingDestructor_14161a730, 0x14161a730, (PoolDeletingDestructor<0x1424bc080, 0x10>));
+REBUILD_FUNCTION(GameCommerce__StoreBundleGroupDefinition__Entry_DeletingDestructor_14161d550, 0x14161d550, (PoolDeletingDestructor<0x1424bc080, 0x10>));
+REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryGroupDefinition__Entry_DeletingDestructor_14161f9c0, 0x14161f9c0, (PoolDeletingDestructor<0x1424bc080, 0x10>));
+REBUILD_FUNCTION(GameCommerce__StoreShortcutDefinition_DeletingDestructor_141621880, 0x141621880, (PoolDeletingDestructor<0x1424bc080, 0x18>));
+REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryMapEntryDefinition_DeletingDestructor_141e96820, 0x141e96820, (PoolDeletingDestructor<0x1424bc080, 0x18>));
