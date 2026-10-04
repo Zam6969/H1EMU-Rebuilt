@@ -8,6 +8,9 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/String.h"
+
+#include <intrin.h>
 
 namespace rebuild::game_misc {
 namespace {
@@ -67,3 +70,61 @@ REBUILD_FUNCTION(CaptureCommon__IBuffer_DeletingDestructor, 0x14194ee30, (Simple
 REBUILD_FUNCTION(SpeedTree__CCoordSysBase_DeletingDestructor, 0x141808d80, (SimpleDeletingDestructor<0x1425a0f90, 0x8>));
 REBUILD_FUNCTION(DataManagement__DataLoaderInterface_DeletingDestructor, 0x141710970, (SimpleDeletingDestructor<0x1425ad280, 0x8>));
 REBUILD_FUNCTION(DataManagement__DataAccessInterface_DeletingDestructor, 0x141710940, (SimpleDeletingDestructor<0x1425ad2b8, 0x8>));
+
+namespace rebuild::game_misc {
+namespace {
+
+template <uint64_t Target, ptrdiff_t Adjust>
+void* DeletingDestructorThunk(uint8_t* self, unsigned flags) {
+  return game::Call<void* (*)(uint8_t*, unsigned)>(Target)(self + Adjust, flags);
+}
+
+// SoeUtil::RefCounted-style deleting destructors: drop the weak reference on
+// the shared count block at +8 ({strong, weak}, freed with the last weak).
+template <size_t Size>
+void* RefCountedDeletingDestructor(uint8_t* self, unsigned flags) {
+  *reinterpret_cast<uint64_t*>(self) = 0x14204f640;
+  if (auto* counts = *reinterpret_cast<volatile long**>(self + 8)) {
+    if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts) SizedDelete(const_cast<long*>(counts), 0x10);
+    *reinterpret_cast<void**>(self + 8) = nullptr;
+  }
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+
+}  // namespace
+
+// 0x14034e6c0 / 0x14034e550 (CoreGameClient): notify the object at +0x31418
+// (vfunc 0x10 / 0x18, arguments passed through), then a BaseApp step.
+void CoreGameClientNotifyA(uint8_t* self, uint64_t a, uint64_t b, uint64_t c) {
+  void* target = *reinterpret_cast<void**>(self + 0x31418);
+  (*reinterpret_cast<void (***)(void*, uint64_t, uint64_t, uint64_t)>(target))[0x10 / 8](target, a, b, c);
+  game::Call<void (*)(uint8_t*)>(0x140309bd0)(self);  // BaseApp: clear +0x312D1
+}
+void CoreGameClientNotifyB(uint8_t* self, uint64_t a, uint64_t b, uint64_t c) {
+  void* target = *reinterpret_cast<void**>(self + 0x31418);
+  (*reinterpret_cast<void (***)(void*, uint64_t, uint64_t, uint64_t)>(target))[0x18 / 8](target, a, b, c);
+  game::Call<void (*)(uint8_t*)>(0x14034e5a0)(self);
+}
+
+// 0x1415012e0 (AssetDelivery::Loader): set the name string at +8.
+void AssetLoaderSetName(uint8_t* self, const char* name) {
+  auto* text = reinterpret_cast<soeutil::IString*>(self + 8);
+  soeutil::StringRelease(text);
+  text->data = soeutil::EmptyStringData();
+  text->length = 0;
+  text->capacity = 0;
+  if (name) soeutil::StringAssign(text, name);
+}
+
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(LoggingApi_DeletingDestructor_Thunk80, 0x14030c90c, (DeletingDestructorThunk<0x14030ce70, -0x80>));
+REBUILD_FUNCTION(LoggingApi_DeletingDestructor_Thunk88, 0x14030c918, (DeletingDestructorThunk<0x14030ce70, -0x88>));
+REBUILD_FUNCTION(LoggingApi_DeletingDestructor_ThunkD28, 0x14030c924, (DeletingDestructorThunk<0x14030ce70, -0xd28>));
+REBUILD_FUNCTION(SoeUtil_RefCounted_DeletingDestructor, 0x1402f2a20, RefCountedDeletingDestructor<0x10>);
+REBUILD_FUNCTION(SoeUtil_RefCountedImplicit_DeletingDestructor, 0x140335910, RefCountedDeletingDestructor<0x10>);
+REBUILD_FUNCTION(SoeUtil_ThreadBase_DeletingDestructor, 0x1403359c0, RefCountedDeletingDestructor<0x28>);
+REBUILD_FUNCTION(CoreGameClient_NotifyA, 0x14034e6c0, CoreGameClientNotifyA);
+REBUILD_FUNCTION(CoreGameClient_NotifyB, 0x14034e550, CoreGameClientNotifyB);
+REBUILD_FUNCTION(AssetDeliveryLoader_SetName, 0x1415012e0, AssetLoaderSetName);
