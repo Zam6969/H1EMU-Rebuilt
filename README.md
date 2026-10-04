@@ -90,6 +90,7 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpConnection` dispatch | ProcessCookedPacket: every protocol opcode (connect/confirm, multi, terminate, clock sync/reflect, reliable/ack routing, group, ordered, unreachable/remap); BufferedSend (00 03 multi-packet batching) |
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
+| ClientServerCore | `BaseApp` | Init: <name>Startup.log, logging service setup / connect, WorkingDir, crash file name, InfiniteLoopMonitor watchdog, CrashReporter settings (product, version, uploader, dump options), Pid / Version / Built banner |
 | ClientServerCore | `BaseConfig` | Load(reload): <app>.ini / BaseInifile resolution, change detection by file time, ini layering (command line -> primary -> base), Settings / Soemon / Profiler / CrashReporter / Logging / InfiniteLoopMonitor / Memory values |
 | TcpLibrary | `TcpPlatformDriver` | complete (all 15 slots): deleting destructor, Listen (bind host / gethostbyname, listen backlog), CloseListen, GetLocalAddress / GetLocalPort, GetProxy (IE ProxyEnable / ProxyServer registry), Connect (non-blocking, TcpConnectionPlatformDriver + TcpConnection), GetHostAddress (public / private pick), Init, Resolve ("host[:port]"), InitSsl (Secur32 SSPI, Schannel credentials), CleanupSsl, AcceptConnections, ConnectAsync; TcpDriver::ResolveAsync ("TcpDriverAsyncAddress" pool) - complete |
 | TcpLibrary | `TcpConnectionPlatformDriver` | complete (all 11 slots + TLS helpers): deleting destructor, SetOwner, GiveTime (async-address connect, zero-timeout select for connect completion, 64 KB recv loop with per-error disconnect reasons, TLS hand-off), local / remote address, local port, Send (plain or TLS), IsSecure, StartSslClientHandshake (InitializeSecurityContextW ClientHello), TerminateSslConnection (SCHANNEL_SHUTDOWN + close_notify), SendEncrypted (EncryptMessage stream buffers, queue the unsent tail), DecryptReceived (DecryptMessage loop: extra bytes, expiry, incomplete records, renegotiation), DoSslClientHandshake (InitializeSecurityContextW loop, extra-data carry-over, bundled app data) |
@@ -107,7 +108,7 @@ carry RTTI; most engine classes were built without it.
 | Game | packet stream helpers | u8/u16 writers, tunnel-message header+byte(+chunk list) writers, packed-byte writer, chunk-list writer, channel-2 packet readers, {opcode,int} packet reader, pooled stream holder ctor |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 859 functions (828 hooked, 31 too small to hook).
+Total: 860 functions (829 hooked, 31 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
