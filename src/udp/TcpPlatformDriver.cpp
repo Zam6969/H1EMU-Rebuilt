@@ -12,6 +12,8 @@
 #include "core/hook.h"
 #include "soeutil/String.h"
 
+#include <intrin.h>
+
 namespace rebuild::udp {
 namespace {
 
@@ -339,6 +341,90 @@ void TcpPlatformDriverCleanupSsl(TcpPlatformDriver* self) {
   if (elapsed > 1000) game::Call<LogFn>(0x1402ef740)(SslLog(), reinterpret_cast<const char*>(0x1425abf38), elapsed);  // "Warning! CleanupSsl took %d ms."
 }
 
+namespace {
+// Shared-reference release for objects carrying a {strong, weak} count block
+// at +8: drop both counts, free the 0x10-byte block when the last weak
+// reference goes, and run the object's vfunc 1 when the last strong one does.
+void ReleaseShared(uint8_t* object) {
+  auto* counts = *reinterpret_cast<volatile long**>(object + 8);
+  bool lastStrong = _InterlockedExchangeAdd(&counts[0], -1) == 1;
+  if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts)
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(const_cast<long*>(counts), 0x10);
+  if (lastStrong) (*reinterpret_cast<void (***)(uint8_t*)>(object))[1](object);
+}
+}  // namespace
+
+// 0x141ebe2c0 (slot 2): accept every pending connection on the listen
+// socket and hand each new TcpConnection to the manager (0x141ec26d0).
+void TcpPlatformDriverAcceptConnections(TcpPlatformDriver* self) {
+  game::Call<void (*)(TcpPlatformDriver*)>(0x141ec2d10)(self);
+  SOCKET listenSocket = self->handle->listen;
+  if (listenSocket == INVALID_SOCKET) return;
+  sockaddr address;
+  int length = sizeof(sockaddr);
+  for (SOCKET accepted = accept(listenSocket, &address, &length); accepted != INVALID_SOCKET;
+       accepted = accept(self->handle->listen, &address, &length)) {
+    void* driver = NewConnectionDriver(self, accepted);
+    uint8_t* connection = nullptr;
+    if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x2170))
+      connection = game::Call<uint8_t* (*)(void*, void*, void*, bool, int)>(0x141ebf7a0)(memory, driver, self->handle->manager, true, 0);
+    game::Call<void (*)(void*, uint8_t*)>(0x141ec26d0)(self->handle->manager, connection);
+    ReleaseShared(connection);  // not null-checked in the original
+  }
+}
+
+// 0x141ebd520 (slot 9): start a connection whose address is resolved
+// asynchronously (slot 12 result, shared-referenced by the driver).
+void* TcpPlatformDriverConnectAsync(TcpPlatformDriver* self, void* name, int defaultPort, int flags) {
+  auto* lookup = (*reinterpret_cast<uint8_t* (***)(TcpPlatformDriver*, void*, int)>(self))[0x60 / 8](self, name, defaultPort);
+  auto* driver = static_cast<uint8_t*>(game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x70));
+  if (driver) {
+    auto field = [&](size_t offset) -> uint64_t& { return *reinterpret_cast<uint64_t*>(driver + offset); };
+    int optionB = self->handle->optionB;
+    int optionA = self->handle->optionA;
+    field(0) = 0x1425abcb0;
+    field(0x60) = 0;
+    field(0x20) = static_cast<uint64_t>(INVALID_SOCKET);
+    field(0x08) = reinterpret_cast<uint64_t>(self);
+    field(0x28) = 0;
+    field(0x10) = reinterpret_cast<uint64_t>(lookup);
+    auto* counts = *reinterpret_cast<volatile long**>(lookup + 8);  // lookup not null-checked in the original
+    _InterlockedIncrement(&counts[1]);
+    _InterlockedIncrement(&counts[0]);
+    *reinterpret_cast<int*>(driver + 0x18) = optionB;
+    *reinterpret_cast<int*>(driver + 0x1C) = optionA;
+    field(0x30) = 0;
+    field(0x38) = 0;
+    field(0x40) = 0;
+    field(0x48) = 0;
+    driver[0x68] = 1;
+    field(0x58) = 0;
+    field(0x60) = *reinterpret_cast<uint64_t*>(0x143e08020);
+  }
+  void* connection = nullptr;
+  if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x2170))
+    connection = game::Call<void* (*)(void*, void*, void*, bool, int)>(0x141ebf7a0)(memory, driver, self->handle->manager, false, flags);
+  if (lookup) ReleaseShared(lookup);
+  return connection;
+}
+
+// 0x141ec2bd0 (TcpDriver slot 12): queue an asynchronous address lookup
+// (AsyncAddressResult, 0x1b0) on the driver's lookup thread pool, created on
+// first use as "TcpDriverAsyncAddress".
+void* TcpDriverResolveAsync(uint8_t* self, void* name, int defaultPort) {
+  auto& pool = *reinterpret_cast<void**>(self + 8);
+  if (!pool) {
+    void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x190);
+    pool = memory ? game::Call<void* (*)(void*)>(0x141668930)(memory) : nullptr;
+    game::Call<void (*)(void*, int, int, int, const char*)>(0x14166a6f0)(pool, 1, 0x10000, 2, reinterpret_cast<const char*>(0x1425ad1e8));
+  }
+  void* result = nullptr;
+  if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x1B0))
+    result = game::Call<void* (*)(void*, uint8_t*, void*, int)>(0x141ec2900)(memory, self, name, defaultPort);
+  game::Call<void (*)(void*, void*, void*, void*)>(0x141668d70)(pool, result, nullptr, nullptr);
+  return result;
+}
+
 }  // namespace rebuild::udp
 
 using namespace rebuild::udp;
@@ -354,3 +440,6 @@ REBUILD_FUNCTION(TcpPlatformDriver_Init, 0x141ebe490, TcpPlatformDriverInit);
 REBUILD_FUNCTION(TcpPlatformDriver_Resolve, 0x141ebd6e0, TcpPlatformDriverResolve);
 REBUILD_FUNCTION(TcpPlatformDriver_InitSsl, 0x141ebe4c0, TcpPlatformDriverInitSsl);
 REBUILD_FUNCTION(TcpPlatformDriver_CleanupSsl, 0x141ebc660, TcpPlatformDriverCleanupSsl);
+REBUILD_FUNCTION(TcpPlatformDriver_AcceptConnections, 0x141ebe2c0, TcpPlatformDriverAcceptConnections);
+REBUILD_FUNCTION(TcpPlatformDriver_ConnectAsync, 0x141ebd520, TcpPlatformDriverConnectAsync);
+REBUILD_FUNCTION(TcpDriver_ResolveAsync, 0x141ec2bd0, TcpDriverResolveAsync);
