@@ -91,6 +91,7 @@ carry RTTI; most engine classes were built without it.
 | UdpLibrary | `UdpReliableChannel` | complete: ctor/dtor + ring element ctors/dtors, ReliablePacket (window, reordering, ack-dedup), Ack/AckAll/AckInternal (congestion window, RTT), fragment reassembly, Send / SendCoalesce (00 19 groups) / FlushCoalesce / QueueLogicalPacket / PullDataFromQueue (fragmentation), GiveTime (resend + congestion control: RFC 3390 initial window, loss and timeout back-off), GetChannelStatus, ClearStats; UdpMisc::Clock |
 | UdpLibrary | `UdpMisc` CRC | Crc32 (CRC-32 primed with the encrypt code) |
 | ClientServerCore | `BaseConfig` | Load(reload): <app>.ini / BaseInifile resolution, change detection by file time, ini layering (command line -> primary -> base), Settings / Soemon / Profiler / CrashReporter / Logging / InfiniteLoopMonitor / Memory values |
+| TcpLibrary | `TcpPlatformDriver` | deleting destructor, Listen (bind host / gethostbyname, listen backlog), CloseListen, GetLocalAddress / GetLocalPort, GetProxy (IE ProxyEnable / ProxyServer registry), Connect (non-blocking, TcpConnectionPlatformDriver + TcpConnection), GetHostAddress (public / private pick); left: accept loop (slot 2), slots 1, 9, 10, 12, 13, 14 |
 | Networking | deleting destructors | 66 vtable slot-0 / default-handler functions (src/udp/NetDestructors.cpp): UdpLinkedList x6, UdpDriver, Udp manager/connection/compression/RPC handlers, BaseApp, BaseConfig, BaseApi, BaseUdpManager, CryptoBaseApi, BaseTcpApi, GameServerData, ExternalLoginApi, ExternalLoginUdpApi, ExternalLoginTcpApi, BaseApp flag clear, all Gateway and Login external packets (incl. byte-array packets and ServerListReply), secondary-vtable this-adjusting thunks, UdpManagerHandler copy-through encrypt/decrypt defaults |
 | UdpLibrary | guarded stats | UdpConnection Outgoing/IncomingBytesLastSecond, LastReceive, LastSend; UdpManager LastEventAge, GetStats |
 | Game | packet dispatch | Login::ExternalLoginUdpApi::HandlePacket (10 LoginUdp_11 replies), Gateway::ExternalGatewayApi::HandlePacket (opcode & 0x1F / channel >> 5: LoginReply, ForceDisconnect, TunnelPacket, ChannelIsRoutable, ConnectionIsNotRoutable) |
@@ -105,7 +106,7 @@ carry RTTI; most engine classes were built without it.
 | Game | packet stream helpers | u8/u16 writers, tunnel-message header+byte(+chunk list) writers, packed-byte writer, chunk-list writer, channel-2 packet readers, {opcode,int} packet reader, pooled stream holder ctor |
 | GameCommerce | marketing-data containers | two HashListMap instances: Remove, Clear, Rehash (templated over node layout) |
 
-Total: 831 functions (801 hooked, 30 too small to hook).
+Total: 839 functions (809 hooked, 30 too small to hook).
 
 Next: the rest of `UdpConnection` (internal GiveTime 0x140347360,
 ProcessRawPacket 0x1403491e0, the big packet handler 0x140348390,
