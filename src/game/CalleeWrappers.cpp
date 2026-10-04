@@ -1586,6 +1586,121 @@ void* Construct1425017b0(uint8_t* self) {
   return self;
 }
 
+
+namespace {
+struct ByteReader {
+  const uint8_t* data;
+  int length;
+  const uint8_t* cursor;
+  const uint8_t* end;
+  uint8_t failed;
+  uint8_t pad;
+};
+static_assert(offsetof(ByteReader, cursor) == 0x10 && offsetof(ByteReader, failed) == 0x20);
+}  // namespace
+
+// Packet / record parsers over a byte buffer (0x1403895e0, 0x14038c0e0,
+// 0x14038bf90, 0x14038e630, 0x14038b0e0, 0x14038c150, 0x14038c070): parse
+// with Parser(target, reader); fail on a reader error, or on trailing bytes
+// unless allowed.
+template <uint64_t Parser>
+bool ParseFromBuffer(void* target, const uint8_t* data, int length, bool allowTrailing) {
+  if (!target || !data) return false;
+  ByteReader reader{data, length, data, data + length, 0, 0};
+  game::Call<void (*)(void*, ByteReader*)>(Parser)(target, &reader);
+  if (reader.failed) return false;
+  if (!allowTrailing && static_cast<int>(reinterpret_cast<uintptr_t>(reader.end)) - static_cast<int>(reinterpret_cast<uintptr_t>(reader.cursor)) > 0)
+    return false;
+  return true;
+}
+
+// 0x1402ee000: lazily initialized global (0x142ae8598), guarded by an
+// atomic once flag (0x142ae85dc).
+void* LazyGlobal142ae8598() {
+  auto* once = reinterpret_cast<volatile char*>(0x142ae85dc);
+  if (*once == 0 && _InterlockedCompareExchange8(once, 1, 0) == 0) game::Call<void (*)()>(0x1402eeb30)();
+  return *reinterpret_cast<void**>(0x142ae8598);
+}
+
+// 0x14032ed90: vsnprintf (__stdio_common_vsprintf), -1 on error.
+int FormatToBufferV(char* buffer, int size, const char* format, va_list args) {
+  uint64_t options = *game::Call<uint64_t* (*)()>(0x1402f1040)();
+  int result = game::Call<int (*)(uint64_t, char*, int64_t, const char*, void*, va_list)>(0x140d3d5c8)(options, buffer, size, format, nullptr, args);
+  return result < 0 ? -1 : result;
+}
+
+// 0x140a85750: register the seven fixed audio state hashes.
+uint64_t RegisterAudioStateHashes(void* self) {
+  using SetFn = void (*)(void*, uint32_t);
+  game::Call<SetFn>(0x140a80fa0)(self, 0x86274BAD);
+  game::Call<SetFn>(0x140a81030)(self, 0x833509AA);
+  game::Call<SetFn>(0x140a811e0)(self, 0x3C5DCCE4);
+  game::Call<SetFn>(0x140a810c0)(self, 0x4A5F6ABB);
+  game::Call<SetFn>(0x140a81300)(self, 0x7495C48A);
+  game::Call<SetFn>(0x140a81150)(self, 0x3C518C07);
+  return game::Call<uint64_t (*)(void*, uint32_t)>(0x140a81270)(self, 0xE9185BAE);
+}
+
+// 0x14039b600: constructor (type 0x11 / 0x31, vtables 0x142065580 /
+// 0x142065550, 0x400-byte table cleared).
+void* Construct142065580(uint8_t* self) {
+  At<int>(self, 8) = 0x11;
+  At<uint64_t>(self, 0) = 0x142065580;
+  At<int>(self, 0x10) = 0x31;
+  At<int>(self, 0x38) = 0;
+  At<uint64_t>(self, 0x28) = 0;
+  At<uint64_t>(self, 0x30) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x40, 0, 0x400);
+  At<int>(self, 0x20) = 0;
+  At<uint64_t>(self, 0x18) = 0x142065550;
+  At<int>(self, 0x24) = 0x7FFFFFFF;
+  return self;
+}
+
+// 0x14030d4b0: format the current wall-clock time of day into +0xDFA0.
+void FormatTimeOfDay(uint8_t* self) {
+  struct TimeParts {
+    uint8_t head[16];
+    int part0;
+    int part1;
+    int part2;
+  } parts;
+  static_assert(offsetof(TimeParts, part0) == 0x10);
+  for (int i = 0; i < 16; ++i) parts.head[i] = reinterpret_cast<const uint8_t*>(0x14204b110)[i];
+  parts.part0 = 0;
+  parts.part1 = 0;
+  parts.part2 = 0;
+  int64_t now;
+  int64_t* time = game::Call<int64_t* (*)(int64_t*)>(0x14032fe90)(&now);
+  game::Call<void (*)(int64_t*, TimeParts*, bool)>(0x14032fbe0)(time, &parts, true);
+  game::Call<void (*)(void*, const char*, ...)>(0x1402bd7f0)(self + 0xDFA0, reinterpret_cast<const char*>(0x14204b088), At<int>(&parts, 0xC), parts.part0,
+                                                           parts.part1);
+}
+
+// 0x1403f5ff0: name of the currently selected entry (+0x38AC8) into out.
+bool CurrentSelectionName(uint8_t* self, void* out) {
+  int key = game::Call<int (*)(void*)>(0x140cf3dc0)(At<void*>(self, 0x38AC8));
+  uint8_t* entry = game::Call<uint8_t* (*)(void*, int)>(0x140cf41c0)(At<void*>(self, 0x38AC8), key);
+  if (!entry || !game::Call<void* (*)(void*, bool)>(0x140cf3e60)(entry, true)) return false;
+  game::Call<void (*)(void*, const char*)>(0x1402bd670)(out, At<const char*>(entry, 0x20));
+  return true;
+}
+
+// 0x140839910: query the lazily created global (0x142b19e60) under its
+// lock (+0x20).
+uint64_t QueryLazyGlobal142b19e60() {
+  if (!*reinterpret_cast<bool*>(0x143bcf3b0)) {
+    game::Call<void (*)()>(0x1408395e0)();
+    *reinterpret_cast<bool*>(0x143bcf3b0) = true;
+  }
+  uint8_t* object = *reinterpret_cast<uint8_t**>(0x142b19e60);
+  uint8_t* lock = object + 0x20;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  uint64_t result = game::Call<uint64_t (*)(void*)>(0x140839c00)(object);
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  return result;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -1770,3 +1885,17 @@ REBUILD_FUNCTION(QueryHandler, 0x1414d91b0, QueryHandler);
 REBUILD_FUNCTION(ResetSharedPointer_1403a97f0, 0x1403a97f0, ResetSharedPointer);
 REBUILD_FUNCTION(ResetSharedPointer_1403a95c0, 0x1403a95c0, ResetSharedPointer);
 REBUILD_FUNCTION(Construct_1425017b0, 0x1417d9420, Construct1425017b0);
+REBUILD_FUNCTION(ParseFromBuffer_1403895e0, 0x1403895e0, ParseFromBuffer<0x14036af00>);
+REBUILD_FUNCTION(ParseFromBuffer_14038c0e0, 0x14038c0e0, ParseFromBuffer<0x140373470>);
+REBUILD_FUNCTION(ParseFromBuffer_14038bf90, 0x14038bf90, ParseFromBuffer<0x140373200>);
+REBUILD_FUNCTION(ParseFromBuffer_14038e630, 0x14038e630, ParseFromBuffer<0x140377320>);
+REBUILD_FUNCTION(ParseFromBuffer_14038b0e0, 0x14038b0e0, ParseFromBuffer<0x1403729b0>);
+REBUILD_FUNCTION(ParseFromBuffer_14038c150, 0x14038c150, ParseFromBuffer<0x140373560>);
+REBUILD_FUNCTION(ParseFromBuffer_14038c070, 0x14038c070, ParseFromBuffer<0x1403733a0>);
+REBUILD_FUNCTION(LazyGlobal_142ae8598, 0x1402ee000, LazyGlobal142ae8598);
+REBUILD_FUNCTION(FormatToBufferV, 0x14032ed90, FormatToBufferV);
+REBUILD_FUNCTION(RegisterAudioStateHashes, 0x140a85750, RegisterAudioStateHashes);
+REBUILD_FUNCTION(Construct_142065580, 0x14039b600, Construct142065580);
+REBUILD_FUNCTION(FormatTimeOfDay, 0x14030d4b0, FormatTimeOfDay);
+REBUILD_FUNCTION(CurrentSelectionName, 0x1403f5ff0, CurrentSelectionName);
+REBUILD_FUNCTION(QueryLazyGlobal_142b19e60, 0x140839910, QueryLazyGlobal142b19e60);
