@@ -1812,6 +1812,112 @@ void* EntryIfOwned(uint8_t* self, const int* id) {
   return nullptr;
 }
 
+
+// 0x14049c530: set the display mode (1..3, else 1) in the settings block
+// (+0x3B728), refresh its resolution fields and apply it.
+bool SetDisplayMode(uint8_t* self, int mode) {
+  int chosen = static_cast<uint32_t>(mode - 1) > 2 ? 1 : mode;
+  uint8_t* settings = At<uint8_t*>(self, 0x3B728);
+  uint8_t* info = game::Call<uint8_t* (*)(int, int, int)>(0x1418baa30)(At<int>(settings, 4), At<int>(settings, 8), chosen);
+  At<int>(settings, 0x10) = At<int>(info, 0xC);
+  At<int>(settings, 0x14) = At<int>(info, 0x10);
+  At<int>(settings, 0xC) = chosen;
+  game::Call<void (*)(void*, int)>(0x140ab6be0)(*reinterpret_cast<void**>(0x142b199f0), chosen);
+  At<uint8_t>(self, 0x3B730) = 1;
+  return true;
+}
+
+// 0x140474500: register the renderer target (+0x31498) and enable
+// feature 0x18CE, mark ready (+0x3151C) and push the camera value.
+void InitRendererTarget(uint8_t* self) {
+  void* renderer = *reinterpret_cast<void**>(0x142b19b20);
+  game::Call<void (*)(void*, void*)>(0x1418fe590)(renderer, At<void*>(self, 0x31498));
+  game::Call<void (*)(void*, int)>(0x14186e490)(renderer, 0x18CE);
+  game::Call<void (*)(void*, int)>(0x14186e4a0)(renderer, 0x18CE);
+  uint8_t* camera = At<uint8_t*>(self, 0x38890);
+  At<uint8_t>(self, 0x3151C) = 1;
+  if (camera) game::Call<void (*)(void*, float)>(0x141868970)(At<void*>(self, 0x3B6F8), At<float>(camera, 0x2F4));
+}
+
+// 0x141ec3aa0: DataManagement::FlatFileDataLoader Reset.
+void FlatFileDataLoaderReset(uint8_t* self) {
+  game::Call<void (*)(void*, int)>(0x1404595e0)(self + 0xD8, At<int>(self, 0xE8));
+  game::Call<void (*)(void*)>(0x1417117b0)(self + 0x18);
+  game::Call<void (*)(void*, int)>(0x1404595e0)(self + 0x38, At<int>(self, 0x48));
+  uint8_t* text = self + 0x70;
+  if (At<int>(text, 0x14) > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(At<uint8_t*>(text, 8) - 4), -1) - 1 <= 0) Virtual(text, 2);
+  At<uint64_t>(self, 0x78) = 0x143e09641;
+  At<uint64_t>(self, 0x80) = 0;
+}
+
+// 0x141ebc380: destroy the member at +0x78, then the StringFixed at +0x18.
+void Destructor141ebc380(uint8_t* self) {
+  game::Call<void (*)(void*)>(0x14166c080)(self + 0x78);
+  FixedStringDestructor<0x142049ce0, 0x143e09641, 0x142049b50>(self + 0x18);
+}
+
+// 0x14039d5a0: constructor: invalid id, default parameter blocks, packed
+// value from 0x1402ee3a0, type 3.
+void* Construct14039d5a0(uint8_t* self) {
+  At<uint64_t>(self, 0) = *reinterpret_cast<uint64_t*>(0x142b181f8);
+  for (int i = 0; i < 16; ++i) {
+    self[0x10 + i] = reinterpret_cast<const uint8_t*>(0x142b06a70)[i];
+    self[0x20 + i] = reinterpret_cast<const uint8_t*>(0x142b06a70)[i];
+  }
+  At<int>(self, 0x30) = 0;
+  At<uint32_t>(self, 0x34) = 0x80000000u;
+  At<int>(self, 0x38) = 0;
+  uint32_t value = static_cast<uint32_t>(ForwardWithContext(nullptr, -1, 1, 0, nullptr, nullptr));
+  At<uint32_t>(self, 0x34) = (At<uint32_t>(self, 0x34) & 0x80000000u) | (value & 0x7FFFFFFFu);
+  At<int>(self, 0x3C) = 3;
+  return self;
+}
+
+// 0x140514940: is the state id in the active list (+0x39F0, next +0x10)?
+// (under the lock at +0x6F0)
+bool HasActiveState(uint8_t* self, int id) {
+  uint8_t* lock = self + 0x6F0;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  bool found = false;
+  for (uint8_t* node = At<uint8_t*>(self, 0x39F0); node; node = At<uint8_t*>(node, 0x10)) {
+    if (At<int>(node, 0x18) == id) {
+      found = true;
+      break;
+    }
+  }
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  return found;
+}
+
+// 0x1403b3390: tear down the four sub-objects (+0x18, +0x10, +8, self).
+void TeardownFour(uint8_t* self) {
+  using Fn = void (*)(void*);
+  game::Call<Fn>(0x1403d46b0)(self + 0x18);
+  game::Call<Fn>(0x1403a9b00)(self + 0x18);
+  game::Call<Fn>(0x1403d4390)(self + 0x10);
+  game::Call<Fn>(0x1403a9780)(self + 0x10);
+  game::Call<Fn>(0x1403d4570)(self + 8);
+  game::Call<Fn>(0x1403a99b0)(self + 8);
+  game::Call<Fn>(0x1403d47f0)(self);
+  game::Call<Fn>(0x1403a9d30)(self);
+}
+
+// 0x140aa8500: the 0x40-byte singleton (0x143be9d50), created on first use.
+void* Singleton143be9d50() {
+  void*& instance = *reinterpret_cast<void**>(0x143be9d50);
+  if (instance) return instance;
+  auto* created = game::Call<uint8_t* (*)(size_t)>(0x1402fc0f0)(0x40);
+  if (created) {
+    At<uint8_t>(created, 0) = 0;
+    At<uint64_t>(created, 8) = *reinterpret_cast<uint64_t*>(0x143be9e80);
+    At<uint64_t>(created, 0x10) = 0x142187ec8;
+    for (size_t offset = 0x18; offset <= 0x30; offset += 8) At<uint64_t>(created, offset) = 0;
+    At<int>(created, 0x38) = 0;
+  }
+  instance = created;
+  return created;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -2020,3 +2126,11 @@ REBUILD_FUNCTION(DrainBothLists, 0x1403d4c60, DrainBothLists);
 REBUILD_FUNCTION(Construct_1424bb930, 0x140396ad0, Construct1424bb930);
 REBUILD_FUNCTION(ReleaseGlobal_143bc51b0, 0x14077ff60, ReleaseGlobal143bc51b0);
 REBUILD_FUNCTION(EntryIfOwned, 0x1403f8380, EntryIfOwned);
+REBUILD_FUNCTION(SetDisplayMode, 0x14049c530, SetDisplayMode);
+REBUILD_FUNCTION(InitRendererTarget, 0x140474500, InitRendererTarget);
+REBUILD_FUNCTION(FlatFileDataLoader_Reset, 0x141ec3aa0, FlatFileDataLoaderReset);
+REBUILD_FUNCTION(Destructor_141ebc380, 0x141ebc380, Destructor141ebc380);
+REBUILD_FUNCTION(Construct_14039d5a0, 0x14039d5a0, Construct14039d5a0);
+REBUILD_FUNCTION(HasActiveState, 0x140514940, HasActiveState);
+REBUILD_FUNCTION(TeardownFour, 0x1403b3390, TeardownFour);
+REBUILD_FUNCTION(Singleton_143be9d50, 0x140aa8500, Singleton143be9d50);
