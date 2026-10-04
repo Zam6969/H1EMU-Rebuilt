@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <initializer_list>
 #include <utility>
@@ -1925,10 +1926,11 @@ bool GameClientInitialize(uint8_t* game) {
 // so each one is built in a shared buffer as large as the original frame.
 class Packet83 {
  public:
-  Packet83(uint64_t vtable, int subType, uint8_t* storage) : bytes_(storage) {
+  // Packet 0x11 sub-packets (slot 93) use the same layout with opcode 0x11.
+  Packet83(uint64_t vtable, int subType, uint8_t* storage, uint64_t opcode = 0x83) : bytes_(storage) {
     std::memset(bytes_, 0, kPacket83Bytes);
     Put<uint64_t>(0, vtable);
-    Put<uint64_t>(8, 0x83);
+    Put<uint64_t>(8, opcode);
     Put<int>(0x10, subType);
   }
   template <class T>
@@ -5727,6 +5729,934 @@ finish:;
   }
 }
 
+// Packet 0x11 header {vtable, opcode byte (in an int preset to 0x11), short
+// sub-type (in an int)} as the local player's pre-dispatch sees it.
+struct Packet11Header {
+  void** vtable;
+  int opcode;
+  int pad0C;
+  int subType;
+  int pad14;
+};
+static_assert(sizeof(Packet11Header) == 0x18);
+
+// 0x140404980 (slot 93): packet 0x11 - the local player may consume it first
+// (0x14062fb40); otherwise read the sub-packet and apply it (stats, abilities,
+// loyalty points, rewards UI, squad, jobs, ...).
+bool GameClientHandlePacket11(uint8_t* game, const uint8_t* data, int length) {
+  Packet11Header header{reinterpret_cast<void**>(0x142065370), 0x11, 0, 0, 0};
+  if (!data) return false;
+  const uint8_t* end = data + length;
+  const uint8_t* cursor = data + 1;
+  bool failed = false;
+  if (cursor <= end) {
+    header.opcode = (header.opcode & ~0xFF) | data[0];
+  } else {
+    header.opcode &= ~0xFF;
+    failed = true;
+    cursor = end;
+  }
+  if (cursor + 2 > end) return false;
+  header.subType = *reinterpret_cast<const int16_t*>(cursor);
+  if (failed) return false;
+  auto player = [&] { return game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80); };
+  if (player() && game::Call<bool (*)(uint8_t*, Packet11Header*, const uint8_t*, int)>(0x14062fb40)(player(), &header, data, length)) return true;
+
+  alignas(16) uint8_t storage[Packet83::kPacket83Bytes];
+  using ReadFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+  using ReaderFn = void (*)(uint8_t*, ClientReader*);
+  auto readWithReader = [&](Packet83& packet, uint64_t read) {
+    ClientReader reader{data, length, data, end, 0};
+    game::Call<ReaderFn>(read)(packet.At(0), &reader);
+    return !static_cast<uint8_t>(reader.failed) && static_cast<int>(reader.end - reader.cursor) <= 0;
+  };
+  auto read = [&](Packet83& packet, uint64_t fn) { return game::Call<ReadFn>(fn)(packet.At(0), data, length, false); };
+  auto blobReader = [](Packet83& packet, int pointerOffset, int lengthOffset) {
+    auto* blob = packet.Get<const uint8_t*>(pointerOffset);
+    int blobLength = packet.Get<int>(lengthOffset);
+    return ClientReader{blob, blobLength, blob, blob + blobLength, 0};
+  };
+  auto character = [&] { return game::Call<uint8_t* (*)(void*)>(0x14071e830)(game::Field<void*>(game, 0x38860)); };
+  // Apply to the local player when the id matches, else to that entity.
+  auto applyToOwner = [&](uint64_t id, uint64_t playerFn, uint64_t entityFn, void* arg) {
+    uint8_t* self = player();
+    if (!self) return false;
+    if (id == game::Field<uint64_t>(self, 0x18)) {
+      game::Call<void (*)(uint8_t*, void*)>(playerFn)(self, arg);
+    } else {
+      uint64_t key = id;
+      if (void* entity = game::Call<void* (*)(void*, uint64_t*)>(0x14071ee60)(game::Field<void*>(game, 0x38860), &key))
+        game::Call<void (*)(void*, void*)>(entityFn)(entity, arg);
+    }
+    return true;
+  };
+  auto releasePacketString = [](Packet83& packet, int offset) {
+    auto* text = reinterpret_cast<soeutil::IString*>(packet.At(offset));
+    text->vtable = soeutil::IStringVtable();
+    soeutil::StringRelease(text);
+  };
+
+  switch (header.subType) {
+    case 0x48: {  // localized server name -> global string 0x142b178a8, refresh 0x142b17840
+      Packet83 packet(0x142065620, 0x48, storage, 0x11);
+      packet.Put<soeutil::IString>(0x18, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      if (read(packet, 0x14038d4d0)) {
+        soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+        void* strings = *reinterpret_cast<void**>(0x142b19798);
+        (*reinterpret_cast<void (***)(void*, const char*, soeutil::IString*)>(strings))[0x18 / 8](strings, packet.Get<const char*>(0x20), &text);
+        auto* current = reinterpret_cast<soeutil::IString*>(0x142b178a8);
+        if (!(static_cast<int>(*reinterpret_cast<uint64_t*>(0x142b178b8)) == text.length &&
+              std::memcmp(current->data, text.data, text.length) == 0)) {
+          game::Call<void (*)(soeutil::IString*, soeutil::IString*)>(0x1402bd560)(current, &text);
+          game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(0x142b17840));
+        }
+        text.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&text);
+      }
+      releasePacketString(packet, 0x18);
+      break;
+    }
+    case 0x49: {  // rewards / grinder disabled flags -> HUD
+      Packet83 packet(0x142065628, 0x49, storage, 0x11);
+      if (readWithReader(packet, 0x14036d460)) {
+        ScriptArgList args{reinterpret_cast<void**>(0x14206c548), nullptr, 0, 0};
+        if (auto* type = game::Call<int* (*)(ScriptArgList*, int)>(0x140418710)(&args, 0)) *type = 0;
+        game::Call<void (*)(void*, bool)>(0x14046d940)(args.values, packet.Get<uint8_t>(0x18));
+        game::Call<bool (*)(void*, const char*, ScriptArgList*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(0x14206ea08), &args,
+                                                                                    nullptr);  // "HudHandler:setRewardsDisabled"
+        if (args.count <= 0) {
+          if (auto* type = game::Call<int* (*)(ScriptArgList*, int)>(0x140418710)(&args, 0)) *type = 0;
+        }
+        game::Call<void (*)(void*, bool)>(0x14046d940)(args.values, packet.Get<uint8_t>(0x19));
+        game::Call<bool (*)(void*, const char*, ScriptArgList*, void*)>(0x140488cc0)(UiRoot(), reinterpret_cast<const char*>(0x14206ea28), &args,
+                                                                                    nullptr);  // "HudHandler:setGrinderDisabled"
+        game::Call<void (*)(ScriptArgList*)>(0x1403a06c0)(&args);
+      }
+      break;
+    }
+    case 0x1F: {  // squad data -> squad manager 0x142b19c70
+      Packet83 packet(0x142065498, 0x1F, storage, 0x11);
+      packet.Put<uint64_t>(0x18, 0x142065478);
+      packet.Put<uint64_t>(0x38, 0x142065478);
+      if (readWithReader(packet, 0x14036cae0))
+        game::Call<void (*)(void*, uint8_t*)>(0x140a88220)(*reinterpret_cast<void**>(0x142b19c70), packet.At(0));
+      game::Call<void (*)(uint8_t*)>(0x1403a7400)(packet.At(0x38));
+      game::Call<void (*)(uint8_t*)>(0x1403a7400)(packet.At(0x18));
+      break;
+    }
+    case 0x1E: {  // character's +0x280 object vfunc 0x980 with the packet's values
+      Packet83 packet(0x142065470, 0x1E, storage, 0x11);
+      packet.Put<int>(0x1C, *reinterpret_cast<int*>(0x142b186ac));
+      if (readWithReader(packet, 0x14036b9e0)) {
+        if (uint8_t* self = character()) {
+          void* target = (*reinterpret_cast<void* (***)(void*)>(self))[0x280 / 8](self);
+          if (target) {
+            using ApplyFn = void (*)(void*, int, float, float, uint8_t, uint8_t, float, int);
+            (*reinterpret_cast<ApplyFn**>(target))[0x980 / 8](target, packet.Get<int>(0x20), packet.Get<float>(0x24), packet.Get<float>(0x28),
+                                                              packet.Get<uint8_t>(0x2C), packet.Get<uint8_t>(0x2D), packet.Get<float>(0x30),
+                                                              packet.Get<int>(0x34));
+          }
+        }
+      }
+      break;
+    }
+    case 1: {  // progress (current/max) notification on the character
+      Packet83 packet(0x142065378, 1, storage, 0x11);
+      if (!readWithReader(packet, 0x14036c140)) return false;
+      {
+        if (uint8_t* self = character()) {
+          int ownerId = game::Field<int>(self, 0x1AA4);
+          int current = packet.Get<int>(0x18);
+          int maximum = packet.Get<int>(0x1C);
+          int percent = maximum == 0 ? 100 : current * 100 / maximum;
+          void* notice = nullptr;
+          if (void* memory = game::Call<void* (*)(size_t)>(0x140839910)(0x90)) {
+            int id = ownerId;
+            alignas(16) uint8_t handle[16];
+            uint8_t* source = self + 0x630;
+            void* name = (*reinterpret_cast<void* (***)(void*, void*)>(source))[0x68 / 8](source, handle);
+            notice = game::Call<void* (*)(void*, int*, void*, int, int, int)>(0x1408397e0)(memory, &id, name, current, maximum, percent);
+          }
+          // not null-checked in the original
+          bool flag = (*reinterpret_cast<bool (***)(void*)>(notice))[0x40 / 8](notice);
+          float delay = game::Call<float (*)(uint8_t*, bool)>(0x1404e3f70)(self, flag);
+          (*reinterpret_cast<void (***)(uint8_t*, float, void*, int, float)>(self))[0x1E0 / 8](self, delay, notice, 1, 0.0f);
+        }
+      }
+      break;
+    }
+    case 0xB: {
+      Packet83 packet(0x142065380, 0xB, storage, 0x11);
+      if (!readWithReader(packet, 0x14036c440)) return false;
+              game::Call<void (*)(void*, uint8_t*, int, int)>(0x140a07880)(game::Field<void*>(game, 0x38B78), character(), packet.Get<int>(0x18),
+                                                                     packet.Get<int>(0x1C));
+      break;
+    }
+    case 2: {
+      Packet83 packet(0x142065388, 2, storage, 0x11);
+      packet.Put<uint64_t>(0x18, *reinterpret_cast<uint64_t*>(0x142b181f8));
+      if (!readWithReader(packet, 0x14036c1f0)) return false;
+      {
+        ClientReader blob = blobReader(packet, 0x20, 0x28);
+        applyToOwner(packet.Get<uint64_t>(0x18), 0x140630da0, 0x1405145f0, &blob);
+      }
+      break;
+    }
+    case 3: {
+      alignas(16) uint8_t state[0x60];
+      game::Call<void (*)(uint8_t*)>(0x1416d7a10)(state);
+      Packet83 packet(0x142065390, 3, storage, 0x11);
+      packet.Put<uint64_t>(0x18, *reinterpret_cast<uint64_t*>(0x142b181f8));
+      packet.Put<uint8_t*>(0x20, state);
+      bool ok = read(packet, 0x14038d6b0);
+      if (ok) applyToOwner(packet.Get<uint64_t>(0x18), 0x1406313a0, 0x140514700, state);
+      game::Call<void (*)(uint8_t*)>(0x1416d7a60)(state);
+      if (!ok) return false;
+      break;
+    }
+    case 4: {
+      Packet83 packet(0x142065398, 4, storage, 0x11);
+      packet.Put<uint64_t>(0x20, *reinterpret_cast<uint64_t*>(0x142b17e70));
+      if (!readWithReader(packet, 0x14036c2e0)) return false;
+      {
+        if (applyToOwner(packet.Get<uint64_t>(0x18), 0x1406311e0, 0x1405146b0, packet.At(0x20))) {
+          if (void* window = game::Field<void*>(game, 0x38900)) game::Call<void (*)(void*, int)>(0x1409e4be0)(window, 0);
+        }
+      }
+      break;
+    }
+    case 5: {  // stat list: apply each, refresh the stat whose id matches config hash 0x85c3f4d2
+      Packet83 packet(0x1420653c0, 5, storage, 0x11);
+      packet.Put<uint64_t>(0x18, 0x142064078);
+      bool ok = read(packet, 0x14038a4e0);
+      if (ok && player()) {
+        uint8_t* self = character();
+        for (auto* stat = packet.Get<uint8_t*>(0x20); stat; stat = game::Field<uint8_t*>(stat, 0x10)) {
+          game::Call<void (*)(uint8_t*, uint8_t*)>(0x140638ec0)(player(), stat);
+          int trackedId = 0;
+          for (auto* node = game::Field<uint8_t*>(*reinterpret_cast<uint8_t**>(0x142b197a0), 0x26F0); node; node = game::Field<uint8_t*>(node, 0x20)) {
+            if (game::Field<uint32_t>(node, 0x18) == 0x85c3f4d2) {
+              trackedId = static_cast<int>(game::Field<double>(node, 0));
+              break;
+            }
+          }
+          if (game::Field<int>(stat, 0) != trackedId) continue;
+          auto value = [&] {
+            return game::Field<int>(stat, 4) == 1 ? game::Field<float>(stat, 0xC) + game::Field<float>(stat, 8)
+                                                  : static_cast<float>(game::Field<int>(stat, 0xC) + game::Field<int>(stat, 8));
+          };
+          if (void* mode = game::Field<void*>(game, 0x388A8)) (*reinterpret_cast<void (***)(void*, float)>(mode))[0xB8 / 8](mode, value());
+          if (self) game::Field<float>(self, 0xDA8) = value();
+        }
+        if (packet.Get<int>(0x30) > 0) {
+          game::Call<void (*)(uint8_t*)>(0x140638fb0)(player());
+          if (self) (*reinterpret_cast<void (***)(uint8_t*)>(self))[0x778 / 8](self);
+        }
+      }
+      packet.Put<uint64_t>(0, 0x1420653c0);
+      game::Call<void (*)(uint8_t*)>(0x1403a71b0)(packet.At(0x18));
+      if (!ok) return false;
+      break;
+    }
+    case 0xA: {  // teleport / location update: position +0x20, rotation +0x30, flags +0x40..+0x42
+      Packet83 packet(0x1420653c8, 0xA, storage, 0x11);
+      if (!readWithReader(packet, 0x14036cfe0)) return false;
+      void* proximity = *reinterpret_cast<void**>(0x142b19a10);
+      if (game::Call<bool (*)(void*)>(0x140427f00)(*reinterpret_cast<void**>(0x142b19780)) && proximity) {
+        // Collect the tracked entries, then re-register each by its id.
+        ScriptArgList entries{reinterpret_cast<void**>(0x14206e9c8), nullptr, 0, 0};
+        struct Collector {
+          void** vtable;
+          ScriptArgList* target;
+          uint8_t pad10[0x28];
+          Collector* self;
+        };
+        static_assert(sizeof(Collector) == 0x40);
+        Collector collector{};
+        collector.vtable = reinterpret_cast<void**>(0x1420727e0);
+        collector.target = &entries;
+        collector.self = &collector;
+        game::Call<void (*)(void*, Collector*)>(0x1413f4060)(proximity, &collector);
+        // (the inlined array-grow path in the original loop is unreachable: i < count)
+        for (int i = 0; i < entries.count; ++i) {
+          uint64_t id = game::Field<uint64_t>(reinterpret_cast<uint8_t**>(entries.values)[i], 0x18);
+          uint64_t handle[2] = {};
+          auto* resolved = game::Call<uint64_t* (*)(uint64_t*, uint64_t*)>(0x14039c860)(handle, &id);
+          (*reinterpret_cast<void (***)(void*, uint64_t)>(proximity))[0x28 / 8](proximity, *resolved);
+        }
+        game::Call<void (*)(ScriptArgList*)>(0x14039fca0)(&entries);
+      }
+      uint8_t* state = game::Field<uint8_t*>(game, 0x314A8);
+      if (state[0x1B8]) {
+        state[0x1B8] = 0;
+        game[0x38EF1] = 1;
+        game::Call<void (*)(void*, const char*, ...)>(0x1402bd7f0)(game + 0x38EF8, reinterpret_cast<const char*>(0x14206ea50),
+                                                                   static_cast<double>(packet.Get<float>(0x20)), static_cast<double>(packet.Get<float>(0x24)),
+                                                                   static_cast<double>(packet.Get<float>(0x28)));  // "Finished waiting for location update ..."
+      }
+      uint8_t* self = character();
+      if (packet.Get<uint8_t>(0x40) && self) {
+        game::Call<void (*)(uint8_t*, uint8_t*, uint8_t*)>(0x140535390)(self, packet.At(0x20), packet.At(0x30));
+        alignas(16) float velocity[4];
+        std::memcpy(velocity, reinterpret_cast<void*>(0x142b06ac0), sizeof(velocity));
+        game::Call<void (*)(uint8_t*, float*)>(0x1405365a0)(self, velocity);
+        game::Field<int>(self, 0x1A84) = 0;
+        (*reinterpret_cast<void (***)(uint8_t*, int)>(self))[0x430 / 8](self, 0);
+        (*reinterpret_cast<void (***)(uint8_t*, int)>(self))[0x420 / 8](self, 0);
+        game::Call<void (*)(uint8_t*)>(0x140514d90)(self);
+        game::Field<int>(self, 0xFC0) = 0;
+        if (packet.Get<uint8_t>(0x41) != self[0x5B0]) self[0x5B0] = packet.Get<uint8_t>(0x41);
+        if (packet.Get<uint8_t>(0x42)) game[0x38EF1] = 1;
+        alignas(16) float facing[4];
+        auto* direction = game::Call<float* (*)(uint8_t*, float*)>(0x14050daa0)(self, facing);
+        float heading = game::Call<float (*)(float, float)>(0x140d55d44)(direction[0], direction[2]);  // atan2f
+        void* mode = game::Field<void*>(game, 0x388A8);
+        (*reinterpret_cast<void (***)(void*, float)>(mode))[0x128 / 8](mode, heading);
+        if (void* minimap = game::Field<void*>(game, 0x38A18)) game::Call<void (*)(void*)>(0x140997e20)(minimap);
+        game::Call<void (*)(void*)>(0x1409f1310)(game::Field<void*>(game, 0x38978));
+        auto* camera = game::Call<float* (*)(void*)>(0x1404d5400)(game::Field<void*>(game, 0x38890));
+        float dx = packet.Get<float>(0x20) - camera[0];
+        float dz = packet.Get<float>(0x28) - camera[2];
+        float dw = packet.Get<float>(0x2C) - camera[3];
+        float distanceSquared = (dz * dz + dw * dw) + (dx * dx + 0.0f);
+        void* streamer = game::Field<void*>(game, 0x3B6F8);
+        if (distanceSquared >= game::Call<float (*)(void*)>(0x141868560)(streamer)) game::Call<void (*)(void*)>(0x141868420)(streamer);
+        float radius = static_cast<float>(static_cast<uint64_t>(game::Call<uint32_t (*)(void*)>(0x1418685d0)(streamer)));
+        if (!game::Call<bool (*)(void*, uint8_t*, float)>(0x1418683f0)(streamer, packet.At(0x20), radius))
+          game::Call<void (*)(void*, uint8_t*)>(0x1418688b0)(streamer, packet.At(0x20));
+        (*reinterpret_cast<void (***)(uint8_t*)>(self))[0x7A0 / 8](self);
+      }
+      int zero = 0;
+      game::Call<void (*)(void*, uint8_t*, uint8_t*, int*)>(0x14047e720)(game::Field<void*>(game, 0x388A8), packet.At(0x20), packet.At(0x30), &zero);
+      break;
+    }
+    case 0x23: {  // entity transform: id +0x18, position +0x20, direction +0x30, flags +0x40/+0x41
+      Packet83 packet(0x1420653d0, 0x23, storage, 0x11);
+      if (!readWithReader(packet, 0x14036d220)) return false;
+      uint64_t id = packet.Get<uint64_t>(0x18);
+      uint8_t* entity = game::Call<uint8_t* (*)(uint8_t*, uint64_t*)>(0x1403f83f0)(game, &id);
+      if (!packet.Get<uint8_t>(0x40) || !entity) return true;
+      alignas(16) float up[4];
+      std::memcpy(up, reinterpret_cast<void*>(0x142b06af0), sizeof(up));
+      auto body = [&] {
+        uint8_t* physics = entity + 0x20;
+        return (*reinterpret_cast<uint8_t* (***)(void*)>(physics))[0xB0 / 8](physics);
+      };
+      uint8_t* target = body();
+      struct Transform {
+        float position[4];
+        float direction[4];
+        float up[4];
+      };
+      alignas(16) Transform transform{};
+      std::memcpy(transform.position, packet.At(0x20), 16);
+      float v[4];
+      std::memcpy(v, packet.At(0x30), 16);
+      float magnitude = std::sqrt((v[2] * v[2] + v[3] * v[3]) + (v[0] * v[0] + v[1] * v[1]));
+      if (magnitude > *reinterpret_cast<float*>(0x142047918)) {
+        for (int i = 0; i < 4; ++i) transform.direction[i] = v[i] / magnitude;
+      } else {
+        std::memcpy(transform.direction, reinterpret_cast<void*>(0x142b06a70), 16);
+      }
+      std::memcpy(transform.up, up, 16);
+      (*reinterpret_cast<void (***)(void*, Transform*, int)>(target))[0x30 / 8](target, &transform, 0);
+      alignas(16) float zero[4];
+      std::memcpy(zero, reinterpret_cast<void*>(0x142b06ac0), 16);
+      target = body();
+      (*reinterpret_cast<void (***)(void*, float*, int)>(target))[0x40 / 8](target, zero, 0);
+      alignas(16) float zero2[4];
+      std::memcpy(zero2, reinterpret_cast<void*>(0x142b06ac0), 16);
+      target = body();
+      (*reinterpret_cast<void (***)(void*, float*, int)>(target))[0x50 / 8](target, zero2, 0);
+      entity[0x5B0] = packet.Get<uint8_t>(0x41);
+      void* vehicle = (*reinterpret_cast<void* (***)(uint8_t*)>(entity))[0x298 / 8](entity);
+      if (!vehicle) return true;
+      uint8_t* self = character();
+      void* mode = game::Field<void*>(game, 0x388A8);
+      if (mode && (*reinterpret_cast<int (***)(void*)>(mode))[0](mode) == 0x29 && game::Call<void* (*)(uint8_t*)>(0x14050f340)(self) == vehicle)
+        game::Call<void (*)(void*)>(0x1406e6be0)(game::Field<void*>(game, 0x388A8));
+      break;
+    }
+    case 6: {  // add a quest/objective object (0x370) to the player's list at +0xADD0
+      Packet83 packet(0x1420653a0, 6, storage, 0x11);
+      if (!readWithReader(packet, 0x14036b840)) return false;
+      uint8_t* object = nullptr;
+      if (void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x370)) object = game::Call<uint8_t* (*)(void*, int)>(0x14039aeb0)(memory, 0);
+      ClientReader blob = blobReader(packet, 0x18, 0x20);
+      game::Call<void (*)(uint8_t*, ClientReader*)>(0x140368860)(object, &blob);
+      if (game::Call<void* (*)(uint8_t*, int)>(0x1404c0470)(player() + 0xADD0, game::Field<int>(object, 0x138))) {
+        game::Call<void (*)(uint8_t*, int)>(0x1403c2100)(object, 1);  // already known: delete
+        break;
+      }
+      game::Call<void (*)(uint8_t*, uint8_t*)>(0x1404bfba0)(player() + 0xADD0, object);
+      if (game::Call<bool (*)(uint8_t*)>(0x1404c0950)(object)) {
+        if (void* tracker = game::Field<void*>(game, 0x38B78)) game::Call<void (*)(void*, uint8_t*)>(0x140a03b10)(tracker, object);
+      }
+      break;
+    }
+    case 7: {
+      Packet83 packet(0x1420653a8, 7, storage, 0x11);
+      if (!read(packet, 0x140389920)) return false;
+      game::Call<void (*)(uint8_t*, int)>(0x1404c0b30)(player() + 0xADD0, packet.Get<int>(0x18));
+      break;
+    }
+    case 8: {  // objective progress update (0x50-byte entry keyed by +0x34)
+      Packet83 packet(0x1420653b0, 8, storage, 0x11);
+      packet.Put<uint64_t>(0x20, 0x142064ae8);
+      if (!readWithReader(packet, 0x14036b540)) return false;
+      int key = packet.Get<int>(0x34);
+      uint8_t* existing = game::Call<uint8_t* (*)(uint8_t*, int)>(0x1404c0470)(player() + 0xADD0, key);
+      bool wasIncomplete = existing && !game::Call<bool (*)(uint8_t*)>(0x1404c0950)(existing);
+      uint8_t* entry = game::Call<uint8_t* (*)(size_t)>(0x1402fc0f0)(0x50);
+      if (entry) {
+        game::Field<int>(entry, 0) = packet.Get<int>(0x18);
+        game::Field<uint64_t>(entry, 8) = 0x142064ae8;
+        game::Field<int>(entry, 0x10) = packet.Get<int>(0x28);
+        game::Field<int>(entry, 0x14) = packet.Get<int>(0x2C);
+        game::Field<int>(entry, 0x18) = packet.Get<int>(0x30);
+        game::Field<int>(entry, 0x1C) = key;
+        game::Field<int>(entry, 0x20) = packet.Get<int>(0x38);
+        game::Field<int>(entry, 0x24) = packet.Get<int>(0x3C);
+        entry[0x28] = packet.Get<uint8_t>(0x40);
+        game::Field<uint64_t>(entry, 0x40) = 0;
+        game::Field<uint64_t>(entry, 0x48) = 0;
+        game::Field<uint64_t>(entry, 0x30) = 0;
+        game::Field<int>(entry, 0x38) = 0;
+      }
+      game::Call<void (*)(uint8_t*, int, uint8_t*)>(0x1404bfcd0)(player() + 0xADD0, key, entry);
+      if (wasIncomplete && existing && game::Call<bool (*)(uint8_t*)>(0x1404c0950)(existing)) {
+        if (void* tracker = game::Field<void*>(game, 0x38B78)) game::Call<void (*)(void*, uint8_t*)>(0x140a03b10)(tracker, existing);
+      }
+      game::Call<void (*)(void*, uint8_t*, uint8_t*)>(0x140a03ea0)(game::Field<void*>(game, 0x38B78), existing, entry);
+      if (existing && game::Call<bool (*)(uint8_t*)>(0x1404c0920)(existing))
+        game::Call<void (*)(void*, uint8_t*)>(0x140a03780)(game::Field<void*>(game, 0x38B78), existing);
+      break;
+    }
+    case 9: {
+      Packet83 packet(0x1420653b8, 9, storage, 0x11);
+      if (!readWithReader(packet, 0x14036b790)) return false;
+              game::Call<void (*)(uint8_t*, int, int)>(0x1404c0c00)(player() + 0xADD0, packet.Get<int>(0x18), packet.Get<int>(0x1C));
+      break;
+    }
+    case 0x1D: {  // two player counters (+0x1E8/+0x1EC); player not null-checked in the original
+      Packet83 packet(0x1420653d8, 0x1D, storage, 0x11);
+      if (!readWithReader(packet, 0x14036cf30)) return false;
+      game::Field<int>(player(), 0x1E8) = packet.Get<int>(0x18);
+      game::Field<int>(player(), 0x1EC) = packet.Get<int>(0x1C);
+      break;
+    }
+    case 0x3C: {  // three player lists (+0x20, +0x38, +0x50) then refresh +0x3340
+      Packet83 packet(0x1420655e0, 0x3C, storage, 0x11);
+      packet.Put<uint64_t>(0x20, 0x142063770);
+      packet.Put<uint64_t>(0x38, 0x142063770);
+      packet.Put<uint64_t>(0x50, 0x1420655c0);
+      bool ok = readWithReader(packet, 0x14036cbd0);
+      if (ok && player()) {
+        game::Field<int>(player(), 0x198) = packet.Get<int>(0x18);
+        game::Call<void (*)(uint8_t*, uint8_t*)>(0x1406387e0)(player(), packet.At(0x20));
+        game::Call<void (*)(uint8_t*, uint8_t*)>(0x140638740)(player(), packet.At(0x38));
+        game::Call<void (*)(uint8_t*, uint8_t*)>(0x1406386a0)(player(), packet.At(0x50));
+        uint8_t* self = player();
+        game::Call<void (*)(uint8_t*)>(0x1404c6920)(self ? self + 0x3340 : nullptr);
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae3d0)(packet.At(0));
+      if (!ok) return false;
+      break;
+    }
+    case 0xD: {  // job level up: update the job, show "JobLevelUp" with (id, name, +0x18, level, +0x1C)
+      Packet83 packet(0x1420653e0, 0xD, storage, 0x11);
+      if (!readWithReader(packet, 0x14036b3f0)) break;
+      ClientReader blob = blobReader(packet, 0x18, 0x20);
+      uint8_t* job = nullptr;
+      game::Call<void (*)(uint8_t*, ClientReader*, uint8_t**)>(0x14035cf50)(player(), &blob, &job);
+      ScriptArgList args{reinterpret_cast<void**>(0x14206e9e8), nullptr, 0, 0};
+      soeutil::IString name{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      void* strings = *reinterpret_cast<void**>(0x142b19798);
+      (*reinterpret_cast<void (***)(void*, int, soeutil::IString*)>(strings))[0x10 / 8](strings, game::Field<int>(job, 8), &name);
+      using SlotFn = uint8_t* (*)(ScriptArgList*, int);
+      using SetIntFn = void (*)(uint8_t*, int);
+      int value = game::Field<int>(job, 4);
+      game::Call<SetIntFn>(0x14046d7b0)(game::Call<SlotFn>(0x1403b4810)(&args, 0), value);
+      game::Call<void (*)(uint8_t*, soeutil::IString*)>(0x14046d690)(game::Call<SlotFn>(0x1403b4810)(&args, 1), &name);
+      value = game::Field<int>(job, 0x18);
+      game::Call<SetIntFn>(0x14046d7b0)(game::Call<SlotFn>(0x1403b4810)(&args, 2), value);
+      value = game::Call<int (*)(uint8_t*, int)>(0x1403f8650)(player() + 0xDD70, game::Field<int>(job, 4));
+      game::Call<SetIntFn>(0x14046d7b0)(game::Call<SlotFn>(0x1403b4810)(&args, 3), value);
+      value = game::Field<int>(job, 0x1C);
+      game::Call<SetIntFn>(0x14046d7b0)(game::Call<SlotFn>(0x1403b4810)(&args, 4), value);
+      game::Call<void (*)(void*, int, const char*, ScriptArgList*, bool, int, int)>(0x140a04370)(
+          game::Field<void*>(game, 0x38B78), 2, reinterpret_cast<const char*>(0x14206ea98), &args, false, 0, 0);  // "JobLevelUp"
+      (*reinterpret_cast<void (***)(uint8_t*, int)>(game))[0x190 / 8](game, game::Field<int>(job, 4));
+      for (int offset : {0xAD70, 0xAD78}) {
+        void* view = game::Field<void*>(player(), offset);
+        (*reinterpret_cast<void (***)(void*)>(view))[0x88 / 8](view);
+      }
+      name.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&name);
+      game::Call<void (*)(ScriptArgList*)>(0x1403a0980)(&args);
+      break;
+    }
+    case 0x16: {  // job update
+      Packet83 packet(0x1420653e8, 0x16, storage, 0x11);
+      if (!read(packet, 0x14038a470)) break;
+      ClientReader blob = blobReader(packet, 0x18, 0x20);
+      uint8_t* job = nullptr;
+      game::Call<void (*)(uint8_t*, ClientReader*, uint8_t**)>(0x14035cfd0)(player(), &blob, &job);
+      (*reinterpret_cast<void (***)(uint8_t*, int)>(game))[0x190 / 8](game, game::Field<int>(job, 4));
+      for (int offset : {0xAD70, 0xAD78}) {
+        void* view = game::Field<void*>(player(), offset);
+        (*reinterpret_cast<void (***)(void*)>(view))[0x88 / 8](view);
+      }
+      break;
+    }
+    case 0x13: {  // job change: equip the job item, refresh level-dependent entity state
+      uint8_t* packet = storage;  // 0x88-byte packet built by its own constructor
+      game::Call<void (*)(uint8_t*)>(0x14039b590)(packet);
+      if (!game::Call<ReadFn>(0x1403895e0)(packet, data, length, false)) {
+        game::Call<void (*)(uint8_t*)>(0x1403adf20)(packet);
+        return false;
+      }
+      auto* blobData = game::Field<const uint8_t*>(packet, 0x18);
+      int blobLength = game::Field<int>(packet, 0x20);
+      ClientReader blob{blobData, blobLength, blobData, blobData + blobLength, 0};
+      uint8_t* job = nullptr;
+      game::Call<void (*)(uint8_t*, ClientReader*, uint8_t**)>(0x14035cf50)(player(), &blob, &job);
+      uint8_t* self = character();
+      if (self) {
+        if (void* window = game::Field<void*>(game, 0x38900)) game::Call<void (*)(void*, int)>(0x1409e4be0)(window, game::Field<int>(job, 4));
+        int itemId = game::Field<int>(packet, 0x4C);
+        uint8_t* item = game::Call<uint8_t* (*)(uint8_t*, int*, bool)>(0x1405040c0)(self, &itemId, true);
+        alignas(16) uint8_t holder[0x20];
+        auto* held = (*reinterpret_cast<uint8_t** (***)(uint8_t*, void*)>(self))[0x58 / 8](self, holder);
+        uint8_t* equipped = *held;
+        game::Call<void (*)(void*)>(0x1403a95c0)(holder);
+        if (equipped && !(equipped[0x489] & 4)) item[0xE0] |= 8;
+        item[0xE0] |= 0x80;
+        (*reinterpret_cast<void (***)(uint8_t*)>(self))[0x498 / 8](self);
+        game::Call<void (*)(uint8_t*, uint8_t*, uint8_t*)>(0x14053d9b0)(self, item, packet + 0x28);
+        using AppearanceFn = void (*)(uint8_t*, uint8_t*, uint8_t*);
+        if (game::Field<int>(self, 0x1AC8) != game::Field<int>(packet, 0x50)) {
+          int model = game::Call<int (*)(void*, int)>(0x1416d35a0)(game::Field<void*>(game, 0x3D488), 0);
+          (*reinterpret_cast<void (***)(uint8_t*, int, void*, void*)>(self))[0x678 / 8](self, model, nullptr, nullptr);
+          (*reinterpret_cast<AppearanceFn**>(self))[0x4B0 / 8](self, packet + 0x58, packet + 0x70);
+          int unused = 0;
+          (*reinterpret_cast<void (***)(uint8_t*, int, int*)>(self))[0x3B0 / 8](self, game::Field<int>(packet, 0x50), &unused);
+          soeutil::IString second{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringAssign(&second, reinterpret_cast<const char*>(0x142046fcb));
+          soeutil::IString first{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringAssign(&first, reinterpret_cast<const char*>(0x142046fcb));
+          int outA = 0, outB = 0;
+          uint8_t* owner = player();
+          using EquipFn = void (*)(uint8_t*, uint8_t*, uint8_t*, uint8_t*, soeutil::IString*, soeutil::IString*, int, int*, int*, int, int, bool);
+          (*reinterpret_cast<EquipFn**>(self))[0x4A0 / 8](self, item, owner + 0xABE8, owner + 0xAC18, &first, &second, 0, &outB, &outA, model, 0,
+                                                         false);
+          first.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&first);
+          second.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&second);
+        }
+        int level = 0;
+        game::Call<void (*)(uint8_t*, int*)>(0x14062e9c0)(player(), &level);
+        game::Call<void (*)(uint8_t*, int)>(0x1406383a0)(player(), game::Field<int>(job, 4));
+        for (int offset : {0xAD70, 0xAD78}) {
+          void* view = game::Field<void*>(player(), offset);
+          (*reinterpret_cast<void (***)(void*)>(view))[0x88 / 8](view);
+        }
+        using SetLevelFn = void (*)(void*, int*);
+        if (game::Field<int>(job, 0x30) != level) {
+          int jobLevel = game::Field<int>(job, 0x30);
+          uint8_t* actor = self + 0x20;
+          (*reinterpret_cast<SetLevelFn**>(actor))[0x148 / 8](actor, &jobLevel);
+          game::Call<void (*)(uint8_t*)>(0x14062bfa0)(player());
+          game::Call<void (*)(uint8_t*)>(0x140630be0)(player());
+          for (auto* entity = game::Call<uint8_t* (*)(void*)>(0x14071e7a0)(game::Field<void*>(game, 0x38860)); entity;
+               entity = game::Call<uint8_t* (*)(void*, uint8_t*)>(0x14071e880)(game::Field<void*>(game, 0x38860), entity)) {
+            int entityLevel = game::Field<int>(entity, 0x228);
+            uint8_t* entityActor = entity + 0x20;
+            (*reinterpret_cast<SetLevelFn**>(entityActor))[0x148 / 8](entityActor, &entityLevel);
+          }
+          game::Call<void (*)(void*)>(0x140656700)(*reinterpret_cast<void**>(0x142b19c60));
+        }
+        (*reinterpret_cast<void (***)(uint8_t*, int)>(self))[0x100 / 8](self, game::Field<int>(job, 4));
+        (*reinterpret_cast<AppearanceFn**>(self))[0x4B0 / 8](self, packet + 0x58, packet + 0x70);
+        if (void* nameplates = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19cc0), 0x20)) {
+          alignas(16) uint8_t handle[16];
+          uint8_t* source = self + 0x630;
+          void* name = (*reinterpret_cast<void* (***)(void*, void*)>(source))[0x68 / 8](source, handle);
+          game::Call<void (*)(void*, void*, int)>(0x14079eb10)(nameplates, name, 0x2A);
+        }
+        if ((game::Field<uint64_t>(self, 0x1AD8) >> 0x25) & 1) {
+          game::Call<void (*)(uint8_t*)>(0x140520c80)(self);
+          (*reinterpret_cast<void (***)(uint8_t*)>(self))[0x3F8 / 8](self);
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403adf20)(packet);
+      break;
+    }
+    case 0x12: {
+      Packet83 packet(0x1420653f8, 0x12, storage, 0x11);
+      if (!read(packet, 0x140389aa0)) return false;
+      game::Call<void (*)(uint8_t*, int)>(0x14062bbd0)(player(), packet.Get<int>(0x18));
+      if (character()) {
+        if (void* window = game::Field<void*>(game, 0x38900)) game::Call<void (*)(void*, int)>(0x1409e4be0)(window, 0);
+      }
+      for (int offset : {0xAD70, 0xAD78}) {
+        void* view = game::Field<void*>(player(), offset);
+        (*reinterpret_cast<void (***)(void*)>(view))[0x88 / 8](view);
+      }
+      break;
+    }
+    case 0xE: {
+      Packet83 packet(0x142065400, 0xE, storage, 0x11);
+      if (!read(packet, 0x140389730)) return false;
+      if (uint8_t* self = player()) {
+        void* result = game::Call<void* (*)(uint8_t*, int, uint64_t, int)>(0x140629770)(self, packet.Get<int>(0x18), packet.Get<uint64_t>(0x20),
+                                                                                        packet.Get<int>(0x28));
+        uint64_t id = game::Field<uint64_t>(player(), 0x18);
+        game::Call<void (*)(void*, uint64_t*, void*)>(0x1409f92c0)(game::Field<void*>(game, 0x38B78), &id, result);
+      }
+      break;
+    }
+    case 0xF: {
+      Packet83 packet(0x142065408, 0xF, storage, 0x11);
+      if (!read(packet, 0x14038a050)) return false;
+      if (uint8_t* self = player()) {
+        uint64_t id = game::Field<uint64_t>(self, 0x18);
+        game::Call<void (*)(void*, uint64_t*, int)>(0x140a04c90)(game::Field<void*>(game, 0x38B78), &id, packet.Get<int>(0x18));
+        game::Call<void (*)(uint8_t*, int)>(0x140636610)(player(), packet.Get<int>(0x18));
+      }
+      break;
+    }
+    case 0x11: {
+      Packet83 packet(0x142065410, 0x11, storage, 0x11);
+      if (!read(packet, 0x140389810)) return false;
+      game::Call<void (*)(uint8_t*, int)>(0x140638ae0)(player(), packet.Get<int>(0x18));
+      break;
+    }
+    case 0x14: {  // ability unlocked notification ("AbilityReceived": title, ability name, +0x20)
+      Packet83 packet(0x142065418, 0x14, storage, 0x11);
+      std::memcpy(packet.At(0x18), reinterpret_cast<void*>(0x142072990), 16);
+      if (!read(packet, 0x1403896c0)) return false;
+      ScriptArgList args{reinterpret_cast<void**>(0x14206cc48), nullptr, 0, 0};
+      void* strings = *reinterpret_cast<void**>(0x142b19798);
+      soeutil::IString title{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      (*reinterpret_cast<void (***)(void*, const char*, soeutil::IString*)>(strings))[0x18 / 8](
+          strings, reinterpret_cast<const char*>(0x14206eaa8), &title);  // "NotificationAbilityUnlocked"
+      soeutil::IString ability{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+      strings = *reinterpret_cast<void**>(0x142b19798);
+      (*reinterpret_cast<void (***)(void*, int, soeutil::IString*)>(strings))[0x10 / 8](strings, packet.Get<int>(0x1C), &ability);
+      using SlotFn = uint8_t* (*)(ScriptArgList*, int);
+      game::Call<void (*)(uint8_t*, soeutil::IString*)>(0x14046d690)(game::Call<SlotFn>(0x1403b4810)(&args, 0), &title);
+      game::Call<void (*)(uint8_t*, soeutil::IString*)>(0x14046d690)(game::Call<SlotFn>(0x1403b4810)(&args, 1), &ability);
+      game::Call<void (*)(uint8_t*, int)>(0x14046d7b0)(game::Call<SlotFn>(0x1403b4810)(&args, 2), packet.Get<int>(0x20));
+      game::Call<void (*)(void*, int, const char*, ScriptArgList*, bool, int, int)>(0x140a04370)(
+          game::Field<void*>(game, 0x38B78), 2, reinterpret_cast<const char*>(0x14206eac8), &args, false, 0, 0);  // "AbilityReceived"
+      ability.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&ability);
+      title.vtable = soeutil::IStringVtable();
+      soeutil::StringRelease(&title);
+      game::Call<void (*)(ScriptArgList*)>(0x1403a08d0)(&args);
+      break;
+    }
+    case 0x15: {  // text message for the game client (0x14042c1e0)
+      Packet83 packet(0x142065420, 0x15, storage, 0x11);
+      packet.Put<soeutil::IString>(0x18, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      bool ok = read(packet, 0x140389e90);
+      if (ok) game::Call<void (*)(uint8_t*, const char*)>(0x14042c1e0)(game, packet.Get<const char*>(0x20));
+      game::Call<void (*)(uint8_t*)>(0x1403ae270)(packet.At(0));
+      if (!ok) return false;
+      break;
+    }
+    case 0x19: {
+      Packet83 packet(0x142065428, 0x19, storage, 0x11);
+      if (!read(packet, 0x140389b40)) return false;
+      if (packet.Get<uint8_t>(0x18)) game::Call<void (*)(void*)>(0x1407218c0)(game::Field<void*>(game, 0x38860));
+      game[0x3883C] = 1;
+      break;
+    }
+    case 0x35: {
+      Packet83 packet(0x142065430, 0x35, storage, 0x11);
+      if (!read(packet, 0x140389e10)) return false;
+      game::Call<void (*)(void*)>(0x1407218c0)(game::Field<void*>(game, 0x38860));
+      uint64_t now;
+      game::Field<uint64_t>(game, 0x38840) = *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&now);
+      break;
+    }
+    case 0x1A: {  // read only
+      Packet83 packet(0x142065438, 0x1A, storage, 0x11);
+      if (!read(packet, 0x14038a1a0)) return false;
+      break;
+    }
+    case 0x1C: {  // id list {int id, bool flag} -> 0x1406297b0 (flag) / 0x140637490
+      Packet83 packet(0x142065460, 0x1C, storage, 0x11);
+      packet.Put<uint64_t>(0x18, 0x142065440);
+      bool ok = read(packet, 0x140389f90);
+      if (ok && player()) {
+        for (int i = 0; i < packet.Get<int>(0x28); ++i) {
+          uint8_t* entry = packet.Get<uint8_t*>(0x20) + i * 8;
+          int id = game::Field<int>(entry, 0);
+          if (entry[4])
+            game::Call<void (*)(uint8_t*, int*)>(0x1406297b0)(player(), &id);
+          else
+            game::Call<void (*)(uint8_t*, int*)>(0x140637490)(player(), &id);
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae2d0)(packet.At(0));
+      if (!ok) return false;
+      break;
+    }
+    case 0x20:
+    case 0x21:
+    case 0x22: {  // character float value with an "apply now" flag (character not null-checked)
+      struct FloatUpdate {
+        uint64_t vtable, read, flagged, normal;
+      };
+      static constexpr FloatUpdate kUpdates[] = {{0x1420654a0, 0x14038d780, 0x1404fd230, 0x14052ef10},
+                                                 {0x1420654a8, 0x14038d860, 0x1404fd750, 0x14052f640},
+                                                 {0x1420654b0, 0x14038d7f0, 0x1404fd640, 0x14052f5e0}};
+      const FloatUpdate& update = kUpdates[header.subType - 0x20];
+      Packet83 packet(update.vtable, header.subType, storage, 0x11);
+      if (!read(packet, update.read)) return header.subType != 0x20;  // 0x21/0x22 report handled anyway
+      uint8_t* self = character();
+      game::Call<void (*)(uint8_t*, float)>(packet.Get<uint8_t>(0x1C) ? update.flagged : update.normal)(self, packet.Get<float>(0x18));
+      break;
+    }
+    case 0x24: {
+      Packet83 packet(0x1420654b8, 0x24, storage, 0x11);
+      packet.Put<int>(0x18, *reinterpret_cast<int*>(0x142b186ac));
+      if (!read(packet, 0x140389d30)) return false;
+      int id = packet.Get<int>(0x18);
+      if (uint8_t* entity = game::Call<uint8_t* (*)(uint8_t*, int*)>(0x1403f8380)(game, &id)) entity[0x5B0] = packet.Get<uint8_t>(0x1C);
+      break;
+    }
+    case 0x25:  // raw packet to the local player
+      if (uint8_t* self = player()) game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x140631950)(self, data, length);
+      break;
+    case 0x26:  // raw packet to the state's +0x969C8 handler
+      game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x1404a4d20)(game::Field<uint8_t*>(game, 0x314A8) + 0x969C8, data, length);
+      break;
+    case 0x29: {
+      Packet83 packet(0x1420654c0, 0x29, storage, 0x11);
+      packet.Put<uint64_t>(0x18, *reinterpret_cast<uint64_t*>(0x142b181f8));
+      if (!read(packet, 0x14038d460)) return false;
+      if (game::Call<bool (*)(uint8_t*, int)>(0x1405958b0)(player() + 0xD568, 8)) {  // player not null-checked
+        game::Call<void (*)(void*, int)>(0x1404cf240)(*reinterpret_cast<void**>(0x142b19cd8), packet.Get<int>(0x20));
+        uint64_t id = packet.Get<uint64_t>(0x18);
+        game::Call<void (*)(void*, int, uint64_t*, void*)>(0x1404cf300)(*reinterpret_cast<void**>(0x142b19cd8), 3, &id, nullptr);
+      }
+      break;
+    }
+    case 0x2A: {  // loyalty points
+      Packet83 packet(0x1420654c8, 0x2A, storage, 0x11);
+      using LogFn = void (*)(void*, const char*, ...);
+      if (!read(packet, 0x14038d160)) {
+        game::Call<LogFn>(0x1402baba0)(*reinterpret_cast<void**>(0x142116320), reinterpret_cast<const char*>(0x14206eb10),
+                                       packet.Get<int>(0x18));  // "ClientLoyaltyPointsUpdatePacket. FAILED to unserialize ..."
+        return false;
+      }
+      int points = packet.Get<int>(0x18);
+      if (uint8_t* self = player()) game::Call<void (*)(uint8_t*, int)>(0x140638a80)(self, points);
+      game::Call<LogFn>(0x1402bab70)(*reinterpret_cast<void**>(0x142116320), reinterpret_cast<const char*>(0x14206ead8),
+                                     points);  // "ClientLoyaltyPointsUpdatePacket. Loyalty Points: ..."
+      break;
+    }
+    case 0x2E: {
+      Packet83 packet(0x1420654e0, 0x2E, storage, 0x11);
+      if (read(packet, 0x14038d990)) {
+        if (uint8_t* self = player()) self[0x109D8] = 1;
+      }
+      break;
+    }
+    case 0x3A:
+      game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x14040b510)(game, data, length);
+      break;
+    case 0x2B:
+      if (player()) {
+        uint64_t now;
+        game::Call<void (*)(uint8_t*, uint64_t*)>(0x140638a60)(player(), game::Call<uint64_t* (*)(uint64_t*)>(0x14032fe90)(&now));
+      }
+      break;
+    case 0x2C: {
+      Packet83 packet(0x1420654d0, 0x2C, storage, 0x11);
+      if (!read(packet, 0x14038d200)) return false;
+      if (uint8_t* self = character()) game::Call<void (*)(uint8_t*, int, uint8_t)>(0x1404683b0)(self + 0x8C8, 0x30, packet.Get<uint8_t>(0x18));
+      break;
+    }
+    case 0x2D: {  // audio event -> audio system
+      Packet83 packet(0x1420654d8, 0x2D, storage, 0x11);
+      packet.Put<int>(0x18, *reinterpret_cast<int*>(0x142b188f4));
+      packet.Put<uint64_t>(0x1C, 2);
+      if (!read(packet, 0x14038de30)) return false;
+      game::Call<void (*)(void*, uint8_t*)>(0x1408200e0)(game::Field<void*>(game, 0x389E0), packet.At(0));
+      break;
+    }
+    case 0x2F: {  // localized string id + text -> 0x14046d3c0
+      Packet83 packet(0x1420654e8, 0x2F, storage, 0x11);
+      packet.Put<soeutil::IString>(0x20, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      if (read(packet, 0x14038da10)) {
+        soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+        void* strings = *reinterpret_cast<void**>(0x142b19798);
+        (*reinterpret_cast<void (***)(void*, int, soeutil::IString*)>(strings))[0x10 / 8](strings, packet.Get<int>(0x18), &text);
+        game::Call<void (*)(uint8_t*, const char*, const char*, int)>(0x14046d3c0)(game, packet.Get<const char*>(0x28), text.data, packet.Get<int>(0x1C));
+        text.vtable = soeutil::IStringVtable();
+        soeutil::StringRelease(&text);
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae490)(packet.At(0));
+      break;
+    }
+    case 0x30:  // return to character select
+      if (game::Field<void*>(game::Field<uint8_t*>(game, 0x38B80), 0x10) && *reinterpret_cast<void**>(0x142b19b98)) {
+        game::Call<void (*)(uint8_t*, int)>(0x140474de0)(game, 0x1D);
+      } else {
+        game::Call<void (*)(void*, const char*, ...)>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x14206eb60));  // "Could not return to character select, ..."
+        *reinterpret_cast<int*>(0x142b176c4) = 5;
+        game::Call<void (*)(uint8_t*, int)>(0x140474de0)(game, 0x23);
+      }
+      break;
+    case 0x31: {  // 0x440-byte UI packet: feed one window, refresh two others
+      uint8_t* packet = storage;
+      game::Call<void (*)(uint8_t*)>(0x14039b600)(packet);
+      if (game::Call<ReadFn>(0x14038d8d0)(packet, data, length, false)) {
+        using FindFn = uint8_t* (*)(void*, void*);
+        if (uint8_t* window = game::Call<FindFn>(0x1403591b0)(UiRoot(), *reinterpret_cast<void**>(0x142a35fe0)))
+          game::Call<void (*)(uint8_t*, uint8_t*)>(0x140adb690)(window, packet);
+        for (auto [find, key] : {std::pair<uint64_t, uint64_t>{0x140359220, 0x142a36d88}, {0x140359290, 0x142a36d90}}) {
+          if (uint8_t* window = game::Call<FindFn>(find)(UiRoot(), *reinterpret_cast<void**>(key))) {
+            uint8_t* view = window + 0x80;
+            (*reinterpret_cast<void (***)(void*)>(view))[0x28 / 8](view);
+          }
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae330)(packet);
+      break;
+    }
+    case 0x32: {
+      Packet83 packet(0x142065588, 0x32, storage, 0x11);
+      packet.Put<soeutil::IString>(0x18, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      if (read(packet, 0x14038da80)) game::Call<void (*)(uint8_t*, const char*, void*, bool)>(0x14046f660)(game, packet.Get<const char*>(0x20), nullptr, true);
+      game::Call<void (*)(uint8_t*)>(0x1403ae580)(packet.At(0));
+      break;
+    }
+    case 0x34: {
+      Packet83 packet(0x142065590, 0x34, storage, 0x11);
+      if (read(packet, 0x14038d2a0)) game::Call<void (*)(uint8_t*, int, int)>(0x14046ad40)(game, packet.Get<int>(0x18), packet.Get<int>(0x1C));
+      break;
+    }
+    case 0x36:
+      game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x14030f236)(game, data, length);
+      break;
+    case 0x38: {  // server-driven console variables: value at var+0x68, 0x140cff570 notifies on change
+      Packet83 packet(0x1420655a8, 0x38, storage, 0x11);
+      std::memcpy(packet.At(0x30), reinterpret_cast<void*>(0x142b06ac0), 16);
+      if (!read(packet, 0x14038d3f0)) break;
+      auto setInt = [](uint64_t variable, int value) {
+        int& current = *reinterpret_cast<int*>(variable + 0x68);
+        if (current == value) return;
+        current = value;
+        game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(variable));
+      };
+      auto setFloat = [](uint64_t variable, float value) {
+        float& current = *reinterpret_cast<float*>(variable + 0x68);
+        if (!(current < value || current > value)) return;  // ucomiss/je: equal or unordered keeps it
+        current = value;
+        game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(variable));
+      };
+      setInt(0x142b17fa0, packet.Get<int>(0x18));
+      setInt(0x142b17eb0, packet.Get<int>(0x1C));
+      setInt(0x142b17700, packet.Get<int>(0x20));
+      setInt(0x142b17db0, packet.Get<int>(0x24));
+      setInt(0x142b18470, packet.Get<int>(0x28));
+      setInt(0x142b18040, packet.Get<int>(0x2C));
+      setFloat(0x142b17c80, packet.Get<float>(0x30));
+      setFloat(0x142b18740, packet.Get<float>(0x38));
+      setInt(0x142b17f20, packet.Get<int>(0x48));
+      setInt(0x142b17910, packet.Get<uint8_t>(0x4C) >> 7);
+      break;
+    }
+    case 0x4C: {  // game client vfunc 0xD8(true, id, two strings)
+      Packet83 packet(0x142065638, 0x4C, storage, 0x11);
+      packet.Put<soeutil::IString>(0x20, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      packet.Put<soeutil::IString>(0x38, soeutil::IString{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0});
+      if (read(packet, 0x14038a240)) {
+        (*reinterpret_cast<void (***)(uint8_t*, bool, int, const char*, const char*)>(game))[0xD8 / 8](
+            game, true, packet.Get<int>(0x18), packet.Get<const char*>(0x28), packet.Get<const char*>(0x40));
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae4f0)(packet.At(0));
+      break;
+    }
+    case 0x4E: {
+      Packet83 packet(0x142065640, 0x4E, storage, 0x11);
+      packet.Put<uint64_t>(0x18, 0x142063770);
+      if (read(packet, 0x14038a390)) {
+        if (void* panel = game::Field<void*>(*reinterpret_cast<uint8_t**>(0x142b19cc0), 0x190)) {
+          game::Call<void (*)(void*, uint8_t)>(0x1407a9e80)(panel, packet.Get<uint8_t>(0x30));
+          game::Call<void (*)(void*, uint8_t*)>(0x1407aa890)(panel, packet.At(0x18));
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae5f0)(packet.At(0));
+      break;
+    }
+    case 0x4F: {  // localized text -> string console variable 0x142b18170 (value IString at +0x68)
+      Packet83 packet(0x142065648, 0x4F, storage, 0x11);
+      packet.Put<uint64_t>(0x18, 0x14204aea0);  // StringFixed<512>
+      packet.Put<char*>(0x20, soeutil::EmptyStringData());
+      if (read(packet, 0x14038a660)) {
+        auto setVariable = [](const char* value) {
+          soeutil::IString text{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          soeutil::StringAssign(&text, value);
+          auto* current = reinterpret_cast<soeutil::IString*>(0x142b181d8);
+          if (!(static_cast<int>(*reinterpret_cast<uint64_t*>(0x142b181e8)) == text.length &&
+                std::memcmp(current->data, text.data, text.length) == 0)) {
+            game::Call<void (*)(soeutil::IString*, soeutil::IString*)>(0x1402bd560)(current, &text);
+            game::Call<void (*)(void*)>(0x140cff570)(reinterpret_cast<void*>(0x142b18170));
+          }
+          text.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&text);
+        };
+        if (packet.Get<int>(0x28) > 0) {
+          soeutil::IString localized{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+          void* strings = *reinterpret_cast<void**>(0x142b19798);
+          (*reinterpret_cast<void (***)(void*, const char*, soeutil::IString*)>(strings))[0x18 / 8](strings, packet.Get<const char*>(0x20), &localized);
+          setVariable(localized.data);
+          localized.vtable = soeutil::IStringVtable();
+          soeutil::StringRelease(&localized);
+        } else {
+          setVariable(reinterpret_cast<const char*>(0x142046fcb));
+        }
+      }
+      game::Call<void (*)(uint8_t*)>(0x1403ae6b0)(packet.At(0));
+      break;
+    }
+    case 0x4B: {  // player value update by kind (+0x18) for our id; kind 1 also updates the group
+      Packet83 packet(0x142065630, 0x4B, storage, 0x11);
+      packet.Put<uint64_t>(0x20, *reinterpret_cast<uint64_t*>(0x142b181f8));
+      if (!read(packet, 0x140389650)) return true;
+      uint8_t* self = player();
+      uint64_t selfId = game::Field<uint64_t>(self, 0x18);  // read before the null check, as in the original
+      uint64_t id = packet.Get<uint64_t>(0x20);
+      int value = packet.Get<int>(0x1C);
+      static constexpr uint64_t kSetters[] = {0x140638b10, 0x140638b00, 0x140638b30, 0x140638b40, 0x140638b20};
+      int kind = packet.Get<int>(0x18);
+      if (kind < 0 || kind > 4) return true;
+      if (selfId == id && self) game::Call<void (*)(uint8_t*, int)>(kSetters[kind])(self, value);
+      if (kind == 1 && game::Call<bool (*)(uint8_t*)>(0x1405f7000)(player() + 0x9418)) {
+        uint64_t member = id;
+        game::Call<void (*)(uint8_t*, uint64_t*, int)>(0x1405fb630)(player() + 0x9418, &member, value);
+      }
+      return true;
+    }
+    case 0xC:
+    case 0x10:
+    case 0x17:
+    case 0x18:
+    case 0x1B:
+      break;
+    default:
+      return false;
+  }
+  return true;  // handled (failed reads return false above)
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -5792,6 +6722,7 @@ REBUILD_FUNCTION(GameClient_GiveTime, 0x1403fa350, GameClientGiveTime);
 REBUILD_FUNCTION(GameClient_CreateAppServices, 0x1403d8a00, GameClientCreateAppServices);
 REBUILD_FUNCTION(GameClient_WriteCrashInfo, 0x14042c8a0, GameClientWriteCrashInfo);
 REBUILD_FUNCTION(GameClient_HandleInputActions, 0x140433680, GameClientHandleInputActions);
+REBUILD_FUNCTION(GameClient_HandlePacket11, 0x140404980, GameClientHandlePacket11);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
