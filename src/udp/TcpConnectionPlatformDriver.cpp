@@ -440,6 +440,91 @@ int TcpConnectionPlatformDriverSendEncrypted(TcpConnectionPlatformDriver* self, 
   return sentBytes;
 }
 
+// 0x141ebc7f0: DecryptReceived(data, length) - append to the pending
+// ciphertext buffer (+0x48) and DecryptMessage in a loop, delivering
+// plaintext to the TcpConnection (0x141ec0ba0) and keeping SECBUFFER_EXTRA
+// bytes. Handles session expiry (disconnect 0xF), incomplete records (wait
+// for more) and renegotiation requests (back to handshake state 1).
+bool TcpConnectionPlatformDriverDecryptReceived(TcpConnectionPlatformDriver* self, const uint8_t* data, int length) {
+  if (!data || length <= 0) return false;
+  int64_t started = TimeNow();
+  soeutil::StringFixed<256> statusText;
+  soeutil::InitFixed(statusText, reinterpret_cast<void**>(0x142049e08));
+  void* context = reinterpret_cast<uint8_t*>(self) + 0x38;
+  auto& pending = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(self) + 0x48);
+  auto releasePending = [&] { game::Call<void (*)(void*)>(0x141ebbed0)(&pending); };
+  unsigned long sizes[5];
+  bool ok = false;
+  int status = (*reinterpret_cast<int (**)(void*, unsigned long, void*)>(SslFunctions(self) + 0x58))(context, 4, sizes);
+  if (status != 0) {
+    const char* text = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(status, &statusText);
+    game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425abf58), text);  // "Error reading SECPKG_ATTR_STREAM_SIZES - %s"
+  } else {
+    if (!pending)
+      pending = game::Call<uint8_t* (*)(void*, const uint8_t*, int)>(0x141ec2150)(*reinterpret_cast<void**>(static_cast<uint8_t*>(self->owner) + 0x40),
+                                                                               data, length);
+    else
+      game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x140313f70)(pending, data, length);  // append
+    ok = true;
+    while (pending) {
+      int pendingSize = *reinterpret_cast<int*>(pending + 0x10);
+      SecBuffer buffers[4] = {};
+      buffers[0] = SecBuffer{static_cast<unsigned long>(pendingSize), 1, pendingSize ? *reinterpret_cast<uint8_t**>(pending + 8) : nullptr};
+      SecBufferDesc description{0, 4, buffers};
+      using DecryptFn = int (*)(void*, SecBufferDesc*, unsigned long, unsigned long*);
+      status = (*reinterpret_cast<DecryptFn*>(SslFunctions(self) + 0xD0))(context, &description, 0, nullptr);
+      if (status == 0x90317) {  // SEC_I_CONTEXT_EXPIRED
+        game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac000));  // "DecryptMessage - Session expired with remote host, disconnecting."
+        game::Call<void (*)(void*, int, int)>(0x141ec07a0)(self->owner, 0, 0xF);
+        ok = false;
+        break;
+      }
+      if (status == static_cast<int>(0x80090318)) {  // SEC_E_INCOMPLETE_MESSAGE: wait for more data
+        ok = false;
+        break;
+      }
+      if (status != 0 && status != 0x90321) {
+        const char* text = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(status, &statusText);
+        game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac048), text);  // "DecryptMessage failed - %s"
+        ok = false;
+        break;
+      }
+      SecBuffer* plain = nullptr;
+      SecBuffer* extra = nullptr;
+      for (SecBuffer& buffer : buffers) {
+        if (!plain && buffer.type == 1) plain = &buffer;   // SECBUFFER_DATA
+        if (!extra && buffer.type == 5) extra = &buffer;   // SECBUFFER_EXTRA
+      }
+      if (plain && plain->size) game::Call<void (*)(void*, void*, unsigned long)>(0x141ec0ba0)(self->owner, plain->data, plain->size);
+      if (extra && extra->size) {
+        game::Call<void (*)(uint8_t*, int, void*, unsigned long)>(0x14030d520)(pending, 0, extra->data, extra->size);
+        int current = *reinterpret_cast<int*>(pending + 0x10);
+        if (static_cast<int>(extra->size) > current)
+          game::Call<void (*)(uint8_t*, int, int)>(0x140339a70)(pending, static_cast<int>(extra->size), current);
+        else
+          *reinterpret_cast<int*>(pending + 0x10) = static_cast<int>(extra->size);
+      } else {
+        releasePending();
+      }
+      if (status == 0x90321) {  // SEC_I_RENEGOTIATE
+        game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac068));  // "Server request to renegotiate session."
+        self->sslState = 1;
+        *reinterpret_cast<int*>(static_cast<uint8_t*>(self->owner) + 0x38) = 1;
+        releasePending();
+      }
+    }
+    if (ok) {
+      int64_t delta = TimeNow() - started;
+      int elapsed = delta > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(delta);
+      if (elapsed > 1000)
+        game::Call<LogFn>(0x1402ef740)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac090), elapsed);  // "Warning! DecryptMessage took %d ms."
+    }
+  }
+  statusText.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&statusText);
+  return ok;
+}
+
 }  // namespace rebuild::udp
 
 using namespace rebuild::udp;
@@ -454,3 +539,4 @@ REBUILD_FUNCTION(TcpConnectionPlatformDriver_GiveTime, 0x141ebdf20, TcpConnectio
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_TerminateSsl, 0x141ebf360, TcpConnectionPlatformDriverTerminateSsl);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_StartSslHandshake, 0x141ebefe0, TcpConnectionPlatformDriverStartSslHandshake);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_SendEncrypted, 0x141ebead0, TcpConnectionPlatformDriverSendEncrypted);
+REBUILD_FUNCTION(TcpConnectionPlatformDriver_DecryptReceived, 0x141ebc7f0, TcpConnectionPlatformDriverDecryptReceived);
