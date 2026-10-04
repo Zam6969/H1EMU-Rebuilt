@@ -48,6 +48,37 @@ void* CompressionHandlerDeletingDestructor(uint8_t* self, unsigned flags) {
   return self;
 }
 
+// Login packets holding one SoeUtil byte array {vtable 0x14204adc8, data
+// +8, count +0x10} at ArrayOffset: clear it, free the data through the
+// thread allocator (0x14032f980) or operator delete[] (0x1402fc170), then
+// fall back to the Login BasePacket vtable.
+template <size_t ArrayOffset, size_t Size>
+void* ByteArrayPacketDeletingDestructor(uint8_t* self, unsigned flags) {
+  uint8_t* array = self + ArrayOffset;
+  *reinterpret_cast<int*>(array + 0x10) = 0;
+  *reinterpret_cast<uint64_t*>(array) = 0x14204adc8;
+  void* data = *reinterpret_cast<void**>(array + 8);
+  if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+    game::Call<void (*)(void*)>(0x1402fc170)(data);
+  else
+    game::Call<void (*)(void*, int)>(0x14032f980)(data, 1);
+  *reinterpret_cast<void**>(array + 8) = nullptr;
+  *reinterpret_cast<uint64_t*>(self) = 0x1424bfc58;
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+
+// 0x14163d120: PacketServerListReply - pop every server entry off the list
+// at +0x10 (head +0x18) through 0x140adcbf0, then the BasePacket vtable.
+void* ServerListReplyDeletingDestructor(uint8_t* self, unsigned flags) {
+  *reinterpret_cast<uint64_t*>(self + 0x10) = 0x1424bfd80;
+  while (void* head = *reinterpret_cast<void**>(self + 0x18))
+    game::Call<void (*)(void*, void*)>(0x140adcbf0)(self + 0x10, head);
+  *reinterpret_cast<uint64_t*>(self) = 0x1424bfc58;
+  if (flags & 1) SizedDelete(self, 0x30);
+  return self;
+}
+
 // UdpManagerHandler default encrypt / decrypt / compress / decompress: copy
 // the source bytes to the destination and return the length unchanged.
 int HandlerCopyThrough(void* /*self*/, void* /*connection*/, uint8_t* destination, const uint8_t* source, int length) {
@@ -128,3 +159,14 @@ DTOR_THUNK(ExternalLoginUdpApi_DeletingDestructor_Thunk88, 0x14163c820, 0x14163c
 DTOR_THUNK(ExternalLoginUdpApi_DeletingDestructor_ThunkD40, 0x14163c82c, 0x14163cbf0, -0xd40);
 DTOR_THUNK(ExternalLoginTcpApi_DeletingDestructor_ThunkAE0, 0x14163c808, 0x14163cb80, -0xae0);
 MEMBER_DTOR(GameServerData_DeletingDestructor, 0x14163fc30, 0x14163fa60, 0x1200);
+
+#define ARRAY_PACKET_DTOR(name, address, offset, size)   REBUILD_FUNCTION(name, address, (ByteArrayPacketDeletingDestructor<offset, size>))
+ARRAY_PACKET_DTOR(LoginPacketCharacterCreateRequest_DeletingDestructor, 0x14163cca0, 0x18, 0x30);
+ARRAY_PACKET_DTOR(LoginPacketCharacterLoginRequest_DeletingDestructor, 0x14163ce50, 0x28, 0x40);
+ARRAY_PACKET_DTOR(LoginPacketCharacterLoginReply_DeletingDestructor, 0x14163cdd0, 0x30, 0x48);
+ARRAY_PACKET_DTOR(LoginPacketCharacterDeleteReply_DeletingDestructor, 0x14163cd20, 0x28, 0x40);
+ARRAY_PACKET_DTOR(LoginPacketTunnelAppClientToServer_DeletingDestructor, 0x14163d210, 0x20, 0x38);
+ARRAY_PACKET_DTOR(LoginPacketTunnelAppServerToClient_DeletingDestructor, 0x14163d290, 0x20, 0x38);
+ARRAY_PACKET_DTOR(LoginPacketCharacterTransferServerRequest_DeletingDestructor, 0x14163cfc0, 0x28, 0x40);
+ARRAY_PACKET_DTOR(LoginPacketCharacterTransferServerReply_DeletingDestructor, 0x14163cf40, 0x30, 0x48);
+REBUILD_FUNCTION(LoginPacketServerListReply_DeletingDestructor, 0x14163d120, ServerListReplyDeletingDestructor);
