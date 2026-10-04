@@ -418,6 +418,131 @@ void* IsSteamCustomerResponseDeletingDestructor(uint8_t* self, unsigned flags) {
   return self;
 }
 
+// 0x14164d4a0: HashListSet scalar deleting destructor.
+void* HashListSetDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424c1450;
+  if (At<void*>(self, 0x10)) {
+    do {
+      if (void* head = At<void*>(self, 0x10)) game::Call<void (*)(void*, void*)>(0x141655640)(self, head);
+    } while (At<void*>(self, 0x10));
+  }
+  game::Call<void (*)(void*)>(0x14164c890)(self);
+  if (flags & 1) SizedDelete(self, 0x38);
+  return self;
+}
+
+// 0x14161e360: ClientInGamePurchaseOrder AddQuantity(itemId, offerId, n):
+// bump the entry in the 4-bucket hash (+0x128) whose folded key matches
+// (only the fold is compared), else insert a new entry.
+void PurchaseOrderAddQuantity(uint8_t* self, const int* first, const int* second, int quantity) {
+  uint8_t* map = self + 0x128;
+  int64_t key = (static_cast<int64_t>(*first) << 32) | static_cast<int64_t>(*second);
+  int hash = static_cast<int>(key >> 32) ^ static_cast<int>(key);
+  for (uint8_t* node = At<uint8_t*>(map, 0x28 + (hash & 3) * 8); node; node = At<uint8_t*>(node, 0x78)) {
+    if (At<int>(node, 0x70) == hash) {
+      At<int>(node, 0x10) += quantity;
+      return;
+    }
+  }
+  game::Call<void (*)(void*, int*, const int*, const int*, int*)>(0x14161dbc0)(map, &hash, first, second, &quantity);
+}
+
+// 0x1416678f0: SoeUtil::InputManager Push(event): append a 64-byte event to
+// the 512-entry ring (+8), flushing through slot 11 when full.
+void InputManagerPushEvent(uint8_t* self, const uint8_t* event) {
+  if (At<int>(self, 0x8008) == 0x200) Virtual(self, 11);
+  int index = (At<int>(self, 0x800C) + At<int>(self, 0x8008)) % 512;
+  for (int i = 0; i < 64; ++i) self[8 + index * 64 + i] = event[i];
+  ++At<int>(self, 0x8008);
+}
+
+// 0x1403b5af0: Array (destroyed elements, 8-aligned) scalar deleting
+// destructor.
+void* ArrayT095a01DeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424b0578;
+  game::Call<void (*)(void*, int)>(0x1404595e0)(self, At<int>(self, 0x10));
+  FreeHeapOrThread(At<void*>(self, 8), 8);
+  At<void*>(self, 8) = nullptr;
+  if (flags & 1) SizedDelete(self, 0x18);
+  return self;
+}
+
+// 0x1415fa230: Crypto::Sha256 Hash(data, length, array): size the array to
+// 32 bytes and hash into it through slot 0.
+uint64_t Sha256HashToArray(void* self, const void* data, int length, uint8_t* array) {
+  int count = At<int>(array, 0x10);
+  if (count < 0x20)
+    game::Call<void (*)(void*, int)>(0x140655d70)(array, 0x20);
+  else if (count > 0x20)
+    At<int>(array, 0x10) = 0x20;
+  int size = At<int>(array, 0x10);
+  return Virtual<uint64_t>(self, 0, data, length, size ? At<void*>(array, 8) : nullptr, size);
+}
+
+// 0x141e96310: StoreBundleDefinition scalar deleting destructor (class
+// operator delete).
+void* StoreBundleDefinitionDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425aa3d0;
+  game::Call<void (*)(void*)>(0x14161a240)(self);
+  if (flags & 1) {
+    if (flags & 4)
+      game::Call<void (*)(void*, size_t)>(0x1402ec800)(self, 0x1D0);
+    else if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
+      game::Call<void (*)(void*, int)>(0x14032f980)(self, 0);
+    else
+      game::Call<void (*)(void*)>(0x1402fc170)(self);
+  }
+  return self;
+}
+
+// 0x140340bd0: RefArrayPooled Free(block, flags): heap blocks (flags & 1)
+// go back to the allocator, pooled ones to the array's pool or the lazily
+// created global pool (0x142b06e08).
+void RefArrayPooledFree(uint8_t* self, void* block, unsigned flags) {
+  if (flags & 1) {
+    FreeHeapOrThread(block, 1);
+    return;
+  }
+  void* pool = At<void*>(self, 0x28);
+  if (!pool) {
+    if (!*reinterpret_cast<bool*>(0x142b06e00)) {
+      game::Call<void (*)()>(0x14033b300)();
+      *reinterpret_cast<bool*>(0x142b06e00) = true;
+    }
+    pool = *reinterpret_cast<void**>(0x142b06e08);
+  }
+  game::Call<void (*)(void*, void*, unsigned)>(0x140340c60)(pool, block, flags);
+}
+
+// 0x140d1b664: undname pairNode::getString(buffer, end): left child then,
+// if room remains, the right child (slot 2, CFG-checked).
+char* PairNodeGetString(uint8_t* self, char* buffer, char* end) {
+  auto childString = [](void* child, char* at, char* limit) {
+    void* target = (*reinterpret_cast<void***>(child))[2];
+    game::Call<void (*)(void*)>(0x140d11434)(target);  // _guard_check_icall
+    return reinterpret_cast<char* (*)(void*, char*, char*)>(target)(child, at, limit);
+  };
+  char* at = childString(At<void*>(self, 8), buffer, end);
+  if (at < end) at = childString(At<void*>(self, 0x10), at, end);
+  return at;
+}
+
+// 0x141679060: TaskManagement::ScheduledTaskNode TimeRemaining(now): 0 for
+// a pending/repeating task with no delay or an unset start time, else
+// start (+0x30 -> +0x100) + delay - now.
+int64_t ScheduledTaskTimeRemaining(void** self, const int64_t* now) {
+  using DelayFn = int* (*)(void*, int64_t*);
+  int state = At<int>(self, 0x48);
+  if (((state - 1) & ~2) == 0) {
+    int64_t scratch;
+    if (*reinterpret_cast<DelayFn>(reinterpret_cast<void**>(*self)[1])(self, &scratch) == *reinterpret_cast<int*>(0x143dcb1dc)) return 0;
+    if (At<int64_t>(At<void*>(self, 0x30), 0x100) == *reinterpret_cast<int64_t*>(0x143dcb1c8)) return 0;
+  }
+  int64_t scratch;
+  int delay = *reinterpret_cast<DelayFn>(reinterpret_cast<void**>(*self)[1])(self, &scratch);
+  return At<int64_t>(At<void*>(self, 0x30), 0x100) + delay - *now;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -461,3 +586,12 @@ REBUILD_FUNCTION(Array_Ta2a1d0_DeletingDestructor, 0x1403b5b70, Array64DeletingD
 REBUILD_FUNCTION(HashMap_Tf9454d_DeletingDestructor, 0x1417108d0, HashMapDeletingDestructor);
 REBUILD_FUNCTION(Crypto_Sha256_DeletingDestructor, 0x1415fa150, Sha256DeletingDestructor);
 REBUILD_FUNCTION(UramApiIsSteamCustomerResponse_DeletingDestructor, 0x14160ec60, IsSteamCustomerResponseDeletingDestructor);
+REBUILD_FUNCTION(HashListSet_T961379_DeletingDestructor, 0x14164d4a0, HashListSetDeletingDestructor);
+REBUILD_FUNCTION(ClientInGamePurchaseOrder_AddQuantity, 0x14161e360, PurchaseOrderAddQuantity);
+REBUILD_FUNCTION(SoeUtil_InputManager_PushEvent, 0x1416678f0, InputManagerPushEvent);
+REBUILD_FUNCTION(Array_T095a01_DeletingDestructor, 0x1403b5af0, ArrayT095a01DeletingDestructor);
+REBUILD_FUNCTION(Crypto_Sha256_HashToArray, 0x1415fa230, Sha256HashToArray);
+REBUILD_FUNCTION(StoreBundleDefinition_DeletingDestructor, 0x141e96310, StoreBundleDefinitionDeletingDestructor);
+REBUILD_FUNCTION(RefArrayPooled_Free, 0x140340bd0, RefArrayPooledFree);
+REBUILD_FUNCTION(pairNode_GetString, 0x140d1b664, PairNodeGetString);
+REBUILD_FUNCTION(ScheduledTaskNode_TimeRemaining, 0x141679060, ScheduledTaskTimeRemaining);
