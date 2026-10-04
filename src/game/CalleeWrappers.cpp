@@ -1701,6 +1701,117 @@ uint64_t QueryLazyGlobal142b19e60() {
   return result;
 }
 
+
+// 0x1406fe940: constructor (vtable 0x1420f4fb8, name string +8, member
+// +0x38 built from two constant tables).
+void* Construct1420f4fb8(uint8_t* self) {
+  At<uint64_t>(self, 0x10) = 0x143e09641;
+  At<uint64_t>(self, 0x18) = 0;
+  At<uint64_t>(self, 8) = 0x1424bc0a0;
+  At<uint64_t>(self, 0x28) = 0;
+  At<uint64_t>(self, 0x30) = 0;
+  At<uint64_t>(self, 0x20) = 0;
+  At<uint64_t>(self, 0) = 0x1420f4fb8;
+  game::Call<void (*)(void*, const void*, const void*)>(0x1406fe7b0)(self + 0x38, reinterpret_cast<const void*>(0x1420f4ed8),
+                                                                    reinterpret_cast<const void*>(0x1420f5068));
+  return self;
+}
+
+// 0x1407e8370: constructor (vtables 0x142111aa0 / 0x142111ad0, 0x320-byte
+// table cleared).
+void* Construct142111aa0(uint8_t* self) {
+  At<int>(self, 0x20) = 0;
+  At<uint64_t>(self, 0x10) = 0;
+  At<uint64_t>(self, 0x18) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x28, 0, 0x320);
+  At<int>(self, 8) = 0;
+  At<uint64_t>(self, 0) = 0x142111aa0;
+  At<int>(self, 0xC) = 0x7FFFFFFF;
+  At<uint64_t>(self, 0x348) = 0x142111ad0;
+  At<uint64_t>(self, 0x350) = 0;
+  At<uint64_t>(self, 0x358) = 0;
+  return self;
+}
+
+// 0x140954630: under the lock (+0x138), call the member (+0x38) slot 15
+// (enable) or 16 (disable).
+void ToggleMemberLocked(uint8_t* self, uint8_t enable) {
+  uint8_t* lock = self + 0x138;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  void* member = At<void*>(self, 0x38);
+  if (enable)
+    Virtual(member, 15);
+  else
+    Virtual(member, 16);
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+}
+
+// 0x14078ab10: set the four strings once (+0x58 guards).
+void SetFourStringsOnce(uint8_t* self, const char* a, const char* b, const char* c, const char* d) {
+  if (At<uint8_t>(self, 0x58)) return;
+  using AssignFn = void (*)(void*, const char*);
+  game::Call<AssignFn>(0x1402bd670)(self + 0x8C8, a);
+  game::Call<AssignFn>(0x1402bd670)(self + 0x880, b);
+  game::Call<AssignFn>(0x1402bd670)(self + 0x8B0, c);
+  game::Call<AssignFn>(0x1402bd670)(self + 0x898, d);
+  At<uint8_t>(self, 0x58) = 1;
+}
+
+// 0x140340c60: return a block to the pool under its lock (+0x518).
+void PoolFreeLocked(uint8_t* self, void* block, unsigned flags) {
+  uint8_t* lock = self + 0x518;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  game::Call<void (*)(void*, void*, unsigned)>(0x140340970)(self, block, flags);
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+}
+
+// 0x14165af80: set the owner (+0x90) and path (+0x98); in buffered mode
+// open the file (+0x1B8), warning on failure.
+bool OpenReaderFile(uint8_t* self, void* owner, const char* path) {
+  At<void*>(self, 0x90) = owner;
+  game::Call<void (*)(void*, const char*)>(0x1402bd670)(self + 0x98, path);
+  if (At<int>(self, 0xA8) <= 0) return true;
+  if (game::Call<bool (*)(void*, const char*, int, int)>(0x140337ae0)(self + 0x1B8, At<const char*>(self, 0xA0), 3, 3)) return true;
+  game::Call<void (*)(void*, const char*, ...)>(0x1402baba0)(nullptr, reinterpret_cast<const char*>(0x1424c2060), At<const char*>(self, 0xA0));
+  return false;
+}
+
+// 0x1403d4c60: drain both lists (+0xC0 head +0xD0, +0x500 head +0x510)
+// around the base cleanup (0x1403e3360).
+void DrainBothLists(uint8_t* self) {
+  while (void* head = At<void*>(self, 0xD0)) game::Call<void (*)(void*, void*)>(0x140443d00)(self + 0xC0, head);
+  game::Call<void (*)(void*)>(0x1403e3360)(self);
+  while (void* head = At<void*>(self, 0x510)) game::Call<void (*)(void*, void*)>(0x140446180)(self + 0x500, head);
+}
+
+// 0x140396ad0: constructor (vtable 0x1424bb930) with a name.
+void* Construct1424bb930(uint8_t* self, const char* name) {
+  At<uint64_t>(self, 0x10) = 0x143e09641;
+  At<uint64_t>(self, 0x18) = 0;
+  At<uint64_t>(self, 8) = 0x142049de8;
+  At<uint64_t>(self, 0) = 0x1424bb930;
+  game::Call<void (*)(void*)>(0x1403d4a10)(self);
+  game::Call<void (*)(void*, const char*)>(0x1402bd670)(self + 8, name);
+  return self;
+}
+
+// 0x14077ff60: drop the global shared object (0x143bc51b0).
+void ReleaseGlobal143bc51b0() {
+  ResetSharedPointer(reinterpret_cast<void**>(0x143bc51b0));
+}
+
+// 0x1403f8380: the entry for the id if its owner list contains the
+// current object (0x1404735e0).
+void* EntryIfOwned(uint8_t* self, const int* id) {
+  int key = *id;
+  uint8_t* entry = game::Call<uint8_t* (*)(void*, int*)>(0x14071f100)(At<void*>(self, 0x38860), &key);
+  if (!entry) return nullptr;
+  void* current = game::Call<void* (*)()>(0x1404735e0)();
+  for (void** node = Virtual<void**>(entry + 0x20, 0); node; node = static_cast<void**>(*node))
+    if (node == current) return entry;
+  return nullptr;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -1899,3 +2010,13 @@ REBUILD_FUNCTION(Construct_142065580, 0x14039b600, Construct142065580);
 REBUILD_FUNCTION(FormatTimeOfDay, 0x14030d4b0, FormatTimeOfDay);
 REBUILD_FUNCTION(CurrentSelectionName, 0x1403f5ff0, CurrentSelectionName);
 REBUILD_FUNCTION(QueryLazyGlobal_142b19e60, 0x140839910, QueryLazyGlobal142b19e60);
+REBUILD_FUNCTION(Construct_1420f4fb8, 0x1406fe940, Construct1420f4fb8);
+REBUILD_FUNCTION(Construct_142111aa0, 0x1407e8370, Construct142111aa0);
+REBUILD_FUNCTION(ToggleMemberLocked, 0x140954630, ToggleMemberLocked);
+REBUILD_FUNCTION(SetFourStringsOnce, 0x14078ab10, SetFourStringsOnce);
+REBUILD_FUNCTION(PoolFreeLocked, 0x140340c60, PoolFreeLocked);
+REBUILD_FUNCTION(OpenReaderFile, 0x14165af80, OpenReaderFile);
+REBUILD_FUNCTION(DrainBothLists, 0x1403d4c60, DrainBothLists);
+REBUILD_FUNCTION(Construct_1424bb930, 0x140396ad0, Construct1424bb930);
+REBUILD_FUNCTION(ReleaseGlobal_143bc51b0, 0x14077ff60, ReleaseGlobal143bc51b0);
+REBUILD_FUNCTION(EntryIfOwned, 0x1403f8380, EntryIfOwned);
