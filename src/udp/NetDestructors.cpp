@@ -79,6 +79,25 @@ void* ServerListReplyDeletingDestructor(uint8_t* self, unsigned flags) {
   return self;
 }
 
+// Login API deleting destructors: restore the three-level vtable set, run
+// the ExternalLoginApi part (embedded at LoginOffset), then the transport
+// base destructor, then sized delete.
+template <uint64_t Vtable, size_t SecondOffset, uint64_t SecondVtable, size_t ThirdOffset, uint64_t ThirdVtable, size_t LoginOffset,
+          uint64_t LoginVtable, uint64_t BaseDestructor, size_t Size>
+void* LoginApiDeletingDestructor(uint8_t* self, unsigned flags) {
+  *reinterpret_cast<uint64_t*>(self) = Vtable;
+  *reinterpret_cast<uint64_t*>(self + SecondOffset) = SecondVtable;
+  if constexpr (ThirdOffset != 0) *reinterpret_cast<uint64_t*>(self + ThirdOffset) = ThirdVtable;
+  *reinterpret_cast<uint64_t*>(self + LoginOffset) = LoginVtable;
+  game::Call<void (*)(void*)>(0x14163bde0)(self + LoginOffset);  // ~ExternalLoginApi
+  game::Call<void (*)(void*)>(BaseDestructor)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+
+// 0x140309bd0: BaseApp - clear the flag at +0x312D1.
+void BaseAppClearFlag312D1(uint8_t* self) { self[0x312D1] = 0; }
+
 // UdpManagerHandler default encrypt / decrypt / compress / decompress: copy
 // the source bytes to the destination and return the length unchanged.
 int HandlerCopyThrough(void* /*self*/, void* /*connection*/, uint8_t* destination, const uint8_t* source, int length) {
@@ -170,3 +189,9 @@ ARRAY_PACKET_DTOR(LoginPacketTunnelAppServerToClient_DeletingDestructor, 0x14163
 ARRAY_PACKET_DTOR(LoginPacketCharacterTransferServerRequest_DeletingDestructor, 0x14163cfc0, 0x28, 0x40);
 ARRAY_PACKET_DTOR(LoginPacketCharacterTransferServerReply_DeletingDestructor, 0x14163cf40, 0x30, 0x48);
 REBUILD_FUNCTION(LoginPacketServerListReply_DeletingDestructor, 0x14163d120, ServerListReplyDeletingDestructor);
+
+REBUILD_FUNCTION(ExternalLoginUdpApi_DeletingDestructor, 0x14163cbf0,
+                 (LoginApiDeletingDestructor<0x1424bfe60, 0x80, 0x1424bff20, 0x88, 0x1424bff58, 0xd40, 0x1424bff70, 0x1415f8c20, 0xd80>));
+REBUILD_FUNCTION(ExternalLoginTcpApi_DeletingDestructor, 0x14163cb80,
+                 (LoginApiDeletingDestructor<0x1424bffa8, 0x8, 0x1424c0040, 0, 0, 0xae0, 0x1424c0068, 0x141e95250, 0xb20>));
+REBUILD_FUNCTION(BaseApp_ClearFlag312D1, 0x140309bd0, BaseAppClearFlag312D1);
