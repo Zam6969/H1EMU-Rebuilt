@@ -417,3 +417,65 @@ REBUILD_FUNCTION(time_put_T8348f0_DeletingDestructor_1419141d4, 0x1419141d4, (Fi
 REBUILD_FUNCTION(collate_Ta29307_DeletingDestructor_14192ccb0, 0x14192ccb0, (FieldDeletingDestructor<0x142526bc0, 0x18, 0x140d42428, 0x142520e38, 0x20>));
 REBUILD_FUNCTION(time_put_Td2fe53_DeletingDestructor_14192ceb0, 0x14192ceb0, (FieldDeletingDestructor<0x142526e20, 0x10, 0x140d42428, 0x142520e38, 0x18>));
 REBUILD_FUNCTION(CaptureCommon__Buffer_DeletingDestructor_14194ede0, 0x14194ede0, (FieldDeletingDestructor<0x14252d738, 0x18, 0x1402fc170, 0x14252d690, 0x30>));
+
+namespace rebuild::game_misc {
+// Intrusive list / hash-list containers: set the vtable, unlink every node
+// from the head (+0x10) through the class's remove (Remove(self, node)),
+// sized delete.
+template <uint64_t Vtable, uint64_t Remove, size_t Size>
+void* ListDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  while (void* head = *reinterpret_cast<void**>(bytes + 0x10)) game::Call<void (*)(void*, void*)>(Remove)(self, head);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// SoeUtil::StringFixed<N> and friends: release through the interface vtable,
+// leave the string empty with the plain IString vtable, sized delete.
+template <uint64_t InterfaceVtable, uint64_t PlainVtable, size_t Size>
+void* FixedStringDeletingDestructor(void* self, unsigned flags) {
+  auto* text = static_cast<soeutil::IString*>(self);
+  text->vtable = reinterpret_cast<void**>(InterfaceVtable);
+  soeutil::StringRelease(text);
+  text->data = soeutil::EmptyStringData();
+  *reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(self) + 0x10) = 0;
+  text->vtable = reinterpret_cast<void**>(PlainVtable);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(HashListMap_T3a396d_DeletingDestructor_140306140, 0x140306140, (ListDeletingDestructor<0x142049c38, 0x140309580, 0x128>));
+REBUILD_FUNCTION(HashListMap_Te63d1d_DeletingDestructor_140311150, 0x140311150, (ListDeletingDestructor<0x14204b350, 0x140312790, 0x10028>));
+REBUILD_FUNCTION(HashListMap_Tb50654_DeletingDestructor_140321bd0, 0x140321bd0, (ListDeletingDestructor<0x14204d300, 0x140324bf0, 0x3b0>));
+REBUILD_FUNCTION(HashListMap_T74c50b_DeletingDestructor_1403273c0, 0x1403273c0, (ListDeletingDestructor<0x14204e5a8, 0x14032b8e0, 0x4028>));
+REBUILD_FUNCTION(HashListMap_T89d71d_DeletingDestructor_14160e520, 0x14160e520, (ListDeletingDestructor<0x1424ba470, 0x1416132c0, 0xa8>));
+REBUILD_FUNCTION(HashListMap_Tfbe090_DeletingDestructor_141615af0, 0x141615af0, (ListDeletingDestructor<0x1424bb990, 0x141618d20, 0xa8>));
+REBUILD_FUNCTION(HashListMap_Tdf3b05_DeletingDestructor_14161e130, 0x14161e130, (ListDeletingDestructor<0x1424bc718, 0x14161f080, 0x48>));
+REBUILD_FUNCTION(HashListMap_Tbfc69a_DeletingDestructor_1416203a0, 0x1416203a0, (ListDeletingDestructor<0x1424bc9f0, 0x140830380, 0x68>));
+REBUILD_FUNCTION(HashListMap_T5181ba_DeletingDestructor_141622be0, 0x141622be0, (ListDeletingDestructor<0x1424bcff8, 0x1416258d0, 0x128>));
+REBUILD_FUNCTION(HashListMap_T79c627_DeletingDestructor_141629fe0, 0x141629fe0, (ListDeletingDestructor<0x1424bdd68, 0x14162b6b0, 0xa8>));
+REBUILD_FUNCTION(HashList_T315445_DeletingDestructor_141629f00, 0x141629f00, (ListDeletingDestructor<0x1424bdd68, 0x14162b6b0, 0xa8>));
+REBUILD_FUNCTION(HashListMap_Tbdda20_DeletingDestructor_14162a050, 0x14162a050, (ListDeletingDestructor<0x1424bde28, 0x14162b7a0, 0x128>));
+REBUILD_FUNCTION(HashList_T77bc25_DeletingDestructor_141629f70, 0x141629f70, (ListDeletingDestructor<0x1424bde28, 0x14162b7a0, 0x128>));
+REBUILD_FUNCTION(HashListMap_T195568_DeletingDestructor_14162f460, 0x14162f460, (ListDeletingDestructor<0x1424be860, 0x140b0b280, 0x68>));
+REBUILD_FUNCTION(HashListMap_T969c1e_DeletingDestructor_14162f3f0, 0x14162f3f0, (ListDeletingDestructor<0x1424be898, 0x140bbea70, 0x428>));
+REBUILD_FUNCTION(HashListMap_Tf0d8a0_DeletingDestructor_140628410, 0x140628410, (ListDeletingDestructor<0x1424beb28, 0x140635900, 0x2028>));
+REBUILD_FUNCTION(HashList_T90e688_DeletingDestructor_140bb9650, 0x140bb9650, (ListDeletingDestructor<0x1424beb28, 0x140635900, 0x2028>));
+REBUILD_FUNCTION(HashListMap_Ta1c9ee_DeletingDestructor_140628480, 0x140628480, (ListDeletingDestructor<0x1424becb0, 0x1406359c0, 0x2028>));
+REBUILD_FUNCTION(HashList_T931442_DeletingDestructor_141631a90, 0x141631a90, (ListDeletingDestructor<0x1424becb0, 0x1406359c0, 0x2028>));
+REBUILD_FUNCTION(HashListMap_T9dd27b_DeletingDestructor_14072f3e0, 0x14072f3e0, (ListDeletingDestructor<0x1424bfb80, 0x140732b50, 0x128>));
+REBUILD_FUNCTION(HashList_Tf968c1_DeletingDestructor_14072f300, 0x14072f300, (ListDeletingDestructor<0x1424bfb80, 0x140732b50, 0x128>));
+REBUILD_FUNCTION(HashListSet_T4f50f9_DeletingDestructor_14164d3f0, 0x14164d3f0, (ListDeletingDestructor<0x1424c1470, 0x1416555a0, 0x4028>));
+REBUILD_FUNCTION(HashListMap_Ta2c88d_DeletingDestructor_14164d2a0, 0x14164d2a0, (ListDeletingDestructor<0x1424c1558, 0x141655310, 0x428>));
+REBUILD_FUNCTION(HashListMap_Tbf997b_DeletingDestructor_14166da20, 0x14166da20, (ListDeletingDestructor<0x1424c53b0, 0x141670730, 0x428>));
+REBUILD_FUNCTION(HashListMap_T936ef1_DeletingDestructor_141674650, 0x141674650, (ListDeletingDestructor<0x1424c5a68, 0x141677160, 0x2028>));
+REBUILD_FUNCTION(HashListMap_Tef78bd_DeletingDestructor_1416745e0, 0x1416745e0, (ListDeletingDestructor<0x1424c5aa0, 0x1416770a0, 0x2028>));
+REBUILD_FUNCTION(HashListMap_T3eff8c_DeletingDestructor_1416746c0, 0x1416746c0, (ListDeletingDestructor<0x1424c5ad8, 0x141677220, 0x2028>));
+REBUILD_FUNCTION(HashListMap_T92c0b6_DeletingDestructor_141674570, 0x141674570, (ListDeletingDestructor<0x1424c5b10, 0x141676fe0, 0x2028>));
+REBUILD_FUNCTION(HashList_Tba550f_DeletingDestructor_141674500, 0x141674500, (ListDeletingDestructor<0x1424c5b10, 0x141676fe0, 0x2028>));
+REBUILD_FUNCTION(HashListMap_T0ffc4d_DeletingDestructor_14167aa50, 0x14167aa50, (ListDeletingDestructor<0x1424c63c8, 0x14167d980, 0x1028>));
+REBUILD_FUNCTION(HashListMap_T9fc61e_DeletingDestructor_141eb5f70, 0x141eb5f70, (ListDeletingDestructor<0x1425ab808, 0x141eb9b70, 0x8028>));
+REBUILD_FUNCTION(HashList_Td40ee4_DeletingDestructor_141eb5f00, 0x141eb5f00, (ListDeletingDestructor<0x1425ab808, 0x141eb9b70, 0x8028>));
+REBUILD_FUNCTION(HashListMap_T267dfe_DeletingDestructor_141eb5fe0, 0x141eb5fe0, (ListDeletingDestructor<0x1425ab8c8, 0x141eb9c40, 0x10028>));
+REBUILD_FUNCTION(HashListSet_Td00d30_DeletingDestructor_141eb6090, 0x141eb6090, (ListDeletingDestructor<0x1425ab938, 0x141eb9ce0, 0x4028>));
