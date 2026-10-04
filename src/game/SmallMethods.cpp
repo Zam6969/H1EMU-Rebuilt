@@ -637,7 +637,8 @@ void MarketingDataUpdaterFinish(uint8_t* self, void*, void*, bool success) {
 // 0x141e96940: StoreBundleCategoryMapEntryDefinition ToString. Builds (and
 // drops) an unused empty StringFixed<256> scratch, as the original does.
 const char* CategoryMapEntryToString(uint8_t* self, soeutil::IString* out) {
-  soeutil::IString scratch{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<256> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x142049e08));
   game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1425aa5f8), At<int>(self, 8), At<int>(self, 0xC), At<int>(self, 0x10));
   const char* text = out->data;
   scratch.vtable = reinterpret_cast<void**>(0x142049de8);
@@ -682,7 +683,8 @@ bool MarketingDataSourceIsConsistent(uint8_t* self) {
 // 0x141e96880: StoreBundleCategoryDefinition ToString (name from the
 // member at +0x10, slot 1, rendered into an empty StringFixed<256>).
 const char* StoreBundleCategoryToString(uint8_t* self, soeutil::IString* out) {
-  soeutil::IString scratch{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringFixed<256> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x142049e08));
   const char* name = Virtual<const char*>(self + 0x10, 1, &scratch);
   game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1425aa638), At<int>(self, 8), At<int>(self, 0xC), name);
   const char* text = out->data;
@@ -958,6 +960,85 @@ uint8_t* GameServerDataAssign(uint8_t* self, uint8_t* other, uint8_t mask) {
   return self;
 }
 
+// 0x141e5e9a0: SpeedTree CArray<0x410-byte polymorphic T> scalar deleting
+// destructor (elements destroyed through slot 0; storage freed through the
+// array's vector deleting destructor when it has a count header).
+void* SpeedTreeArray410DeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a16b0;
+  if (At<bool>(self, 0x28)) {
+    At<uint64_t>(self, 0x10) = 0;
+    for (uint64_t i = 0; i < At<uint64_t>(self, 0x18); ++i) Virtual(At<uint8_t*>(self, 8) + i * 0x410, 0, 0);
+    At<uint64_t>(self, 0x18) = 0;
+    At<void*>(self, 8) = nullptr;
+    At<bool>(self, 0x28) = false;
+  }
+  if (!At<bool>(self, 0x28)) {
+    if (uint8_t* data = At<uint8_t*>(self, 8)) {
+      if (At<uint64_t>(data - 8, 0) != 0)
+        Virtual(data, 0, 3);
+      else
+        game::Call<void (*)(void*)>(0x1402fc170)(data - 8);
+    }
+    At<void*>(self, 8) = nullptr;
+    At<uint64_t>(self, 0x18) = 0;
+    At<uint64_t>(self, 0x10) = 0;
+  }
+  if (flags & 1) SizedDelete(self, 0x2C);
+  return self;
+}
+
+// 0x141e96c70: StoreBillboardPanelDefinition ToString.
+const char* StoreBillboardPanelToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::StringFixed<512> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x14204aea0));
+  const char* image = Virtual<const char*>(self + 0x48, 1, static_cast<void*>(&scratch));
+  const char* name = Virtual<const char*>(self + 0x10, 1, static_cast<void*>(&scratch));
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1425aa730), At<int>(self, 8), At<int>(self, 0xC), name, image, At<int>(self, 0x60));
+  const char* text = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x14204ae80);
+  soeutil::StringRelease(&scratch);
+  return text;
+}
+
+// 0x141621bb0: StorePortalCategoryDefinition ToString.
+const char* StorePortalCategoryToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::StringFixed<256> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x142049e08));
+  const char* name = Virtual<const char*>(self + 0x18, 1, static_cast<void*>(&scratch));
+  const char* image = Virtual<const char*>(self + 0x50, 1, static_cast<void*>(&scratch));
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bcc80), At<int>(self, 8), At<int>(self, 0xC), At<int>(self, 0x10),
+                                    At<int>(self, 0x14), image, name);
+  const char* text = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&scratch);
+  return text;
+}
+
+// 0x141e57fb0: SpeedTree::CFileSystem::LoadFile(path, kind): read the whole
+// file, from the pooled cache (kind 0) or a fresh allocation, logging the
+// "loading" line; returns the buffer or null.
+void* SpeedTreeLoadFile(void*, const char* path, int kind) {
+  if (!path) return nullptr;
+  void* file = game::Call<void* (*)(const char*)>(0x141e5f740)(path);  // fopen wrapper
+  if (!file) return nullptr;
+  alignas(8) uint8_t message[0x10];
+  game::Call<void (*)(void*, const char*, const char*)>(0x1418158f0)(message, reinterpret_cast<const char*>(0x1425a0f30), path);
+  alignas(8) uint8_t sizeOut[0x100];
+  if (kind == 0) {
+    int slot = 0;
+    void* buffer = game::Call<void* (*)(void*, void*, int*, int)>(0x141e62940)(file, sizeOut, &slot, 0);
+    if (!buffer) return nullptr;
+    if (game::Call<void* (*)(const char*, void**, void*)>(0x141e5f8e0)(path, &file, buffer)) return buffer;
+    game::Call<void (*)(int)>(0x141e62cb0)(slot);
+    return nullptr;
+  }
+  void* buffer = game::Call<void* (*)(void*, void*, int)>(0x1417fa2a0)(file, sizeOut, 1);
+  if (!buffer) return nullptr;
+  if (game::Call<void* (*)(const char*, void**, void*)>(0x141e5f8e0)(path, &file, buffer)) return buffer;
+  game::Call<void (*)(void**)>(0x141e57a10)(&buffer);
+  return nullptr;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1032,3 +1113,7 @@ REBUILD_FUNCTION(SpeedTree_CMap_DeletingDestructor, 0x141e5eb30, SpeedTreeMapDel
 REBUILD_FUNCTION(SpeedTree_CArrayAllocated_DeletingDestructor, 0x1418071c0, SpeedTreeAllocatedArrayDeletingDestructor);
 REBUILD_FUNCTION(GameClientInputManager_PumpMessages, 0x14034f0c0, InputManagerPumpMessages);
 REBUILD_FUNCTION(Login_GameServerData_Assign, 0x14163fdd0, GameServerDataAssign);
+REBUILD_FUNCTION(SpeedTree_CArray410_DeletingDestructor, 0x141e5e9a0, SpeedTreeArray410DeletingDestructor);
+REBUILD_FUNCTION(StoreBillboardPanelDefinition_ToString, 0x141e96c70, StoreBillboardPanelToString);
+REBUILD_FUNCTION(StorePortalCategoryDefinition_ToString, 0x141621bb0, StorePortalCategoryToString);
+REBUILD_FUNCTION(SpeedTree_CFileSystem_LoadFile, 0x141e57fb0, SpeedTreeLoadFile);
