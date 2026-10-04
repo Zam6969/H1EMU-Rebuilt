@@ -1039,6 +1039,157 @@ void* SpeedTreeLoadFile(void*, const char* path, int kind) {
   return nullptr;
 }
 
+namespace {
+// Resource type table (0x142ab6a48, 128 buckets): the alignment for a type
+// id, 0x10 when unknown.
+uint32_t ResourceTypeAlignment(uint32_t type) {
+  for (uint32_t* node = reinterpret_cast<uint32_t**>(0x142ab6a48)[type & 0x7F]; node; node = *reinterpret_cast<uint32_t**>(node + 0x3A)) {
+    if (*node == type) return node != reinterpret_cast<uint32_t*>(~uint64_t{7}) ? node[0x33] : 0x10;
+  }
+  return 0x10;
+}
+}  // namespace
+
+// 0x14164fd60: Resource::Manager::DecompressionJob::Run: allocate the
+// output through the manager's allocator callback (+0xA8) and inflate the
+// packed data into it; state +0xD0 = 1 (no memory) / 2 (bad data).
+void DecompressionJobRun(uint8_t* self) {
+  uint8_t* packed = At<uint8_t*>(At<uint8_t*>(self, 0x90), 8);
+  At<uint32_t>(self, 0xA0) = At<uint32_t>(packed, 0x10);
+  uint32_t type = At<uint32_t>(self, 0x88);
+  uint32_t alignment = ResourceTypeAlignment(type);
+  using AllocateFn = void* (*)(void*, uint32_t*, int64_t, uint32_t);
+  using FreeFn = void (*)(void*, void*, int64_t);
+  void* output = At<AllocateFn>(self, 0xA8)(At<void*>(self, 0xC8), &type, static_cast<int>(alignment), At<uint32_t>(packed, 0x10));
+  At<void*>(self, 0x98) = output;
+  if (!output) {
+    At<int>(self, 0xD0) = 1;
+    return;
+  }
+  if (game::Call<int (*)(void*, uint32_t, void*, uint32_t)>(0x14167efa0)(packed + 0x20, At<uint32_t>(packed, 0x14), output, At<uint32_t>(packed, 0x10)) < 0) {
+    alignment = ResourceTypeAlignment(At<uint32_t>(self, 0x88));
+    At<FreeFn>(self, 0xB0)(At<void*>(self, 0xC8), At<void*>(self, 0x98), static_cast<int>(alignment));
+    At<void*>(self, 0x98) = nullptr;
+    At<int>(self, 0xD0) = 2;
+  }
+}
+
+// 0x14033e310: RefArrayPooled storage policy: same growth rule as
+// SoeUtil::Array, but sizes are rounded to a power-of-two granularity and
+// served from the array's pool (+0x28) or the global pool (0x142b06e08);
+// without any pool, round to even and use the heap.
+void* RefArrayPooledReallocate(uint8_t* self, int count, int* newSize, bool exact) {
+  int capacity = At<int>(self, 0x14);
+  if (!exact) {
+    if (capacity < count) {
+      *newSize = static_cast<int>(static_cast<uint32_t>(count) * 5u) / 4;
+    } else if (capacity <= static_cast<int>(static_cast<uint32_t>(count) * 4u) / 3) {
+      *newSize = capacity;
+      return At<void*>(self, 8);
+    } else {
+      *newSize = static_cast<int>(static_cast<uint32_t>(count) * 6u) / 5;
+    }
+  } else {
+    if (capacity == count) {
+      *newSize = capacity;
+      return At<void*>(self, 8);
+    }
+    if (count == 0) {
+      *newSize = 0;
+      return nullptr;
+    }
+    *newSize = count;
+  }
+  void* pool = At<void*>(self, 0x28);
+  if (!pool) {
+    if (!*reinterpret_cast<bool*>(0x142b06e00)) {
+      game::Call<void (*)()>(0x14033b300)();
+      *reinterpret_cast<bool*>(0x142b06e00) = true;
+    }
+    pool = *reinterpret_cast<void**>(0x142b06e08);
+    if (!pool) {
+      int size = *newSize + ((*newSize - 1) & 1);
+      *newSize = size;
+      if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+        return game::Call<void* (*)(int64_t, void*)>(0x1402fc150)(size, reinterpret_cast<void*>(0x143c46658));
+      return game::Call<void* (*)(size_t, size_t)>(0x14032f910)(static_cast<uint32_t>(size), 1);
+    }
+  }
+  int size = *newSize;
+  uint32_t mask = static_cast<uint32_t>(size / 8 - 1);
+  mask |= mask >> 1;
+  mask |= mask >> 2;
+  mask |= mask >> 4;
+  mask |= mask >> 8;
+  uint32_t step = (mask | mask >> 16) + 1;
+  step += step == 0;
+  int padded = size - 1 + static_cast<int>(step);
+  int rounded = padded - padded % static_cast<int>(step);
+  int finalSize = (rounded & 1) + rounded;
+  *newSize = finalSize;
+  return game::Call<void* (*)(void*, int, int, uint32_t)>(0x14033e7e0)(pool, finalSize, rounded, step);
+}
+
+// 0x141e96390: StoreBundleDefinition ToString: the MarketingBundle part
+// (0x14161b4f0), then the store fields (an empty StringFixed<16> scratch is
+// built and dropped, as in the original).
+const char* StoreBundleToString(uint8_t* self, soeutil::IString* out) {
+  game::Call<const char* (*)(void*, soeutil::IString*)>(0x14161b4f0)(self, out);
+  soeutil::StringFixed<16> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x14204baa8));
+  int onSale = At<bool>(self, 0x1CB) || At<int>(self, 0x1BC) != 0 ? 1 : 0;
+  game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(
+      out, reinterpret_cast<const char*>(0x1425aa400), At<int>(self, 0x1A0), At<int>(self, 0x1A4), At<int>(self, 0x1B8), onSale, At<uint8_t>(self, 0x1CA),
+      At<uint8_t>(self, 0x1C9), At<uint8_t>(self, 0x199), At<uint8_t>(self, 0x1C8), At<int>(self, 0x1A8), At<int>(self, 0x1AC), At<int>(self, 0x1B0),
+      At<int>(self, 0x1B4), At<int>(self, 0x1BC), At<int>(self, 0x1C0));
+  const char* text = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x14204ba88);
+  soeutil::StringRelease(&scratch);
+  return text;
+}
+
+// 0x1416186c0: GameCommerce::CasApi (HttpListener subobject at +0x28)
+// OnHttpResponse(.., url, requestId, data, httpCode): match the pending
+// request (16 buckets at +0x2B0), log it with its round-trip time and queue
+// the response (+0x1D8) holding a reference to the data; unknown ids are
+// logged as ignored.
+void CasApiOnHttpResponse(uint8_t* self, void*, const char* url, uint32_t requestId, uint8_t* data, uint32_t httpCode) {
+  uint8_t* lock = self + 0x190;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  using LogFn = void (*)(void*, void*, const char*, ...);
+  for (uint8_t* request = At<uint8_t*>(self, 0x2B0 + (requestId & 0xF) * 8);; request = At<uint8_t*>(request, 0x460)) {
+    if (!request) {
+      game::Call<LogFn>(0x14165c700)(self - 0x28, At<void*>(self, 0x1510), reinterpret_cast<const char*>(0x1424baa60), data ? At<int>(data, 0x10) : 0, url,
+                                     requestId, httpCode);
+      break;
+    }
+    if (At<uint32_t>(request, 0x458) != requestId) continue;
+    int length = data ? At<int>(data, 0x10) : 0;
+    void* serviceUrl = At<void*>(request, 0x30);
+    int64_t started = At<int64_t>(request, 0x20);
+    int64_t now;
+    int64_t elapsed = *game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&now) - started;
+    int elapsedMs = elapsed > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(elapsed);
+    game::Call<LogFn>(0x14165c9a0)(self - 0x28, At<void*>(self, 0x1510), reinterpret_cast<const char*>(0x1424bbc10), length, url, requestId, httpCode,
+                                   elapsedMs, serviceUrl);
+    if (data) {
+      if (char* terminator = game::Call<char* (*)(void*)>(0x140aa52a0)(data)) *terminator = 0;
+    }
+    uint32_t* response = game::Call<uint32_t* (*)(void*)>(0x141618390)(self + 0x1D8);
+    *response = requestId;
+    soeutil::StringAssign(response + 2, url);
+    if (data) {
+      *reinterpret_cast<uint8_t**>(response + 8) = data;
+      auto* counts = At<volatile long*>(data, 0x20);
+      _InterlockedIncrement(&counts[1]);
+      _InterlockedIncrement(&counts[0]);
+    }
+    response[10] = httpCode;
+    break;
+  }
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1117,3 +1268,7 @@ REBUILD_FUNCTION(SpeedTree_CArray410_DeletingDestructor, 0x141e5e9a0, SpeedTreeA
 REBUILD_FUNCTION(StoreBillboardPanelDefinition_ToString, 0x141e96c70, StoreBillboardPanelToString);
 REBUILD_FUNCTION(StorePortalCategoryDefinition_ToString, 0x141621bb0, StorePortalCategoryToString);
 REBUILD_FUNCTION(SpeedTree_CFileSystem_LoadFile, 0x141e57fb0, SpeedTreeLoadFile);
+REBUILD_FUNCTION(Resource_DecompressionJob_Run, 0x14164fd60, DecompressionJobRun);
+REBUILD_FUNCTION(RefArrayPooled_Reallocate, 0x14033e310, RefArrayPooledReallocate);
+REBUILD_FUNCTION(StoreBundleDefinition_ToString, 0x141e96390, StoreBundleToString);
+REBUILD_FUNCTION(CasApi_OnHttpResponse, 0x1416186c0, CasApiOnHttpResponse);
