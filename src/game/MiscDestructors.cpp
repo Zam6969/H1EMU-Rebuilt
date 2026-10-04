@@ -5,6 +5,7 @@
 //   - classes with a destructor: call it, then sized delete if (flags & 1).
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -542,3 +543,94 @@ REBUILD_FUNCTION(Array_Tae3129_DeletingDestructor_141674490, 0x141674490, (Array
 REBUILD_FUNCTION(Array_Tb50686_DeletingDestructor_1416743e0, 0x1416743e0, (ArrayDeletingDestructor<0x1424c5b80, 0x18>));
 REBUILD_FUNCTION(Array_T968ad7_DeletingDestructor_14194ed70, 0x14194ed70, (ArrayDeletingDestructor<0x14252d798, 0x18>));
 REBUILD_FUNCTION(Array_Tfe35cd_DeletingDestructor_141ebfc30, 0x141ebfc30, (ArrayDeletingDestructor<0x1425acd28, 0x18>));
+
+namespace rebuild::game_misc {
+// MSVC std::basic_string<Ch> (0x20 bytes): small buffer/pointer +0, size
+// +0x10, capacity +0x18.
+template <typename Ch>
+struct StdString {
+  union {
+    Ch buffer[16 / sizeof(Ch)];
+    Ch* pointer;
+  };
+  size_t size;
+  size_t capacity;
+};
+static_assert(offsetof(StdString<char>, size) == 0x10 && offsetof(StdString<wchar_t>, capacity) == 0x18 && sizeof(StdString<char>) == 0x20);
+
+// std::exception family (what/doFree at +8): reset the vtable, free the
+// message (__std_exception_destroy 0x140d149f0), sized delete.
+template <uint64_t Vtable, size_t Size>
+void* ExceptionDeletingDestructor(void* self, unsigned flags) {
+  *static_cast<uint64_t*>(self) = Vtable;
+  game::Call<void (*)(void*)>(0x140d149f0)(static_cast<uint8_t*>(self) + 8);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// numpunct / _Mpunct string getters (do_grouping, do_falsename,
+// do_curr_symbol...): construct an empty string in the return slot and
+// assign the stored C string at Offset.
+template <size_t Offset, typename Ch, uint64_t Assign>
+StdString<Ch>* PunctGetString(void* self, StdString<Ch>* out) {
+  const Ch* text = *reinterpret_cast<const Ch**>(static_cast<uint8_t*>(self) + Offset);
+  out->capacity = 16 / sizeof(Ch) - 1;
+  out->size = 0;
+  out->buffer[0] = 0;
+  size_t length = 0;
+  while (text[length]) ++length;
+  game::Call<void (*)(StdString<Ch>*, const Ch*, size_t)>(Assign)(out, text, length);
+  return out;
+}
+// _Mpunct / moneypunct: free the four cached strings (+0x10, +0x20, +0x28,
+// +0x30) with free (0x140d42428), restore the locale::facet vtable, sized
+// delete.
+template <uint64_t Vtable, uint64_t FacetVtable, size_t Size>
+void* MpunctDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  for (size_t offset : {0x10, 0x20, 0x28, 0x30}) game::Call<void (*)(void*)>(0x140d42428)(*reinterpret_cast<void**>(bytes + offset));
+  *reinterpret_cast<uint64_t*>(bytes) = FacetVtable;
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(std__exception_DeletingDestructor_1402ba7d0, 0x1402ba7d0, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__bad_alloc_DeletingDestructor_140d0f70c, 0x140d0f70c, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__logic_error_DeletingDestructor_140d0f81c, 0x140d0f81c, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__invalid_argument_DeletingDestructor_140d0f794, 0x140d0f794, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__length_error_DeletingDestructor_140d0f7d8, 0x140d0f7d8, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__out_of_range_DeletingDestructor_140d0f860, 0x140d0f860, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__runtime_error_DeletingDestructor_140d0f92c, 0x140d0f92c, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__overflow_error_DeletingDestructor_140d0f8a4, 0x140d0f8a4, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__bad_function_call_DeletingDestructor_140d0f750, 0x140d0f750, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__regex_error_DeletingDestructor_140d0f8e8, 0x140d0f8e8, (ExceptionDeletingDestructor<0x1421f3c70, 0x20>));
+REBUILD_FUNCTION(std__bad_exception_DeletingDestructor_140d12600, 0x140d12600, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(std__bad_cast_DeletingDestructor_141909e2c, 0x141909e2c, (ExceptionDeletingDestructor<0x1421f3c70, 0x18>));
+REBUILD_FUNCTION(numpunct_T322acf_GetString_1419262f8, 0x1419262f8, (PunctGetString<0x10, char, 0x140783e70>));
+REBUILD_FUNCTION(numpunct_T322acf_GetString_141921ac4, 0x141921ac4, (PunctGetString<0x20, wchar_t, 0x14192157c>));
+REBUILD_FUNCTION(numpunct_T322acf_GetString_141929294, 0x141929294, (PunctGetString<0x28, wchar_t, 0x14192157c>));
+REBUILD_FUNCTION(_Mpunct_Teaba18_GetString_141926260, 0x141926260, (PunctGetString<0x10, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_Teaba18_GetString_1419219f4, 0x1419219f4, (PunctGetString<0x20, wchar_t, 0x14192157c>));
+REBUILD_FUNCTION(_Mpunct_Teaba18_GetString_141926cd4, 0x141926cd4, (PunctGetString<0x28, wchar_t, 0x14192157c>));
+REBUILD_FUNCTION(_Mpunct_Teaba18_GetString_1419269f4, 0x1419269f4, (PunctGetString<0x30, wchar_t, 0x14192157c>));
+REBUILD_FUNCTION(numpunct_T274ceb_GetString_1419262ac, 0x1419262ac, (PunctGetString<0x10, char, 0x140783e70>));
+REBUILD_FUNCTION(numpunct_T274ceb_GetString_141921a74, 0x141921a74, (PunctGetString<0x20, wchar_t, 0x1419211d4>));
+REBUILD_FUNCTION(numpunct_T274ceb_GetString_141929244, 0x141929244, (PunctGetString<0x28, wchar_t, 0x1419211d4>));
+REBUILD_FUNCTION(_Mpunct_T2fcdf3_GetString_141926214, 0x141926214, (PunctGetString<0x10, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_T2fcdf3_GetString_1419219a4, 0x1419219a4, (PunctGetString<0x20, wchar_t, 0x1419211d4>));
+REBUILD_FUNCTION(_Mpunct_T2fcdf3_GetString_141926c84, 0x141926c84, (PunctGetString<0x28, wchar_t, 0x1419211d4>));
+REBUILD_FUNCTION(_Mpunct_T2fcdf3_GetString_1419269a4, 0x1419269a4, (PunctGetString<0x30, wchar_t, 0x1419211d4>));
+REBUILD_FUNCTION(_Mpunct_Tc7d76e_GetString_14193107c, 0x14193107c, (PunctGetString<0x10, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_Tc7d76e_GetString_14192fd20, 0x14192fd20, (PunctGetString<0x20, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_Tc7d76e_GetString_141931168, 0x141931168, (PunctGetString<0x28, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_Tc7d76e_GetString_14193110c, 0x14193110c, (PunctGetString<0x30, char, 0x140783e70>));
+REBUILD_FUNCTION(_Mpunct_Teaba18_DeletingDestructor_141913aec, 0x141913aec, (MpunctDeletingDestructor<0x142525ed0, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_Tf202db_DeletingDestructor_141913f3c, 0x141913f3c, (MpunctDeletingDestructor<0x142525ed0, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_Tf263fe_DeletingDestructor_141913ed4, 0x141913ed4, (MpunctDeletingDestructor<0x142525ed0, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(_Mpunct_T2fcdf3_DeletingDestructor_141913a84, 0x141913a84, (MpunctDeletingDestructor<0x142526250, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_T072ab3_DeletingDestructor_141913e6c, 0x141913e6c, (MpunctDeletingDestructor<0x142526250, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_T1e5ca9_DeletingDestructor_141913e04, 0x141913e04, (MpunctDeletingDestructor<0x142526250, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(_Mpunct_Tc7d76e_DeletingDestructor_14192cc48, 0x14192cc48, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_Te54cb2_DeletingDestructor_14192cde8, 0x14192cde8, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
+REBUILD_FUNCTION(moneypunct_T29e7aa_DeletingDestructor_14192cd80, 0x14192cd80, (MpunctDeletingDestructor<0x142526c90, 0x142520e38, 0x78>));
