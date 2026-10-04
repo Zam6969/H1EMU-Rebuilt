@@ -1543,6 +1543,68 @@ bool InputManagerInitialize(uint8_t* self, void* window) {
   return true;
 }
 
+// 0x141623580: GameCommerce::MarketingDataSource AddGroup(definition, ..):
+// find or create the group for the definition id (+0x100), then append one
+// MarketingDataElementInstance per column (list at +0x118, next +0x48):
+// type 1 int64, 2 double, 3 StringFixed<32>, anything else null. Instances
+// come from the source's pools and reserve 8 values each.
+uint64_t MarketingDataSourceAddGroup(uint8_t* self, uint8_t* definition, void*, void* extra) {
+  uint64_t key = At<uint32_t>(definition, 0x100);
+  uint8_t* source = definition;
+  uint8_t* group = game::Call<uint8_t* (*)(void*, uint64_t*, uint8_t**, void*)>(0x141621f80)(self + 0x10, &key, &source, extra);
+  auto makeInstance = [](uint8_t* instance, uint64_t vtable, uint64_t arrayVtable) {
+    At<uint64_t>(instance, 0) = vtable;
+    At<uint64_t>(instance, 0x10) = 0;
+    At<uint64_t>(instance, 0x18) = 0;
+    At<uint64_t>(instance, 8) = arrayVtable;
+  };
+  for (int* column = At<int*>(definition, 0x118); column; column = *reinterpret_cast<int**>(column + 0x12)) {
+    uint8_t* instance = nullptr;
+    if (*column == 1) {
+      if (uint8_t* created = game::Call<uint8_t* (*)(void*)>(0x141623220)(self + 0x138)) {
+        makeInstance(created, 0x1424bd080, 0x1424bd058);
+        At<int>(created, 0x18) = 0;
+        Virtual(created, 1, 8);
+        instance = created;
+      }
+    } else if (*column == 2) {
+      if (uint8_t* created = game::Call<uint8_t* (*)(void*)>(0x141623220)(self + 0x1A160)) {
+        makeInstance(created, 0x1424bd108, 0x1424bd0e0);
+        At<int>(created, 0x18) = 0;
+        Virtual(created, 1, 8);
+        instance = created;
+      }
+    } else if (*column == 3) {
+      if (uint8_t* created = game::Call<uint8_t* (*)(void*)>(0x141623180)(self + 0x34188)) {
+        makeInstance(created, 0x1424bd190, 0x1424bd168);
+        game::Call<void (*)(void*, int)>(0x140459660)(created + 8, 0);
+        Virtual(created, 1, 8);
+        instance = created;
+      }
+    }
+    uint8_t* list = group + 8;  // SoeUtil::Array<Instance*>: data +0x10, count +0x18, capacity +0x1C
+    int needed = At<int>(group, 0x18) + 1;
+    if (At<int>(group, 0x1C) < needed) {
+      int64_t capacity = 0;
+      auto** grown = Virtual<uint8_t**>(list, 1, needed, &capacity, false);
+      auto** old = At<uint8_t**>(group, 0x10);
+      if (grown != old) {
+        if (old) {
+          for (int i = 0; i < At<int>(group, 0x18); ++i)
+            if (grown + i) grown[i] = old[i];
+          Virtual(list, 2, static_cast<void*>(old), At<int>(group, 0x1C));
+        }
+        At<uint8_t**>(group, 0x10) = grown;
+        At<int>(group, 0x1C) = static_cast<int>(capacity);
+      }
+    }
+    uint8_t** slot = At<uint8_t**>(group, 0x10) + At<int>(group, 0x18);
+    ++At<int>(group, 0x18);
+    if (slot) *slot = instance;
+  }
+  return 0;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1632,3 +1694,4 @@ REBUILD_FUNCTION(PerformanceProfiler_Begin, 0x14032ac10, ProfilerBegin);
 REBUILD_FUNCTION(PerformanceProfiler_AddValue, 0x14032aea0, ProfilerAddValue);
 REBUILD_FUNCTION(StoreBundleGroupDefinition_ToString, 0x14161d720, StoreBundleGroupToString);
 REBUILD_FUNCTION(GameClientInputManager_Initialize, 0x14034f1a0, InputManagerInitialize);
+REBUILD_FUNCTION(MarketingDataSource_AddGroup, 0x141623580, MarketingDataSourceAddGroup);
