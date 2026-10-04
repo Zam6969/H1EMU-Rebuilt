@@ -644,7 +644,7 @@ namespace rebuild::game_misc {
 // thread allocator (0x14032f910, aligned) when one is installed, else the
 // tagged heap (0x1402fc150, tag 0x143c46658). 32-bit wrapping arithmetic as
 // in the original.
-template <int Element, uint64_t Tag>
+template <int Element, uint64_t Tag, size_t Align = Element>
 void* ArrayReallocate(uint8_t* self, int count, int* newCapacity, bool exact) {
   int capacity = *reinterpret_cast<int*>(self + 0x14);
   int chosen;
@@ -669,7 +669,7 @@ void* ArrayReallocate(uint8_t* self, int count, int* newCapacity, bool exact) {
   *newCapacity = chosen;
   uint32_t bytes = static_cast<uint32_t>(chosen) * Element;
   if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
-    return game::Call<void* (*)(size_t, size_t)>(0x14032f910)(bytes, Element);
+    return game::Call<void* (*)(size_t, size_t)>(0x14032f910)(bytes, Align);
   return game::Call<void* (*)(int64_t, void*)>(0x1402fc150)(static_cast<int32_t>(bytes), reinterpret_cast<void*>(Tag));
 }
 }  // namespace rebuild::game_misc
@@ -804,9 +804,9 @@ void* MapDeletingDestructor(void* self, unsigned flags) {
 // RefObjectPool<T>: the ref-count interface (at +0x18 in the pooled object)
 // hit zero. Destroy the object in place (vtable slot 0, no delete), then
 // return it to the pool (pointer at PoolOffset) under the pool's lock.
-template <size_t PoolOffset, size_t LockOffset, uint64_t Return>
+template <size_t PoolOffset, size_t LockOffset, uint64_t Return, size_t Adjust = 0x18>
 void RefObjectPoolRelease(uint8_t* refInterface) {
-  uint8_t* object = refInterface - 0x18;
+  uint8_t* object = refInterface - Adjust;
   uint8_t* pool = *reinterpret_cast<uint8_t**>(refInterface + PoolOffset);
   (*reinterpret_cast<void (***)(void*, unsigned)>(object))[0](object, 0);
   uint8_t* lock = pool + LockOffset;
@@ -946,3 +946,102 @@ REBUILD_FUNCTION(GameCommerce__UramApiAddCreditCardRequest_DeletingDestructor_14
 REBUILD_FUNCTION(GameCommerce__UramApiUpdateCreditCardRequest_DeletingDestructor_14160eff0, 0x14160eff0, (UramRequestDeletingDestructor<0x142049b50, 0x1f0, 0x140812b80, 0x210>));
 REBUILD_FUNCTION(GameCommerce__UramApiDeleteCreditCardRequest_DeletingDestructor_14160e9e0, 0x14160e9e0, (UramRequestDeletingDestructor<0x142049b50, 0x80, 0, 0xa0>));
 REBUILD_FUNCTION(GameCommerce__UramApiFinalizeSteamTransactionRequest_DeletingDestructor_14160eaa0, 0x14160eaa0, (UramRequestDeletingDestructor<0x142049b50, 0x80, 0, 0xa0>));
+
+namespace rebuild::game_misc {
+// GameCommerce detail ToString: format three ints and the name pointer
+// (+0x20) into `out`, return its text.
+template <uint64_t Format, size_t A, size_t B, size_t C>
+const char* FormatThreeInts(uint8_t* self, soeutil::IString* out) {
+  auto field = [&](size_t offset) { return *reinterpret_cast<int*>(self + offset); };
+  game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402bd7f0)(out, reinterpret_cast<const char*>(Format), field(A), field(B), field(C),
+                                                                         *reinterpret_cast<void**>(self + 0x20));
+  return out->data;
+}
+// GameCommerce definitions: class vtable, one or two member destructors,
+// base vtable, class operator delete (see PoolDeletingDestructor).
+template <uint64_t Vtable, size_t Offset1, uint64_t Destructor1, size_t Offset2, uint64_t Destructor2, uint64_t BaseVtable, size_t Size>
+void* MemberPoolDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  game::Call<void (*)(void*)>(Destructor1)(bytes + Offset1);
+  if constexpr (Destructor2 != 0) game::Call<void (*)(void*)>(Destructor2)(bytes + Offset2);
+  return PoolDeletingDestructor<BaseVtable, Size>(self, flags);
+}
+// Class vtable, release the IString member at Offset, sized delete.
+template <uint64_t Vtable, size_t Offset, uint64_t StringVtable, size_t Size>
+void* StringMemberDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  auto* text = reinterpret_cast<soeutil::IString*>(bytes + Offset);
+  text->vtable = reinterpret_cast<void**>(StringVtable);
+  soeutil::StringRelease(text);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// MarketingDataElementInstance pointer array (data +0x10, count +0x18):
+// remove element `index` if below the virtual count (slot 2).
+void PointerArrayRemoveAt(uint8_t* self, int index) {
+  int count = (*reinterpret_cast<int (***)(void*)>(self))[2](self);
+  if (index >= count) return;
+  auto* data = *reinterpret_cast<void***>(self + 0x10);
+  int& stored = *reinterpret_cast<int*>(self + 0x18);
+  game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(data + index, data + index + 1,
+                                                                 static_cast<size_t>(static_cast<int64_t>(stored - (index + 1))) * 8);
+  --stored;
+}
+// Pooled ref-array: set both vtables (+0, +0x18), run the shared
+// destructor, sized delete.
+template <uint64_t Vtable, uint64_t RefVtable, uint64_t Destructor, size_t Size>
+void* DualVtableDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  *reinterpret_cast<uint64_t*>(bytes + 0x18) = RefVtable;
+  game::Call<void (*)(void*)>(Destructor)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// Hash list: unlink all nodes (head +0x10), destroy the bucket member
+// (+0x30) and the base, sized delete.
+template <uint64_t Vtable, uint64_t Remove, uint64_t MemberDestructor, uint64_t BaseDestructor, size_t Size>
+void* ListMemberDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  if (*reinterpret_cast<void**>(bytes + 0x10)) {
+    do {
+      if (void* head = *reinterpret_cast<void**>(bytes + 0x10)) game::Call<void (*)(void*, void*)>(Remove)(self, head);
+    } while (*reinterpret_cast<void**>(bytes + 0x10));
+  }
+  game::Call<void (*)(void*)>(MemberDestructor)(bytes + 0x30);
+  game::Call<void (*)(void*)>(BaseDestructor)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// std::collate<Ch>::do_compare: _Strcoll/_Wcscoll with the facet's
+// collation info (+0x10), clamped to -1 / 0 / 1.
+template <uint64_t Compare>
+int CollateCompare(uint8_t* self, const void* first1, const void* last1, const void* first2, const void* last2) {
+  int result = game::Call<int (*)(const void*, const void*, const void*, const void*, void*)>(Compare)(first1, last1, first2, last2, self + 0x10);
+  return result < 0 ? -1 : result != 0;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(GameCommerce__MarketingBundleDefinition__Entry_ToString_14161b4b0, 0x14161b4b0, (FormatThreeInts<0x1424bc1e0, 0xc, 0x10, 0x8>));
+REBUILD_FUNCTION(GameCommerce__BaseInGamePurchaseOrderDetail_ToString_1416291c0, 0x1416291c0, (FormatThreeInts<0x1424bd9b0, 0x8, 0xc, 0x10>));
+REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryGroupDefinition_DeletingDestructor_14161fa20, 0x14161fa20, (MemberPoolDeletingDestructor<0x1424bc8a8, 0x10, 0x14161f7d0, 0, 0, 0x1424bc080, 0x30>));
+REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryDefinition_DeletingDestructor_141e96790, 0x141e96790, (MemberPoolDeletingDestructor<0x1425aa5b0, 0x10, 0x141621640, 0, 0, 0x1424bc080, 0x48>));
+REBUILD_FUNCTION(GameCommerce__CommerceProcessor_DeletingDestructor_1416213f0, 0x1416213f0, (StringMemberDeletingDestructor<0x1424bcac8, 0x10, 0x142049b50, 0x30>));
+REBUILD_FUNCTION(SoeGems__LoggingHeader_DeletingDestructor_14165c680, 0x14165c680, (StringMemberDeletingDestructor<0x1424c37d8, 0x8, 0x142049b50, 0x28>));
+REBUILD_FUNCTION(GameCommerce__StorePortalCategoryDefinition_DeletingDestructor_141621b20, 0x141621b20, (MemberPoolDeletingDestructor<0x1424bcc58, 0x50, 0x141621850, 0x18, 0x141621640, 0x1424bc080, 0x68>));
+REBUILD_FUNCTION(GameCommerce__StoreBillboardPanelDefinition_DeletingDestructor_141e96be0, 0x141e96be0, (MemberPoolDeletingDestructor<0x1425aa710, 0x48, 0x141621850, 0x10, 0x141621640, 0x1424bc080, 0x68>));
+REBUILD_FUNCTION(MarketingDataElementInstance_Tf11b63_RemoveAt_141625fe0, 0x141625fe0, PointerArrayRemoveAt);
+REBUILD_FUNCTION(MarketingDataElementInstance_Ta77bbe_RemoveAt_141625f50, 0x141625f50, PointerArrayRemoveAt);
+REBUILD_FUNCTION(Array_Ta2a1d0_Reallocate_1403cb260, 0x1403cb260, (ArrayReallocate<64, 0x143c46658, 8>));
+REBUILD_FUNCTION(Array_Tb9d987_Reallocate_14163d310, 0x14163d310, (ArrayReallocate<128, 0x143c46658, 8>));
+REBUILD_FUNCTION(RefObjectPool_T59d9ef_ReleaseObject_1416546a0, 0x1416546a0, (RefObjectPoolRelease<0xd8, 0x38028, 0x141650c30, 0>));
+REBUILD_FUNCTION(RefObjectPool_Tc683aa_ReleaseObject_14166f5d0, 0x14166f5d0, (RefObjectPoolRelease<0x140, 0x20, 0x1407be900, 0>));
+REBUILD_FUNCTION(RefArrayPooledListEmbedded_Tfe71b0_DeletingDestructor_14165acd0, 0x14165acd0, (DualVtableDeletingDestructor<0x1424c1fe0, 0x1424c2008, 0x14033cdd0, 0x40>));
+REBUILD_FUNCTION(RefObjectPool_T914a1c_DeletingDestructor_14165ad20, 0x14165ad20, (DualVtableDeletingDestructor<0x1424c1fe0, 0x1424c2008, 0x14033cdd0, 0x48>));
+REBUILD_FUNCTION(HashListMap_T26c5eb_DeletingDestructor_14165f1f0, 0x14165f1f0, (ListMemberDeletingDestructor<0x1424c41b0, 0x1416657e0, 0x14165ee80, 0x14165eb70, 0x7858>));
+REBUILD_FUNCTION(HashList_Tb80d2f_DeletingDestructor_14165f130, 0x14165f130, (ListMemberDeletingDestructor<0x1424c41b0, 0x1416657e0, 0x14165ee80, 0x14165eb70, 0x7858>));
+REBUILD_FUNCTION(collate_T7306a0_Compare_141921960, 0x141921960, (CollateCompare<0x141932c1c>));
+REBUILD_FUNCTION(collate_Ta29307_Compare_14192fcdc, 0x14192fcdc, (CollateCompare<0x141932918>));
