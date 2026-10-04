@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <intrin.h>
 
 #include "core/game.h"
@@ -1065,6 +1066,212 @@ void StringMemberDestructor1420633d0(uint8_t* self) {
   At<uint64_t>(self, 0) = 0x1420633d0;
 }
 
+
+namespace {
+void FreeStorage(void* data, int threadFlag) {
+  if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+    game::Call<void (*)(void*)>(0x1402fc170)(data);
+  else
+    game::Call<void (*)(void*, int)>(0x14032f980)(data, threadFlag);
+}
+void InitIString(uint8_t* text) {
+  At<uint64_t>(text, 0) = 0x142049b50;
+  At<uint64_t>(text, 8) = 0x143e09641;
+  At<uint64_t>(text, 0x10) = 0;
+}
+}  // namespace
+
+// 0x1403322c0: ini file Clear(markModified): when it has sections, clear
+// them and update the modified flag (+0xE90).
+void IniClear(uint8_t* self, bool markModified) {
+  if (At<int>(self, 0x18) <= 0) return;
+  game::Call<void (*)(void*)>(0x140334b80)(self);
+  At<uint8_t>(self, 0xE90) = (At<uint8_t>(self, 0xE90) || markModified) ? 1 : 0;
+}
+
+// 0x14070b5d0: look up the key (0x14070c4f0) and forward to the entry
+// (0x140706660).
+uint64_t LookupAndForward(void* self, const uint64_t* key, void* argument, uint8_t flag) {
+  uint64_t copy = *key;
+  void* entry = game::Call<void* (*)(void*, uint64_t*)>(0x14070c4f0)(self, &copy);
+  if (!entry) return 0;
+  return game::Call<uint64_t (*)(void*, void*, void*, uint8_t)>(0x140706660)(entry, self, argument, flag);
+}
+
+// 0x140309e00: printf to stdout (__stdio_common_vfprintf).
+int PrintToStdout(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  void* stream = game::Call<void* (*)(int)>(0x140d3ef24)(1);
+  uint64_t options = *game::Call<uint64_t* (*)()>(0x1402f1040)();
+  return game::Call<int (*)(uint64_t, void*, const char*, void*, va_list)>(0x140d3cb50)(options, stream, format, nullptr, args);
+}
+
+// 0x1414d92a0: constructor (vtable 0x142486f80, 0x80-byte table cleared).
+void* Construct142486f80(uint8_t* self) {
+  At<int>(self, 0x20) = 0;
+  At<uint64_t>(self, 0x10) = 0;
+  At<uint64_t>(self, 0x18) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x28, 0, 0x80);
+  At<int>(self, 8) = 0;
+  At<uint64_t>(self, 0) = 0x142486f80;
+  At<int>(self, 0xC) = 0x7FFFFFFF;
+  At<int>(self, 0xA8) = 0;
+  return self;
+}
+
+// 0x14164a5c0: 7-Zip CLZInWindow::MoveBlock: slide the kept window back to
+// the start of the buffer (32-bit pointer arithmetic, as compiled).
+uint64_t LzInWindowMoveBlock(uint8_t* self) {
+  Virtual(self, 0);
+  uint8_t* base = At<uint8_t*>(self, 8);
+  uint32_t base32 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(base));
+  uint32_t buffer32 = At<uint32_t>(self, 0x20);
+  uint32_t offset = At<uint32_t>(self, 0x2C) - At<uint32_t>(self, 0x30) - base32 + buffer32;
+  uint32_t remaining = At<uint32_t>(self, 0x3C) - base32 - offset;
+  game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(base, base + offset, buffer32 + remaining);
+  At<uint64_t>(self, 0x20) -= offset;
+  return Virtual<uint64_t>(self, 1);
+}
+
+// Destructors of classes holding one SoeUtil::Array member at Offset
+// (vtable, data +8, count +0x10), dropping to the base vtable 0x1420633d0
+// (0x1403ae2d0 / 0x1403ae5f0 / 0x1403b0e70).
+template <size_t Offset, uint64_t ArrayVtable, int ThreadFlag>
+void ArrayMemberDestructor1420633d0(uint8_t* self) {
+  At<int>(self, Offset + 0x10) = 0;
+  At<uint64_t>(self, Offset) = ArrayVtable;
+  FreeStorage(At<void*>(self, Offset + 8), ThreadFlag);
+  At<void*>(self, Offset + 8) = nullptr;
+  At<uint64_t>(self, 0) = 0x1420633d0;
+}
+
+// 0x140ce9630 / 0x140484160: build an IString result through a helper.
+void* MakeStringVia140ce9690(uint8_t* out, void* source) {
+  InitIString(out);
+  game::Call<void (*)(void*, void*)>(0x140ce9690)(source, out);
+  return out;
+}
+void* MakeStringVia1404841c0(void* source, uint8_t* out, int value) {
+  InitIString(out);
+  game::Call<void (*)(void*, int, void*)>(0x1404841c0)(source, value, out);
+  return out;
+}
+
+// 0x1406565f0: reset (+8), restamp both frame ids (+0x408 / +0x40C from
+// 0x142b33c8c), slot 5 on +0x418 and +0x440, then 0x140bf1690(+0x430).
+uint64_t ResetAndRestamp(uint8_t* self) {
+  game::Call<void (*)(void*)>(0x140653140)(self + 8);
+  At<int>(self, 0x408) = *reinterpret_cast<int*>(0x142b33c8c);
+  At<int>(self, 0x40C) = *reinterpret_cast<int*>(0x142b33c8c);
+  Virtual(At<void*>(self, 0x418), 5);
+  Virtual(At<void*>(self, 0x440), 5);
+  return game::Call<uint64_t (*)(void*)>(0x140bf1690)(At<void*>(self, 0x430));
+}
+
+// 0x14184e8b0: set the name (+0x58) and create the 0x3840-byte member
+// (+0x50) initialized from +0x60.
+uint64_t CreateMember50(uint8_t* self, const char* name) {
+  if (name) game::Call<void (*)(void*, const char*)>(0x1402bd670)(self + 0x58, name);
+  void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x3840);
+  At<void*>(self, 0x50) = memory ? game::Call<void* (*)(void*)>(0x1418847a0)(memory) : nullptr;
+  game::Call<void (*)(void*, void*)>(0x141884ce0)(At<void*>(self, 0x50), At<void*>(self, 0x60));
+  return 0;
+}
+
+// 0x14039fca0: SoeUtil::Array destructor (vtable 0x14206e9c8, 8-aligned).
+void ArrayDestructor14206e9c8(uint8_t* self) {
+  At<int>(self, 0x10) = 0;
+  At<uint64_t>(self, 0) = 0x14206e9c8;
+  FreeStorage(At<void*>(self, 8), 8);
+  At<void*>(self, 8) = nullptr;
+}
+
+// 0x1416038d0: Crypto::Prng reset: make sure both 16-byte buffers (+0x40,
+// +0x70) are terminated, clear the position and block counter.
+void PrngReset(uint8_t* self) {
+  for (size_t offset : {size_t{0x40}, size_t{0x70}}) {
+    if (At<int>(self, offset + 0x10) < 0x10) {
+      if (char* end = game::Call<char* (*)(void*, int)>(0x141603400)(self + offset, 0xF)) *end = 0;
+    }
+  }
+  At<int>(self, 0xA0) = 0;
+  At<uint64_t>(self, 0xA8) = 0;
+}
+
+// 0x14032e590: "major.minor" Windows version into `out` (GetVersionEx via
+// the IAT).
+const char* WindowsVersionString(uint8_t* out) {
+  struct VersionInfo {
+    uint32_t size;
+    uint32_t major;
+    uint32_t minor;
+    uint8_t rest[0x108];
+  } info{};
+  static_assert(sizeof(VersionInfo) == 0x114);
+  info.size = 0x114;
+  (*reinterpret_cast<int(__stdcall**)(VersionInfo*)>(0x1440a0050))(&info);
+  game::Call<void (*)(void*, const char*, ...)>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x14204efe8), info.major, info.minor);
+  return At<const char*>(out, 8);
+}
+
+// 0x140313b40: SoeUtil::String AppendChar (copy-on-write aware).
+void StringAppendChar(uint8_t* self, char c) {
+  int capacity = At<int>(self, 0x14);
+  int needed = At<int>(self, 0x10) + 2;
+  if (needed > capacity || (capacity > 0 && reinterpret_cast<int*>(At<char*>(self, 8))[-1] > 1))
+    game::Call<void (*)(void*, int)>(0x1402befa0)(self, needed);
+  At<char*>(self, 8)[At<int>(self, 0x10)] = c;
+  ++At<int>(self, 0x10);
+  At<char*>(self, 8)[At<int>(self, 0x10)] = 0;
+}
+
+// 0x14076bd70: constructor (vtables 0x142101d00 / 0x142101cd0, 0x800-byte
+// table cleared).
+void* Construct142101d00(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x142101d00;
+  At<int>(self, 0x28) = 0;
+  At<uint64_t>(self, 0x18) = 0;
+  At<uint64_t>(self, 0x20) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x30, 0, 0x800);
+  At<int>(self, 0x10) = 0;
+  At<uint64_t>(self, 8) = 0x142101cd0;
+  At<int>(self, 0x14) = 0x7FFFFFFF;
+  return self;
+}
+
+// 0x14034ea30: GameCore InputThread constructor (64 KB stack, "Input
+// Thread" name, owner at +0xB8).
+void* InputThreadConstruct(uint8_t* self, int mode, void* owner) {
+  game::Call<void (*)(void*, int, int, const char*)>(0x1403357d0)(self, 0x10000, 2, reinterpret_cast<const char*>(0x142053030));
+  At<uint64_t>(self, 0) = 0x142052fc0;
+  At<int>(self, 0xB0) = mode;
+  At<void*>(self, 0xB8) = owner;
+  return self;
+}
+
+// 0x1415f9be0: SoeUtil::ArraySecure destructor (inline storage at +0x18).
+uint64_t ArraySecureDestructor(uint8_t* self) {
+  At<int>(self, 0x10) = 0;
+  At<uint64_t>(self, 0) = 0x1424b3258;
+  void* data = At<void*>(self, 8);
+  if (data != self + 0x18) FreeStorage(data, 1);
+  At<void*>(self, 8) = nullptr;
+  return game::Call<uint64_t (*)(void*)>(0x1415f9ae0)(self);
+}
+
+// 0x14049d110: create the 0x1D8-byte singleton (0x142b1d5c0).
+void CreateSingleton142b1d5c0() {
+  auto* memory = game::Call<uint8_t* (*)(size_t)>(0x1402fc0f0)(0x1D8);
+  if (!memory) {
+    *reinterpret_cast<void**>(0x142b1d5c0) = nullptr;
+    return;
+  }
+  game::Call<void (*)(void*, const char*)>(0x14187b7f0)(memory, reinterpret_cast<const char*>(0x1420b3748));
+  At<uint64_t>(memory, 0) = 0x1420b3710;
+  *reinterpret_cast<void**>(0x142b1d5c0) = memory;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -1194,3 +1401,23 @@ REBUILD_FUNCTION(StringMemberDestructor_1403ae580, 0x1403ae580, StringMemberDest
 REBUILD_FUNCTION(StringMemberDestructor_1403b0fb0, 0x1403b0fb0, StringMemberDestructor1420633d0<0x18>);
 REBUILD_FUNCTION(StringMemberDestructor_1403b0ed0, 0x1403b0ed0, StringMemberDestructor1420633d0<0x18>);
 REBUILD_FUNCTION(StringMemberDestructor_1403b0540, 0x1403b0540, StringMemberDestructor1420633d0<0x10>);
+REBUILD_FUNCTION(Ini_Clear, 0x1403322c0, IniClear);
+REBUILD_FUNCTION(LookupAndForward, 0x14070b5d0, LookupAndForward);
+REBUILD_FUNCTION(PrintToStdout, 0x140309e00, PrintToStdout);
+REBUILD_FUNCTION(Construct_142486f80, 0x1414d92a0, Construct142486f80);
+REBUILD_FUNCTION(CLZInWindow_MoveBlock, 0x14164a5c0, LzInWindowMoveBlock);
+REBUILD_FUNCTION(ArrayMemberDestructor_1403ae2d0, 0x1403ae2d0, (ArrayMemberDestructor1420633d0<0x18, 0x142065440, 4>));
+REBUILD_FUNCTION(ArrayMemberDestructor_1403ae5f0, 0x1403ae5f0, (ArrayMemberDestructor1420633d0<0x18, 0x142063770, 4>));
+REBUILD_FUNCTION(ArrayMemberDestructor_1403b0e70, 0x1403b0e70, (ArrayMemberDestructor1420633d0<0x10, 0x1420642e8, 8>));
+REBUILD_FUNCTION(MakeStringVia140ce9690, 0x140ce9630, MakeStringVia140ce9690);
+REBUILD_FUNCTION(MakeStringVia1404841c0, 0x140484160, MakeStringVia1404841c0);
+REBUILD_FUNCTION(ResetAndRestamp, 0x1406565f0, ResetAndRestamp);
+REBUILD_FUNCTION(CreateMember50, 0x14184e8b0, CreateMember50);
+REBUILD_FUNCTION(ArrayDestructor_14206e9c8, 0x14039fca0, ArrayDestructor14206e9c8);
+REBUILD_FUNCTION(Crypto_Prng_Reset, 0x1416038d0, PrngReset);
+REBUILD_FUNCTION(WindowsVersionString, 0x14032e590, WindowsVersionString);
+REBUILD_FUNCTION(String_AppendChar, 0x140313b40, StringAppendChar);
+REBUILD_FUNCTION(Construct_142101d00, 0x14076bd70, Construct142101d00);
+REBUILD_FUNCTION(InputThread_Construct, 0x14034ea30, InputThreadConstruct);
+REBUILD_FUNCTION(ArraySecure_Destructor, 0x1415f9be0, ArraySecureDestructor);
+REBUILD_FUNCTION(CreateSingleton_142b1d5c0, 0x14049d110, CreateSingleton142b1d5c0);
