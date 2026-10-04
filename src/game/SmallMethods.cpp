@@ -1235,7 +1235,8 @@ void UramApiOnHttpResponse(uint8_t* self, void*, const char* url, uint32_t reque
 namespace {
 // Inlined SoeUtil::String truncate used by the list ToStrings: drop the
 // trailing ", ", unsharing (copy-on-write) the buffer first if needed.
-void DropTrailingSeparator(soeutil::StringFixed<1024>& ids) {
+template <int N>
+void DropTrailingSeparator(soeutil::StringFixed<N>& ids) {
   if (ids.length > 2) {
     int newLength = ids.length - 2;
     int needed = ids.length - 1;
@@ -1605,6 +1606,37 @@ uint64_t MarketingDataSourceAddGroup(uint8_t* self, uint8_t* definition, void*, 
   return 0;
 }
 
+// 0x141628ed0: GameCommerce::BaseInGamePurchaseOrder ToString: details
+// (iterated with slots 8 / 9, each rendered through slot 2 into a
+// StringFixed<1024> scratch) joined into a StringFixed<4096>, then the
+// order fields and detail count (slot 6).
+const char* PurchaseOrderToString(void** self, soeutil::IString* out) {
+  soeutil::StringFixed<4096> details;
+  soeutil::InitFixed(details, reinterpret_cast<void**>(0x14204b038));
+  soeutil::StringFixed<1024> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x14204b2f0));
+  for (void* detail = Virtual<void*>(self, 8); detail; detail = Virtual<void*>(self, 9, detail)) {
+    const char* text = Virtual<const char*>(detail, 2, static_cast<void*>(&scratch));
+    game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&details, reinterpret_cast<const char*>(0x1424bd9e8), text);
+  }
+  DropTrailingSeparator(details);
+  const char* list = details.data;
+  auto field = [&](size_t index) { return reinterpret_cast<const char*>(self[index]); };
+  int detailCount = Virtual<int>(self, 6);
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bd9f0), field(2), field(10), static_cast<int>(reinterpret_cast<intptr_t>(self[0x11])),
+                                    field(0x13), field(0x1E), field(0x18), detailCount, list);
+  const char* result = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&scratch);
+  scratch.data = soeutil::EmptyStringData();
+  scratch.length = 0;
+  scratch.capacity = 0;
+  scratch.vtable = soeutil::IStringVtable();
+  details.vtable = reinterpret_cast<void**>(0x14204b018);
+  soeutil::StringRelease(&details);
+  return result;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1695,3 +1727,4 @@ REBUILD_FUNCTION(PerformanceProfiler_AddValue, 0x14032aea0, ProfilerAddValue);
 REBUILD_FUNCTION(StoreBundleGroupDefinition_ToString, 0x14161d720, StoreBundleGroupToString);
 REBUILD_FUNCTION(GameClientInputManager_Initialize, 0x14034f1a0, InputManagerInitialize);
 REBUILD_FUNCTION(MarketingDataSource_AddGroup, 0x141623580, MarketingDataSourceAddGroup);
+REBUILD_FUNCTION(BaseInGamePurchaseOrder_ToString, 0x141628ed0, PurchaseOrderToString);
