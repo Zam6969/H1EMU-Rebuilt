@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <type_traits>
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -718,3 +719,57 @@ REBUILD_FUNCTION(GameCommerce__StoreBundleGroupDefinition__Entry_DeletingDestruc
 REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryGroupDefinition__Entry_DeletingDestructor_14161f9c0, 0x14161f9c0, (PoolDeletingDestructor<0x1424bc080, 0x10>));
 REBUILD_FUNCTION(GameCommerce__StoreShortcutDefinition_DeletingDestructor_141621880, 0x141621880, (PoolDeletingDestructor<0x1424bc080, 0x18>));
 REBUILD_FUNCTION(GameCommerce__StoreBundleCategoryMapEntryDefinition_DeletingDestructor_141e96820, 0x141e96820, (PoolDeletingDestructor<0x1424bc080, 0x18>));
+
+namespace rebuild::game_misc {
+// SoeUtil::Array<T> with inline storage (+0x18, aligned to T): when the data
+// still points at the inline buffer, move the elements to a heap block of
+// exactly `count` and set capacity = count. The inline buffer is left as is.
+template <int Element>
+void ArrayLeaveInlineStorage(uint8_t* self) {
+  using T = std::conditional_t<Element == 8, uint64_t, uint32_t>;
+  auto inlineBuffer = (reinterpret_cast<uintptr_t>(self) + 0x18 + Element - 1) & ~static_cast<uintptr_t>(Element - 1);
+  T*& data = *reinterpret_cast<T**>(self + 8);
+  int& count = *reinterpret_cast<int*>(self + 0x10);
+  if (reinterpret_cast<uintptr_t>(data) != inlineBuffer) return;
+  uint32_t bytes = static_cast<uint32_t>(count) << (Element == 8 ? 3 : 2);
+  T* moved;
+  if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+    moved = game::Call<T* (*)(int64_t, void*)>(0x1402fc150)(static_cast<int32_t>(bytes), reinterpret_cast<void*>(0x143c46658));
+  else
+    moved = game::Call<T* (*)(size_t, size_t)>(0x14032f910)(bytes, Element);
+  for (int i = 0; i < count; ++i)
+    if (moved + i) moved[i] = data[i];
+  *reinterpret_cast<int*>(self + 0x14) = count;
+  data = moved;
+}
+// 7-Zip LZMA match finders (CMatchFinderBinTree / CMatchFinderHC): free the
+// hash table (+0x58), free the window (0x14164a590), drop to the
+// CLZInWindow vtable and free again, sized delete (0x68).
+template <uint64_t Vtable, uint64_t WindowVtable>
+void* MatchFinderDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  game::Call<void (*)(void*)>(0x140d42428)(*reinterpret_cast<void**>(bytes + 0x58));
+  *reinterpret_cast<void**>(bytes + 0x58) = nullptr;
+  game::Call<void (*)(void*)>(0x14164a590)(self);
+  *reinterpret_cast<uint64_t*>(bytes) = WindowVtable;
+  game::Call<void (*)(void*)>(0x14164a590)(self);
+  if (flags & 1) SizedDelete(self, 0x68);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(Array_Tb2ede1_LeaveInlineStorage_1416250c0, 0x1416250c0, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(Array_Ta7356d_LeaveInlineStorage_14162b620, 0x14162b620, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(Array_T4514a5_LeaveInlineStorage_141653010, 0x141653010, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(Array_Tc4d671_LeaveInlineStorage_141652f80, 0x141652f80, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(Array_T912c7d_LeaveInlineStorage_1416530b0, 0x1416530b0, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(Array_Tb081a1_LeaveInlineStorage_14165a400, 0x14165a400, (ArrayLeaveInlineStorage<4>));
+REBUILD_FUNCTION(Array_T297d7e_LeaveInlineStorage_141676390, 0x141676390, (ArrayLeaveInlineStorage<4>));
+REBUILD_FUNCTION(Array_Tb71391_LeaveInlineStorage_141ec09f0, 0x141ec09f0, (ArrayLeaveInlineStorage<8>));
+REBUILD_FUNCTION(NBT2__CMatchFinderBinTree_DeletingDestructor_141642060, 0x141642060, (MatchFinderDeletingDestructor<0x1424c09a8, 0x1424c08e8>));
+REBUILD_FUNCTION(NBT3__CMatchFinderBinTree_DeletingDestructor_1416420e0, 0x1416420e0, (MatchFinderDeletingDestructor<0x1424c0a00, 0x1424c08e8>));
+REBUILD_FUNCTION(NBT4__CMatchFinderBinTree_DeletingDestructor_141642160, 0x141642160, (MatchFinderDeletingDestructor<0x1424c0a58, 0x1424c08e8>));
+REBUILD_FUNCTION(NBT4B__CMatchFinderBinTree_DeletingDestructor_1416421e0, 0x1416421e0, (MatchFinderDeletingDestructor<0x1424c0ab0, 0x1424c08e8>));
+REBUILD_FUNCTION(NHC3__CMatchFinderHC_DeletingDestructor_141642260, 0x141642260, (MatchFinderDeletingDestructor<0x1424c0b08, 0x1424c08e8>));
+REBUILD_FUNCTION(NHC4__CMatchFinderHC_DeletingDestructor_1416422e0, 0x1416422e0, (MatchFinderDeletingDestructor<0x1424c0b60, 0x1424c08e8>));
