@@ -128,3 +128,22 @@ REBUILD_FUNCTION(SoeUtil_ThreadBase_DeletingDestructor, 0x1403359c0, RefCountedD
 REBUILD_FUNCTION(CoreGameClient_NotifyA, 0x14034e6c0, CoreGameClientNotifyA);
 REBUILD_FUNCTION(CoreGameClient_NotifyB, 0x14034e550, CoreGameClientNotifyB);
 REBUILD_FUNCTION(AssetDeliveryLoader_SetName, 0x1415012e0, AssetLoaderSetName);
+
+#include <windows.h>
+
+namespace rebuild::game_misc {
+// 0x140351370 (GameCore::InputThread slot 2): pump this thread's Windows
+// messages until asked to stop, sleeping +0xB0 ms between rounds.
+void InputThreadRun(uint8_t* self) {
+  MSG message;
+  while (!game::Call<bool (*)(void*)>(0x140335aa0)(self)) {
+    while (PeekMessageA(&message, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&message);
+      DispatchMessageA(&message);
+    }
+    game::Call<void (*)(int)>(0x14032ec60)(*reinterpret_cast<int*>(self + 0xB0));
+  }
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(GameCore_InputThread_Run, 0x140351370, InputThreadRun);
