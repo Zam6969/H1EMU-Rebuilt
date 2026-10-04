@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <intrin.h>
 
 #include "core/game.h"
 #include "core/hook.h"
@@ -726,6 +727,139 @@ void TaskManagerTaskCompleted(uint8_t* self, void*, uint8_t* task) {
   }
 }
 
+// 0x141678d50: TaskManagement::ScheduledTaskNode Release(manager): pull the
+// node's heap entry (+0x50) out of the manager's timer heap (+0xA0D0) by
+// swapping in the last entry, then return its tasks to the pools.
+void ScheduledTaskNodeRelease(uint8_t* self, uint8_t* manager) {
+  uint8_t* entry = self ? self + 0x50 : nullptr;
+  void* slot = At<int>(entry, 8) < 0 ? nullptr : entry + 0x10;
+  if (slot && At<int>(entry, 8) != -1) {
+    int64_t index = At<int>(entry, 8);
+    uint8_t* heap = manager + 0xA0D0;
+    int count = At<int>(heap, 0x10) - 1;
+    uint8_t** data = At<uint8_t**>(heap, 8);
+    uint8_t* last = data[count];
+    At<int>(heap, 0x10) = count;
+    if (entry != last) {
+      data[index] = last;
+      At<int>(last, 8) = static_cast<int>(index);
+      game::Call<void (*)(void*, void*, int, int64_t)>(0x141676910)(heap, last, count, index);  // re-sift
+    }
+    At<int>(entry, 8) = -1;
+  }
+  SerialTaskNodeReleaseTasks(self, manager);
+}
+
+// 0x141672c80: async job completion: finish (0x141669a40), report the
+// result to the listener (+0x130, slot 2) with a timestamp, then drop the
+// listener's intrusive reference (count block at listener +8).
+void AsyncJobComplete(uint8_t* self) {
+  game::Call<void (*)(void*)>(0x141669a40)(self);
+  uint64_t second = At<uint64_t>(self, 0x110);
+  int level = At<int>(self, 0x70);
+  uint64_t first = At<uint64_t>(self, 0x108);
+  void* listener = At<void*>(self, 0x130);
+  void** vtable = *static_cast<void***>(listener);
+  uint64_t stamp;
+  void* now = game::Call<void* (*)(uint64_t*)>(0x14032fde0)(&stamp);
+  reinterpret_cast<void (*)(void*, void*, void*, int, uint64_t*, uint64_t*, void*)>(vtable[2])(At<void*>(self, 0x130), At<void*>(self, 0x120), self + 0x138,
+                                                                                           level, &first, &second, now);
+  uint8_t* object = At<uint8_t*>(self, 0x130);
+  auto* counts = At<volatile long*>(object, 8);
+  bool lastStrong = _InterlockedDecrement(&counts[0]) == 0;
+  if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts) SizedDelete(const_cast<long*>(counts), 0x10);
+  if (lastStrong) Virtual(object, 1);
+  At<void*>(self, 0x130) = nullptr;
+}
+
+// 0x140351480: GameClientInputManager ShutdownDirectInput: unacquire and
+// release every device, release the DirectInput object, free the wrapper.
+bool InputManagerShutdownDirectInput(uint8_t* self) {
+  uint8_t* direct = At<uint8_t*>(self, 0x8218);
+  if (!direct) return true;
+  for (uint8_t* node = At<uint8_t*>(direct, 0x10); node; node = At<uint8_t*>(node, 0x140)) {
+    if (void* device = At<void*>(node, 0x28)) {
+      if (Virtual<long>(device, 8) < 0) return false;  // Unacquire
+      Virtual<unsigned long>(At<void*>(node, 0x28), 2);  // Release
+      At<void*>(node, 0x28) = nullptr;
+    }
+  }
+  if (void* input = At<void*>(At<void*>(self, 0x8218), 0)) Virtual<unsigned long>(input, 2);
+  At<void*>(At<void*>(self, 0x8218), 0) = nullptr;
+  if (uint8_t* wrapper = At<uint8_t*>(self, 0x8218)) {
+    At<uint64_t>(wrapper, 8) = 0x142052f98;
+    game::Call<void (*)(void*)>(0x140351290)(wrapper + 8);
+    SizedDelete(wrapper, 0x28);
+  }
+  At<void*>(self, 0x8218) = nullptr;
+  return true;
+}
+
+// 0x141807d50: SpeedTree CArray<0x88-byte T> scalar deleting destructor.
+void* SpeedTreeArray88DeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a1f98;
+  if (At<bool>(self, 0x28)) {
+    At<uint64_t>(self, 0x10) = 0;
+    for (uint64_t i = 0; i < At<uint64_t>(self, 0x18); ++i) game::Call<void (*)(void*, int)>(0x141808c60)(At<uint8_t*>(self, 8) + i * 0x88, 0);
+    At<uint64_t>(self, 0x18) = 0;
+    At<void*>(self, 8) = nullptr;
+    At<bool>(self, 0x28) = false;
+  }
+  if (!At<bool>(self, 0x28)) {
+    void* data = At<void*>(self, 8);
+    game::Call<void (*)(void**)>(0x1417f9f70)(&data);
+    At<void*>(self, 8) = nullptr;
+    At<uint64_t>(self, 0x18) = 0;
+    At<uint64_t>(self, 0x10) = 0;
+  }
+  if (flags & 1) SizedDelete(self, 0x2C);
+  return self;
+}
+
+// 0x1418065b0: SpeedTree CArray (0x2C bytes) vector deleting destructor.
+void* SpeedTreeArrayVectorDeletingDestructor(uint8_t* self, unsigned flags) {
+  if (flags & 2) {
+    uint64_t count = At<uint64_t>(self - 8, 0);
+    game::Call<void (*)(void*, size_t, size_t, void*)>(0x140d10830)(self, 0x2C, count, reinterpret_cast<void*>(0x141800e60));
+    if (flags & 1) game::Call<void (*)(void*, size_t)>(0x140d10924)(self - 8, At<uint64_t>(self - 8, 0) * 0x2C + 8);
+    return self - 8;
+  }
+  At<uint64_t>(self, 0) = 0x1425a1f48;
+  if (At<bool>(self, 0x28)) {
+    At<uint64_t>(self, 0x10) = 0;
+    At<uint64_t>(self, 0x18) = 0;
+    At<void*>(self, 8) = nullptr;
+    At<bool>(self, 0x28) = false;
+  }
+  void* data = At<void*>(self, 8);
+  game::Call<void (*)(void**)>(0x1417f9870)(&data);
+  At<void*>(self, 8) = nullptr;
+  At<uint64_t>(self, 0x18) = 0;
+  At<uint64_t>(self, 0x10) = 0;
+  if (flags & 1) SizedDelete(self, 0x2C);
+  return self;
+}
+
+// 0x141603930: Crypto::Prng Seed(seed array): needs at least the cipher's
+// key size (slot 4); keys the cipher (+8) and the counter (+0x40) from the
+// first 16 bytes.
+bool PrngSeed(uint8_t* self, uint8_t* seed) {
+  int available = At<int>(seed, 0x10);
+  if (available < Virtual<int>(self, 4)) return false;
+  alignas(16) uint8_t key[0x60];
+  game::Call<void (*)(void*, const void*, int)>(0x1415f9a40)(key, At<int>(seed, 0x10) ? At<void*>(seed, 8) : nullptr, 0x10);
+  if (!game::Call<bool (*)(void*)>(0x1415f9ea0)(key)) {
+    game::Call<void (*)(void*)>(0x1415f9be0)(key);
+    return false;
+  }
+  game::Call<void (*)(void*)>(0x1416038d0)(self);
+  game::Call<void (*)(void*, int, void*, int, int)>(0x141435310)(self + 0x40, 0, seed, 0x10, 0x10);
+  bool ok = Virtual<bool>(self + 8, 1, static_cast<void*>(key), 0);
+  At<bool>(self, 0xB0) = ok;
+  game::Call<void (*)(void*)>(0x1415f9be0)(key);
+  return ok;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -790,3 +924,9 @@ REBUILD_FUNCTION(MarketingDataSource_IsConsistent, 0x141624f90, MarketingDataSou
 REBUILD_FUNCTION(StoreBundleCategoryDefinition_ToString, 0x141e96880, StoreBundleCategoryToString);
 REBUILD_FUNCTION(FlatFileLineData_Find, 0x141ec2fb0, FlatFileLineDataFind);
 REBUILD_FUNCTION(TaskManager_TaskCompleted, 0x14166f3b0, TaskManagerTaskCompleted);
+REBUILD_FUNCTION(ScheduledTaskNode_Release, 0x141678d50, ScheduledTaskNodeRelease);
+REBUILD_FUNCTION(RefObjectPool_Tc683aa_Complete, 0x141672c80, AsyncJobComplete);
+REBUILD_FUNCTION(GameClientInputManager_ShutdownDirectInput, 0x140351480, InputManagerShutdownDirectInput);
+REBUILD_FUNCTION(SpeedTree_CArray88_DeletingDestructor, 0x141807d50, SpeedTreeArray88DeletingDestructor);
+REBUILD_FUNCTION(SpeedTree_CArray_VectorDeletingDestructor, 0x1418065b0, SpeedTreeArrayVectorDeletingDestructor);
+REBUILD_FUNCTION(Crypto_Prng_Seed, 0x141603930, PrngSeed);
