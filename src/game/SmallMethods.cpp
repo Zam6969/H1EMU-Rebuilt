@@ -1637,6 +1637,71 @@ const char* PurchaseOrderToString(void** self, soeutil::IString* out) {
   return result;
 }
 
+namespace {
+// Inlined ~StringFixed<N>: release through the interface vtable, then the
+// IString base leaves it empty.
+template <int N>
+void DestroyFixed(soeutil::StringFixed<N>& text, uint64_t interfaceVtable) {
+  text.vtable = reinterpret_cast<void**>(interfaceVtable);
+  soeutil::StringRelease(&text);
+  text.data = soeutil::EmptyStringData();
+  text.length = 0;
+  text.capacity = 0;
+  text.vtable = soeutil::IStringVtable();
+}
+}  // namespace
+
+// 0x14161b4f0: GameCommerce::MarketingBundleDefinition ToString: entries
+// (+0x70, next +0x48) and tags (+0x110, next +0x10) rendered as "(x), "
+// lists, launch / expire times (+8 / +0x10) formatted with 0x14166bb30.
+const char* MarketingBundleToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::StringFixed<1024> entries;
+  soeutil::InitFixed(entries, reinterpret_cast<void**>(0x14204b2f0));
+  soeutil::StringFixed<1024> tags;
+  soeutil::InitFixed(tags, reinterpret_cast<void**>(0x14204b2f0));
+  soeutil::StringFixed<256> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x142049e08));
+  using AppendFn = void (*)(soeutil::IString*, const char*, ...);
+  if (void** entry = At<void**>(self, 0x70)) {
+    do {
+      game::Call<AppendFn>(0x1402ed6c0)(&entries, reinterpret_cast<const char*>(0x1421d29dc), Virtual<const char*>(entry, 1, static_cast<void*>(&scratch)));
+      entry = static_cast<void**>(entry[9]);
+    } while (entry);
+    DropTrailingSeparator(entries);
+  }
+  for (void** tag = At<void**>(self, 0x110); tag; tag = static_cast<void**>(tag[2]))
+    game::Call<AppendFn>(0x1402ed6c0)(&tags, reinterpret_cast<const char*>(0x1421d29dc), Virtual<const char*>(tag, 1, static_cast<void*>(&scratch)));
+  DropTrailingSeparator(tags);
+  const char* entryList = entries.data;
+  const char* tagList = tags.data;
+  soeutil::StringFixed<32> launchText;
+  soeutil::InitFixed(launchText, reinterpret_cast<void**>(0x14204a378));
+  soeutil::StringFixed<32> expireText;
+  soeutil::InitFixed(expireText, reinterpret_cast<void**>(0x14204a378));
+  int tagCount = At<int>(self, 0x120);
+  int entryCount = At<int>(self, 0x80);
+  uint64_t expire = At<uint64_t>(self, 0x10);
+  uint64_t launch = At<uint64_t>(self, 8);
+  uint64_t tintGroup = At<uint64_t>(self, 0x58);
+  using TimeFn = const char* (*)(uint64_t*, void*, int);
+  const char* expireString = game::Call<TimeFn>(0x14166bb30)(&expire, &expireText, 1);
+  const char* launchString = game::Call<TimeFn>(0x14166bb30)(&launch, &launchText, 1);
+  uint8_t tintable = At<uint8_t>(self, 0x199);
+  const char* image = Virtual<const char*>(self + 0x18, 1, static_cast<void*>(&scratch));
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bc240), At<int>(self, 0x170), At<int>(self, 0x174), At<int>(self, 0x178),
+                                    At<int>(self, 0x17C), image, tintable, tintGroup, At<int>(self, 0x184), At<int>(self, 0x180), At<int>(self, 0x18C),
+                                    At<int>(self, 0x188), At<int>(self, 0x190), launchString, expireString, At<int>(self, 0x194), entryCount, entryList,
+                                    tagCount, tagList);
+  const char* result = out->data;
+  DestroyFixed(expireText, 0x14204a358);
+  DestroyFixed(launchText, 0x14204a358);
+  DestroyFixed(scratch, 0x142049de8);
+  DestroyFixed(tags, 0x14204b2d0);
+  entries.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&entries);
+  return result;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1728,3 +1793,4 @@ REBUILD_FUNCTION(StoreBundleGroupDefinition_ToString, 0x14161d720, StoreBundleGr
 REBUILD_FUNCTION(GameClientInputManager_Initialize, 0x14034f1a0, InputManagerInitialize);
 REBUILD_FUNCTION(MarketingDataSource_AddGroup, 0x141623580, MarketingDataSourceAddGroup);
 REBUILD_FUNCTION(BaseInGamePurchaseOrder_ToString, 0x141628ed0, PurchaseOrderToString);
+REBUILD_FUNCTION(MarketingBundleDefinition_ToString, 0x14161b4f0, MarketingBundleToString);
