@@ -1414,6 +1414,178 @@ void* Construct1415f8850(uint8_t* self, void* source, int first, int second) {
   return self;
 }
 
+
+// 0x140310920: snprintf-style formatter (0x14032ed90 takes the va_list).
+int FormatToBuffer(char* buffer, int size, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  return game::Call<int (*)(char*, int, const char*, va_list)>(0x14032ed90)(buffer, size, format, args);
+}
+
+// 0x1403ae330: destructor of a class holding an intrusive list at +0x18
+// (head +0x28): unlink everything, drop to the base vtable 0x1420633d0.
+void ListMemberDestructor1420633d0(uint8_t* self) {
+  At<uint64_t>(self, 0x18) = 0x142065520;
+  if (At<void*>(self, 0x28)) {
+    do {
+      if (void* head = At<void*>(self, 0x28)) game::Call<void (*)(void*, void*)>(0x140445b10)(self + 0x18, head);
+    } while (At<void*>(self, 0x28));
+  }
+  At<uint64_t>(self, 0) = 0x1420633d0;
+}
+
+// 0x1403334f0: ini GetString(section, key, default, out, ...) through an
+// 8 KB stack buffer (0x1403331e0), then assign into out.
+void IniGetString(void* ini, const char* section, const char* key, const char* fallback, void* out, uint8_t expand, int a7, int a8) {
+  char buffer[0x2000];
+  game::Call<void (*)(void*, const char*, const char*, const char*, char*, int, uint8_t, int, int)>(0x1403331e0)(ini, section, key, fallback, buffer, 0x2000,
+                                                                                                                  expand, a7, a8);
+  game::Call<void (*)(void*, const char*)>(0x1402bd670)(out, buffer);
+}
+
+// 0x1403f6080: parse the value stored under the fixed key 0x72279F7F (or
+// the empty string) as an int (0x1402ecf30).
+int ParseFixedKeyValue(uint8_t* self) {
+  const char* text = reinterpret_cast<const char*>(0x142046fcb);
+  if (int count = At<int>(self, 0x20)) {
+    uint32_t index = static_cast<uint32_t>(count - 1) & 0x72279F7Fu;
+    for (uint8_t* node = At<uint8_t**>(self, 0x40)[index]; node; node = At<uint8_t*>(node, 0x30)) {
+      if (At<uint32_t>(node, 0x28) == 0x72279F7Fu) {
+        text = At<const char*>(node, 8);
+        break;
+      }
+    }
+  }
+  int scratch;
+  return *game::Call<int* (*)(const char*, int*)>(0x1402ecf30)(text, &scratch);
+}
+
+// 0x14033e7e0: allocate from the pool under its lock (+0x518).
+void* PoolAllocateLocked(uint8_t* self, int size) {
+  uint8_t* lock = self + 0x518;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  void* block = game::Call<void* (*)(void*, int)>(0x14033e480)(self, size);
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  return block;
+}
+
+// 0x1403b0f30: destructor (member +0x18 vtables 0x142066390 / 0x142066370,
+// member +0x38, base vtable 0x1420633d0).
+void Destructor1403b0f30(uint8_t* self) {
+  At<uint64_t>(self, 0x18) = 0x142066390;
+  game::Call<void (*)(void*)>(0x1404534c0)(self + 0x18);
+  game::Call<void (*)(void*)>(0x1403a79d0)(self + 0x38);
+  At<uint64_t>(self, 0x18) = 0x142066370;
+  game::Call<void (*)(void*)>(0x1404534c0)(self + 0x18);
+  At<uint64_t>(self, 0) = 0x1420633d0;
+}
+
+// 0x1406a8d10: queue a small id request (0x30 bytes, vtable 0x1420eac40)
+// on the object (0x140515fc0).
+uint64_t QueueIdRequest(void* self, int id) {
+  auto* request = game::Call<uint8_t* (*)(size_t)>(0x1402fc0f0)(0x30);
+  if (request) {
+    At<uint64_t>(request, 8) = 0;
+    At<uint64_t>(request, 0x10) = 0;
+    At<uint64_t>(request, 0) = 0x1420eac40;
+    At<uint64_t>(request, 0x18) = 0xF;
+    At<uint8_t>(request, 0x20) = 0;
+    At<int>(request, 0x28) = id;
+  }
+  return game::Call<uint64_t (*)(void*, void*)>(0x140515fc0)(self, request);
+}
+
+// 0x140a885e0: when the world exists and the check passes without the
+// blocking flag, send action 6 with the world's +0x2D0 value.
+void SendAction6(void* self) {
+  uint8_t* world = *reinterpret_cast<uint8_t**>(0x142b19ba0);
+  if (!world) return;
+  uint8_t blocked = 0;
+  int value = 0;
+  if (!game::Call<bool (*)(void*, uint8_t*, int*)>(0x140a87de0)(self, &blocked, &value) || blocked) return;
+  game::Call<void (*)(void*, int, int, int)>(0x140a88730)(self, 6, 0, At<int>(world, 0x2D0));
+}
+
+// 0x14165b570: reset the reader: buffered mode (+0xA8 > 0) clears the
+// +0x1B8 buffer and its cursors, else resets +0x68; position cleared.
+void ResetReader(uint8_t* self) {
+  if (At<int>(self, 0xA8) > 0) {
+    game::Call<void (*)(void*, int)>(0x140337f50)(self + 0x1B8, 0);
+    At<uint64_t>(self, 0x208) = 0;
+    At<uint64_t>(self, 0x210) = 0;
+  } else {
+    game::Call<void (*)(void*)>(0x14165b450)(self + 0x68);
+  }
+  At<uint64_t>(self, 0x88) = 0;
+  At<int>(self, 0x80) = 0;
+}
+
+// 0x141ec2a90: destructor (vtable 0x1425ad130) shutting down and freeing
+// the 0x190-byte member at +8.
+void Destructor1425ad130(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x1425ad130;
+  if (!At<void*>(self, 8)) return;
+  game::Call<void (*)(void*)>(0x14166a8a0)(At<void*>(self, 8));
+  if (void* member = At<void*>(self, 8)) {
+    game::Call<void (*)(void*)>(0x141668bc0)(member);
+    game::Call<void (*)(void*, size_t)>(0x140d0fb84)(member, 0x190);
+  }
+  At<void*>(self, 8) = nullptr;
+}
+
+// 0x1402ee3a0: resolve the context (0x1402ee000) and forward everything
+// to 0x1402ed840.
+uint64_t ForwardWithContext(void* source, int a2, uint8_t a3, int a4, void* a5, void* a6) {
+  void* context = game::Call<void* (*)(void*)>(0x1402ee000)(source);
+  return game::Call<uint64_t (*)(void*, void*, int, uint8_t, int, void*, void*)>(0x1402ed840)(context, source, a2, a3, a4, a5, a6);
+}
+
+// 0x1414d91b0: query the object's handler (+0x80, slot 48) with a request
+// built from the object and the default parameters (0x142b06ac0).
+void** QueryHandler(void** out, uint8_t* object) {
+  struct Request {
+    void* object;
+    uint64_t pad;
+    uint8_t parameters[16];
+    uint8_t flags;
+  } request{};
+  static_assert(offsetof(Request, parameters) == 0x10 && offsetof(Request, flags) == 0x20);
+  request.object = object;
+  for (int i = 0; i < 16; ++i) request.parameters[i] = reinterpret_cast<const uint8_t*>(0x142b06ac0)[i];
+  request.flags = 0x20;
+  void* handler = At<void*>(object, 0x80);
+  *out = Virtual<void*>(handler, 48, &request);
+  return out;
+}
+
+// 0x1403a97f0 / 0x1403a95c0: reset an intrusive shared pointer (count
+// block at object +8: strong, weak).
+void ResetSharedPointer(void** holder) {
+  uint8_t* object = static_cast<uint8_t*>(*holder);
+  if (!object) return;
+  *holder = nullptr;
+  auto* counts = At<volatile long*>(object, 8);
+  bool lastStrong = _InterlockedDecrement(&counts[0]) == 0;
+  if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts) game::Call<void (*)(void*, size_t)>(0x140d0fb84)(const_cast<long*>(counts), 0x10);
+  if (lastStrong) Virtual(object, 1);
+}
+
+// 0x1417d9420: constructor (vtables 0x1425017b0 / 0x1425017e0 /
+// 0x142501780, 0x100-byte table cleared).
+void* Construct1425017b0(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x1425017b0;
+  At<int>(self, 0x18) = 0;
+  At<uint64_t>(self, 0x10) = 0x1425017e0;
+  At<int>(self, 0x40) = 0;
+  At<uint64_t>(self, 0x30) = 0;
+  At<uint64_t>(self, 0x38) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x48, 0, 0x100);
+  At<int>(self, 0x28) = 0;
+  At<uint64_t>(self, 0x20) = 0x142501780;
+  At<int>(self, 0x2C) = 0x7FFFFFFF;
+  return self;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -1581,3 +1753,20 @@ REBUILD_FUNCTION(PopListHead, 0x140325740, PopListHead);
 REBUILD_FUNCTION(ApplyKnownEntry, 0x140931e10, ApplyKnownEntry);
 REBUILD_FUNCTION(DispatchEvent9_16, 0x1409f1310, DispatchEvent9_16);
 REBUILD_FUNCTION(Construct_1415f8850, 0x1415f8850, Construct1415f8850);
+REBUILD_FUNCTION(FormatToBuffer, 0x140310920, FormatToBuffer);
+REBUILD_FUNCTION(FixedStringDestructor_1403aad80, 0x1403aad80, (FixedStringDestructor<0x14204ba88, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_14030c3c0, 0x14030c3c0, (FixedStringDestructor<0x14204ae80, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(ListMemberDestructor_1403ae330, 0x1403ae330, ListMemberDestructor1420633d0);
+REBUILD_FUNCTION(Ini_GetString, 0x1403334f0, IniGetString);
+REBUILD_FUNCTION(ParseFixedKeyValue, 0x1403f6080, ParseFixedKeyValue);
+REBUILD_FUNCTION(PoolAllocateLocked, 0x14033e7e0, PoolAllocateLocked);
+REBUILD_FUNCTION(Destructor_1403b0f30, 0x1403b0f30, Destructor1403b0f30);
+REBUILD_FUNCTION(QueueIdRequest, 0x1406a8d10, QueueIdRequest);
+REBUILD_FUNCTION(SendAction6, 0x140a885e0, SendAction6);
+REBUILD_FUNCTION(ResetReader, 0x14165b570, ResetReader);
+REBUILD_FUNCTION(Destructor_1425ad130, 0x141ec2a90, Destructor1425ad130);
+REBUILD_FUNCTION(ForwardWithContext, 0x1402ee3a0, ForwardWithContext);
+REBUILD_FUNCTION(QueryHandler, 0x1414d91b0, QueryHandler);
+REBUILD_FUNCTION(ResetSharedPointer_1403a97f0, 0x1403a97f0, ResetSharedPointer);
+REBUILD_FUNCTION(ResetSharedPointer_1403a95c0, 0x1403a95c0, ResetSharedPointer);
+REBUILD_FUNCTION(Construct_1425017b0, 0x1417d9420, Construct1425017b0);
