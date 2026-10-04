@@ -1272,6 +1272,148 @@ void CreateSingleton142b1d5c0() {
   *reinterpret_cast<void**>(0x142b1d5c0) = memory;
 }
 
+
+// Inlined ~StringFixed<N> / ~IString variants: release through the
+// interface vtable, then reset to the empty sentinel and the plain vtable.
+// (0x1402bace0 / 0x1402baa30 / 0x140305cf0 / 0x1402ef190 / 0x140305d50 /
+// 0x14030c360, and the wide-string 0x1402ed380.)
+template <uint64_t InterfaceVtable, uint64_t EmptyData, uint64_t PlainVtable>
+void FixedStringDestructor(uint8_t* self) {
+  At<uint64_t>(self, 0) = InterfaceVtable;
+  if (At<int>(self, 0x14) > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(At<uint8_t*>(self, 8) - 4), -1) - 1 <= 0) Virtual(self, 2);
+  At<uint64_t>(self, 8) = EmptyData;
+  At<uint64_t>(self, 0x10) = 0;
+  At<uint64_t>(self, 0) = PlainVtable;
+}
+
+// Class vtable, release the IString member at Offset, base vtable
+// 0x1420633d0 (0x1403b04e0 / 0x1403b0980).
+template <uint64_t Vtable, size_t Offset>
+void VtableStringMemberDestructor(uint8_t* self) {
+  At<uint64_t>(self, 0) = Vtable;
+  uint8_t* text = self + Offset;
+  At<uint64_t>(text, 0) = 0x142049b50;
+  if (At<int>(text, 0x14) > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(At<uint8_t*>(text, 8) - 4), -1) - 1 <= 0) Virtual(text, 2);
+  At<uint64_t>(self, 0) = 0x1420633d0;
+}
+
+// 0x1418847a0: constructor (vtables 0x142512ab8 -> 0x142512ad0, 0x800-byte
+// table cleared, member at +0x818).
+void* Construct142512ad0(uint8_t* self) {
+  At<int>(self, 0x10) = 0;
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + 0x18, 0, 0x800);
+  At<int>(self, 8) = 0;
+  At<uint64_t>(self, 0) = 0x142512ab8;
+  At<int>(self, 0xC) = 0x7FFFFFFF;
+  game::Call<void (*)(void*)>(0x1403945d0)(self + 0x818);
+  At<uint64_t>(self, 0) = 0x142512ad0;
+  return self;
+}
+
+// 0x14039acb0: constructor (type 0x79, vtable 0x142064070).
+void* Construct142064070(uint8_t* self) {
+  At<int>(self, 8) = 0x79;
+  At<uint64_t>(self, 0) = 0x142064070;
+  game::Call<void (*)(void*)>(0x1417f2640)(self + 0x10);
+  At<uint8_t*>(self, 0x1B0) = self + 0x10;
+  At<int>(self, 0x1B8) = *reinterpret_cast<int*>(0x142b186ac);
+  return self;
+}
+
+// 0x14034a5c0: dotted-quad IPv4 text ("%d.%d.%d.%d") into buffer.
+char* FormatIpv4(const uint8_t* address, char* buffer, int size) {
+  if (size < 0x10) {
+    buffer[0] = 0;
+    return buffer;
+  }
+  game::Call<int (*)(char*, int, const char*, ...)>(0x140310920)(buffer, size, reinterpret_cast<const char*>(0x142052570), address[0], address[1], address[2],
+                                                                 address[3]);
+  return buffer;
+}
+
+// 0x14032e0c0: fetch a 0x400-character wide name through the IAT
+// (0x1440a0070) and convert it into out on success.
+bool GetWideName(void* out) {
+  uint16_t name[0x400];
+  uint32_t size = 0x400;
+  name[0] = 0;
+  bool ok = (*reinterpret_cast<int(__stdcall**)(uint16_t*, uint32_t*)>(0x1440a0070))(name, &size) != 0;
+  if (ok) game::Call<void (*)(uint16_t*, void*)>(0x14033a0c0)(name, out);
+  return ok;
+}
+
+// 0x141603120: Crypto::Prng constructor.
+void* PrngConstruct(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x1424b8d00;
+  game::Call<void (*)(void*)>(0x1415fc490)(self + 8);
+  At<uint64_t>(self, 0x40) = 0x1424b8cd8;
+  At<uint64_t>(self, 0x48) = 0;
+  At<uint64_t>(self, 0x50) = 0;
+  At<uint64_t>(self, 0x70) = 0x1424b8cd8;
+  At<uint64_t>(self, 0x78) = 0;
+  At<uint64_t>(self, 0x80) = 0;
+  At<int>(self, 0xA0) = 0;
+  At<uint64_t>(self, 0xA8) = 0;
+  At<uint8_t>(self, 0xB0) = 0;
+  return self;
+}
+
+// 0x140325740: pop the head of the embedded list (+0x10: head +8, tail
+// +0x10, count +0x18; node next +0x10 / prev +0x18) and release it
+// through the list's slot 3.
+bool PopListHead(uint8_t* self) {
+  uint8_t* list = self + 0x10;
+  uint8_t* node = At<uint8_t*>(list, 8);
+  if (!node) return true;
+  uint8_t* prev = At<uint8_t*>(node, 0x18);
+  if (!prev)
+    At<uint8_t*>(list, 8) = At<uint8_t*>(node, 0x10);
+  else
+    At<uint8_t*>(prev, 0x10) = At<uint8_t*>(node, 0x10);
+  uint8_t* next = At<uint8_t*>(node, 0x10);
+  if (!next) {
+    --At<int>(list, 0x18);
+    At<uint8_t*>(list, 0x10) = At<uint8_t*>(node, 0x18);
+  } else {
+    At<uint8_t*>(next, 0x18) = At<uint8_t*>(node, 0x18);
+    --At<int>(list, 0x18);
+  }
+  Virtual(list, 3, static_cast<void*>(node));
+  return true;
+}
+
+// 0x140931e10: for a known entry (0x140565740 on world +0xB618) apply it
+// (0x1406a8d10) when slot 159 allows and state 0xF is not set.
+void ApplyKnownEntry(void** self, void* key) {
+  auto* entry = game::Call<int* (*)(void*, void*)>(0x140565740)(*reinterpret_cast<uint8_t**>(0x142b19ba0) + 0xB618, key);
+  if (!entry) return;
+  if (!Virtual<bool>(self, 159)) return;
+  if (game::Call<bool (*)(void*, int)>(0x140514940)(self, 0xF)) return;
+  game::Call<void (*)(void*, int)>(0x1406a8d10)(self, *entry);
+}
+
+// 0x1409f1310: copy the global id (0x143be26d0) to +0x10 and dispatch the
+// (9, 0x16) event.
+uint64_t DispatchEvent9_16(uint8_t* self) {
+  At<uint64_t>(self, 0x10) = *reinterpret_cast<uint64_t*>(0x143be26d0);
+  struct Event {
+    uint64_t vtable;
+    int category;
+    int code;
+    uint64_t data;
+  } event{0x142162290, 9, 0x16, 0};
+  return game::Call<uint64_t (*)(void*, Event*, int, bool)>(0x140978600)(At<void*>(*reinterpret_cast<void**>(0x142b19b98), 8), &event, 0, true);
+}
+
+// 0x1415f8850: constructor (base 0x1415f9ac0, two ints, init from source).
+void* Construct1415f8850(uint8_t* self, void* source, int first, int second) {
+  game::Call<void (*)(void*)>(0x1415f9ac0)(self);
+  At<int>(self, 0x60) = first;
+  At<int>(self, 0x64) = second;
+  game::Call<void (*)(void*, void*)>(0x1415f9fe0)(self, source);
+  return self;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -1421,3 +1563,21 @@ REBUILD_FUNCTION(Construct_142101d00, 0x14076bd70, Construct142101d00);
 REBUILD_FUNCTION(InputThread_Construct, 0x14034ea30, InputThreadConstruct);
 REBUILD_FUNCTION(ArraySecure_Destructor, 0x1415f9be0, ArraySecureDestructor);
 REBUILD_FUNCTION(CreateSingleton_142b1d5c0, 0x14049d110, CreateSingleton142b1d5c0);
+REBUILD_FUNCTION(FixedStringDestructor_1402bace0, 0x1402bace0, (FixedStringDestructor<0x142049da8, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_1402baa30, 0x1402baa30, (FixedStringDestructor<0x142049ce0, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_140305cf0, 0x140305cf0, (FixedStringDestructor<0x142049de8, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_1402ef190, 0x1402ef190, (FixedStringDestructor<0x14204b2d0, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_140305d50, 0x140305d50, (FixedStringDestructor<0x142049e28, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(FixedStringDestructor_14030c360, 0x14030c360, (FixedStringDestructor<0x14204a358, 0x143e09641, 0x142049b50>));
+REBUILD_FUNCTION(WideFixedStringDestructor_1402ed380, 0x1402ed380, (FixedStringDestructor<0x142046d90, 0x142ae85c8, 0x14204efd0>));
+REBUILD_FUNCTION(VtableStringMemberDestructor_1403b04e0, 0x1403b04e0, (VtableStringMemberDestructor<0x142063c90, 0x18>));
+REBUILD_FUNCTION(VtableStringMemberDestructor_1403b0980, 0x1403b0980, (VtableStringMemberDestructor<0x142063c80, 0x18>));
+REBUILD_FUNCTION(Construct_142512ad0, 0x1418847a0, Construct142512ad0);
+REBUILD_FUNCTION(Construct_142064070, 0x14039acb0, Construct142064070);
+REBUILD_FUNCTION(FormatIpv4, 0x14034a5c0, FormatIpv4);
+REBUILD_FUNCTION(GetWideName, 0x14032e0c0, GetWideName);
+REBUILD_FUNCTION(Crypto_Prng_Construct, 0x141603120, PrngConstruct);
+REBUILD_FUNCTION(PopListHead, 0x140325740, PopListHead);
+REBUILD_FUNCTION(ApplyKnownEntry, 0x140931e10, ApplyKnownEntry);
+REBUILD_FUNCTION(DispatchEvent9_16, 0x1409f1310, DispatchEvent9_16);
+REBUILD_FUNCTION(Construct_1415f8850, 0x1415f8850, Construct1415f8850);
