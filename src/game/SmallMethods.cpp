@@ -1232,6 +1232,36 @@ void UramApiOnHttpResponse(uint8_t* self, void*, const char* url, uint32_t reque
   if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
 }
 
+namespace {
+// Inlined SoeUtil::String truncate used by the list ToStrings: drop the
+// trailing ", ", unsharing (copy-on-write) the buffer first if needed.
+void DropTrailingSeparator(soeutil::StringFixed<1024>& ids) {
+  if (ids.length > 2) {
+    int newLength = ids.length - 2;
+    int needed = ids.length - 1;
+    char* buffer = ids.data;
+    int capacity = ids.capacity;
+    if (ids.capacity < needed || (ids.capacity > 0 && reinterpret_cast<int*>(ids.data)[-1] > 1)) {
+      if (needed < ids.length + 1) needed = ids.length + 1;
+      int granted;
+      char onHeap;
+      auto* block = reinterpret_cast<int*>(
+          reinterpret_cast<void* (*)(void*, int, int*, char*)>(ids.vtable[soeutil::kStringSlotAllocate])(&ids, needed + 4, &granted, &onHeap));
+      if (block) _InterlockedExchange(reinterpret_cast<volatile long*>(block), onHeap != 0);
+      buffer = reinterpret_cast<char*>(block + 1);
+      capacity = granted - 4;
+      game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(buffer, ids.data, static_cast<size_t>(ids.length + 1));
+      if (ids.capacity > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(ids.data - 4), -1) < 2)
+        reinterpret_cast<void (*)(void*)>(ids.vtable[soeutil::kStringSlotFree])(&ids);
+    }
+    ids.capacity = capacity;
+    ids.data = buffer;
+    ids.data[newLength] = 0;
+    ids.length = newLength;
+  }
+}
+}  // namespace
+
 // 0x14161fb60: StoreBundleCategoryGroupDefinition ToString: "groupId=%d,
 // categoryIds=(a, b, ...)" built in a StringFixed<1024>; the trailing ", "
 // is cut with the inlined copy-on-write truncate.
@@ -1243,29 +1273,7 @@ const char* StoreCategoryGroupToString(uint8_t* self, soeutil::IString* out) {
       game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&ids, reinterpret_cast<const char*>(0x1424bc8d0), *node);  // "%d, "
       node = *reinterpret_cast<uint32_t**>(node + 2);
     } while (node);
-    if (ids.length > 2) {
-      int newLength = ids.length - 2;
-      int needed = ids.length - 1;
-      char* buffer = ids.data;
-      int capacity = ids.capacity;
-      if (ids.capacity < needed || (ids.capacity > 0 && reinterpret_cast<int*>(ids.data)[-1] > 1)) {
-        if (needed < ids.length + 1) needed = ids.length + 1;
-        int granted;
-        char onHeap;
-        auto* block = reinterpret_cast<int*>(
-            reinterpret_cast<void* (*)(void*, int, int*, char*)>(ids.vtable[soeutil::kStringSlotAllocate])(&ids, needed + 4, &granted, &onHeap));
-        if (block) _InterlockedExchange(reinterpret_cast<volatile long*>(block), onHeap != 0);
-        buffer = reinterpret_cast<char*>(block + 1);
-        capacity = granted - 4;
-        game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(buffer, ids.data, static_cast<size_t>(ids.length + 1));
-        if (ids.capacity > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(ids.data - 4), -1) < 2)
-          reinterpret_cast<void (*)(void*)>(ids.vtable[soeutil::kStringSlotFree])(&ids);
-      }
-      ids.capacity = capacity;
-      ids.data = buffer;
-      ids.data[newLength] = 0;
-      ids.length = newLength;
-    }
+    DropTrailingSeparator(ids);
   }
   game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bc8d8), At<int>(self, 8), ids.data);
   const char* text = out->data;
@@ -1440,6 +1448,101 @@ void ProfilerAddValue(uint8_t* self, void* name, uint32_t id, int64_t value) {
   if (value < At<int64_t>(node, 0x18)) At<int64_t>(node, 0x18) = value;
 }
 
+// 0x14161d720: StoreBundleGroupDefinition ToString: entries rendered as
+// "(entry), " into a StringFixed<1024> (each through a StringFixed<256>
+// scratch), trailing ", " dropped, then the group fields.
+const char* StoreBundleGroupToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::StringFixed<1024> entries;
+  soeutil::InitFixed(entries, reinterpret_cast<void**>(0x14204b2f0));
+  soeutil::StringFixed<256> scratch;
+  soeutil::InitFixed(scratch, reinterpret_cast<void**>(0x142049e08));
+  if (void** entry = At<void**>(self, 0x68)) {
+    do {
+      const char* text = Virtual<const char*>(entry, 1, static_cast<void*>(&scratch));
+      game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&entries, reinterpret_cast<const char*>(0x1421d29dc), text);  // "(%s), "
+      entry = static_cast<void**>(entry[2]);
+    } while (entry);
+    DropTrailingSeparator(entries);
+  }
+  const char* list = entries.data;
+  int entryCount = At<int>(self, 0x78);
+  uint8_t exclusive = At<uint8_t>(self, 0x50);
+  const char* image = Virtual<const char*>(self + 0x18, 1, static_cast<void*>(&scratch));
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bc540), At<int>(self, 8), At<int>(self, 0xC), At<int>(self, 0x10), image,
+                                    At<int>(self, 0x14), exclusive, entryCount, list);
+  const char* result = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&scratch);
+  scratch.data = soeutil::EmptyStringData();
+  scratch.length = 0;
+  scratch.capacity = 0;
+  scratch.vtable = soeutil::IStringVtable();
+  entries.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&entries);
+  return result;
+}
+
+// 0x14034f1a0: GameClientInputManager Initialize(window): base init, raw
+// mouse + keyboard registration, optional input thread (+0x8010), then
+// DirectInput8 game controllers: absolute axes, 8 axes ranged 0..0xFFFF,
+// background non-exclusive cooperative level. The original checks a stale
+// result after each axis-range SetProperty; kept as is.
+bool InputManagerInitialize(uint8_t* self, void* window) {
+  if (!game::Call<bool (*)(void*)>(0x141667990)(self)) return false;
+  struct RawDevice {
+    uint16_t usagePage;
+    uint16_t usage;
+    uint32_t flags;
+    void* target;
+  } devices[2] = {{1, 2, 0, nullptr}, {1, 6, 0x100, window}};
+  static_assert(sizeof(RawDevice) == 0x10);
+  using RegisterFn = int(__stdcall*)(RawDevice*, unsigned, unsigned);
+  if (!(*reinterpret_cast<RegisterFn*>(0x1440a04a8))(devices, 2, 0x10)) {
+    game::Call<void (*)(const char*, const char*, ...)>(0x1402baba0)(reinterpret_cast<const char*>(0x142053008), reinterpret_cast<const char*>(0x142052fd8));
+    return false;
+  }
+  if (At<bool>(self, 0x8010)) {
+    void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x48);
+    At<void*>(self, 0x81F0) = memory ? game::Call<void* (*)(void*, const char*, int)>(0x14032ef00)(memory, reinterpret_cast<const char*>(0x142053018), 0) : nullptr;
+    memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0xC0);
+    void* thread = memory ? game::Call<void* (*)(void*, int, void*)>(0x14034ea30)(memory, 0, self) : nullptr;
+    At<void*>(self, 0x81F8) = thread;
+    game::Call<void (*)(void*)>(0x140335b70)(thread);
+  }
+  using ModuleFn = void*(__stdcall*)(const char*);
+  void* module = (*reinterpret_cast<ModuleFn*>(0x14409fea8))(nullptr);
+  void** direct = At<void**>(self, 0x8218);
+  if (game::Call<long (*)(void*, unsigned, const void*, void*, void*)>(0x140d9987e)(module, 0x800, reinterpret_cast<const void*>(0x14248ab60), direct,
+                                                                                    nullptr) < 0)
+    return false;
+  void* input = *At<void**>(self, 0x8218);
+  if (Virtual<long>(input, 4, 4, reinterpret_cast<void*>(0x14034ed40), static_cast<void*>(At<void*>(self, 0x8218)), 1) < 0) return false;  // EnumDevices
+  for (uint8_t* device = At<uint8_t*>(At<void*>(self, 0x8218), 0x10); device; device = At<uint8_t*>(device, 0x140)) {
+    if (At<int>(device, 0x20) != 0) continue;
+    void* directInput = *At<void**>(self, 0x8218);
+    long result = Virtual<long>(directInput, 3, static_cast<void*>(device), static_cast<void*>(device + 0x28), static_cast<void*>(nullptr));  // CreateDevice
+    if (result < 0) return false;
+    void* joystick = At<void*>(device, 0x28);
+    result = Virtual<long>(joystick, 11, reinterpret_cast<const void*>(0x1422034c0));  // SetDataFormat(c_dfDIJoystick)
+    if (result < 0) return false;
+    struct PropertyDword {
+      uint32_t size, headerSize, object, how, data;
+    } axisMode{0x14, 0x10, 0, 0, 0};
+    result = Virtual<long>(joystick, 6, reinterpret_cast<void*>(2), static_cast<void*>(&axisMode));  // DIPROP_AXISMODE = absolute
+    if (result < 0) return false;
+    for (uint32_t axis = 0; axis < 8; ++axis) {
+      struct PropertyRange {
+        uint32_t size, headerSize, object, how;
+        int32_t minimum, maximum;
+      } range{0x18, 0x10, axis * 4, 1, 0, 0xFFFF};
+      Virtual<long>(At<void*>(device, 0x28), 6, reinterpret_cast<void*>(4), static_cast<void*>(&range));  // DIPROP_RANGE
+      if (result < 0) return false;
+    }
+    if (Virtual<long>(At<void*>(device, 0x28), 13, window, 6) < 0) return false;  // SetCooperativeLevel(BACKGROUND | NONEXCLUSIVE)
+  }
+  return true;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1527,3 +1630,5 @@ REBUILD_FUNCTION(StoreBundleCategoryGroupDefinition_ToString, 0x14161fb60, Store
 REBUILD_FUNCTION(Crypto_Prng_Generate, 0x1416035a0, PrngGenerate);
 REBUILD_FUNCTION(PerformanceProfiler_Begin, 0x14032ac10, ProfilerBegin);
 REBUILD_FUNCTION(PerformanceProfiler_AddValue, 0x14032aea0, ProfilerAddValue);
+REBUILD_FUNCTION(StoreBundleGroupDefinition_ToString, 0x14161d720, StoreBundleGroupToString);
+REBUILD_FUNCTION(GameClientInputManager_Initialize, 0x14034f1a0, InputManagerInitialize);
