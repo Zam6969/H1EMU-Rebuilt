@@ -1045,3 +1045,5 @@ REBUILD_FUNCTION(HashListMap_T26c5eb_DeletingDestructor_14165f1f0, 0x14165f1f0, 
 REBUILD_FUNCTION(HashList_Tb80d2f_DeletingDestructor_14165f130, 0x14165f130, (ListMemberDeletingDestructor<0x1424c41b0, 0x1416657e0, 0x14165ee80, 0x14165eb70, 0x7858>));
 REBUILD_FUNCTION(collate_T7306a0_Compare_141921960, 0x141921960, (CollateCompare<0x141932c1c>));
 REBUILD_FUNCTION(collate_Ta29307_Compare_14192fcdc, 0x14192fcdc, (CollateCompare<0x141932918>));
+REBUILD_FUNCTION(Array_T968ad7_Reallocate_14194ee90, 0x14194ee90, (ArrayReallocate<8, 0x143c46658>));
+REBUILD_FUNCTION(Array_T095a01_Reallocate_1403cb1a0, 0x1403cb1a0, (ArrayReallocate<24, 0x143c46658, 8>));

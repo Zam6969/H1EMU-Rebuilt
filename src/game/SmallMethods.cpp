@@ -658,6 +658,74 @@ bool FlatFileDataLoaderLoad(uint8_t* self, void* sink, const char* path) {
   return ok;
 }
 
+// 0x141624f90: GameCommerce::MarketingDataSource IsConsistent: every
+// element group in the source chain (+0x20, next +0x128) must report a
+// single type id (element slot 2) across its entries.
+bool MarketingDataSourceIsConsistent(uint8_t* self) {
+  if (At<int>(self, 0x30) <= 0) return false;
+  for (uint8_t* group = At<uint8_t*>(self, 0x20); group; group = At<uint8_t*>(group, 0x128)) {
+    int seen = -1;
+    size_t index = 0;
+    for (uint8_t* entry = At<uint8_t*>(At<uint8_t*>(group, 0), 0x118); entry; entry = At<uint8_t*>(entry, 0x48)) {
+      void* element = At<void**>(group, 0x10)[index++];
+      int type = Virtual<int>(element, 2);
+      if (type != seen) {
+        if (seen != -1) return false;
+      }
+      seen = type;
+    }
+  }
+  return true;
+}
+
+// 0x141e96880: StoreBundleCategoryDefinition ToString (name from the
+// member at +0x10, slot 1, rendered into an empty StringFixed<256>).
+const char* StoreBundleCategoryToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::IString scratch{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+  const char* name = Virtual<const char*>(self + 0x10, 1, &scratch);
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1425aa638), At<int>(self, 8), At<int>(self, 0xC), name);
+  const char* text = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&scratch);
+  return text;
+}
+
+// 0x141ec2fb0: DataManagement::FlatFileLineData Find(key, found): look up
+// the column value by name in the map at +8.
+void* FlatFileLineDataFind(uint8_t* self, const char* key, bool* found) {
+  soeutil::IString name{soeutil::IStringVtable(), soeutil::EmptyStringData(), 0, 0};
+  soeutil::StringAssign(&name, key);
+  uint8_t* entry = game::Call<uint8_t* (*)(void*, soeutil::IString*)>(0x141ec2eb0)(self + 8, &name);
+  name.vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(&name);
+  if (entry) {
+    if (found) *found = true;
+    return At<void*>(entry, 8);
+  }
+  if (found) *found = false;
+  return nullptr;
+}
+
+// 0x14166f3b0: TaskManagement::TaskManager TaskCompleted(.., task): count
+// down the outstanding-frame tasks, stamp and queue the task, and resume
+// its owner if it is registered and not cancelled.
+void TaskManagerTaskCompleted(uint8_t* self, void*, uint8_t* task) {
+  int outstanding = At<int>(self, 0x60B20);
+  if (outstanding > 0 && At<int>(task, 0x138) != At<int>(At<void*>(self, 0x60B10), 0xE158)) {
+    At<int>(self, 0x60B20) = outstanding - 1;
+    if (outstanding - 1 == 0) game::Call<void (*)(void*)>(0x14166e380)(self);
+  }
+  At<int>(task, 0x138) = *reinterpret_cast<int*>(0x143dcb0d8);
+  game::Call<void (*)(void*, void*)>(0x141676750)(At<void*>(self, 0x60B10), task);
+  int id = At<int>(At<void*>(task, 0x120), 8);
+  for (uint8_t* node = At<uint8_t*>(self, 0x8C8 + (id & 0x7FFF) * 8); node; node = At<uint8_t*>(node, 0x80)) {
+    if (At<int>(node, 0x78) == id) {
+      if (At<int>(task, 0xB8) == 0) game::Call<void (*)(void*, void*)>(0x14166e270)(self, task);
+      return;
+    }
+  }
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -718,3 +786,7 @@ REBUILD_FUNCTION(StoreBundleGroupDefinition_DeletingDestructor, 0x14161d5b0, Sto
 REBUILD_FUNCTION(MarketingDataUpdater_Finish, 0x1416278a0, MarketingDataUpdaterFinish);
 REBUILD_FUNCTION(StoreBundleCategoryMapEntryDefinition_ToString, 0x141e96940, CategoryMapEntryToString);
 REBUILD_FUNCTION(FlatFileDataLoader_Load, 0x141ec3230, FlatFileDataLoaderLoad);
+REBUILD_FUNCTION(MarketingDataSource_IsConsistent, 0x141624f90, MarketingDataSourceIsConsistent);
+REBUILD_FUNCTION(StoreBundleCategoryDefinition_ToString, 0x141e96880, StoreBundleCategoryToString);
+REBUILD_FUNCTION(FlatFileLineData_Find, 0x141ec2fb0, FlatFileLineDataFind);
+REBUILD_FUNCTION(TaskManager_TaskCompleted, 0x14166f3b0, TaskManagerTaskCompleted);
