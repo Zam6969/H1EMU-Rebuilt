@@ -773,3 +773,86 @@ REBUILD_FUNCTION(NBT4__CMatchFinderBinTree_DeletingDestructor_141642160, 0x14164
 REBUILD_FUNCTION(NBT4B__CMatchFinderBinTree_DeletingDestructor_1416421e0, 0x1416421e0, (MatchFinderDeletingDestructor<0x1424c0ab0, 0x1424c08e8>));
 REBUILD_FUNCTION(NHC3__CMatchFinderHC_DeletingDestructor_141642260, 0x141642260, (MatchFinderDeletingDestructor<0x1424c0b08, 0x1424c08e8>));
 REBUILD_FUNCTION(NHC4__CMatchFinderHC_DeletingDestructor_1416422e0, 0x1416422e0, (MatchFinderDeletingDestructor<0x1424c0b60, 0x1424c08e8>));
+
+namespace rebuild::game_misc {
+// Lists with the head at +8: unlink nodes through Remove(self, node) until
+// empty, sized delete.
+template <uint64_t Vtable, uint64_t Remove, size_t Size>
+void* HeadListDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  if (*reinterpret_cast<void**>(bytes + 8)) {
+    do {
+      if (void* head = *reinterpret_cast<void**>(bytes + 8)) game::Call<void (*)(void*, void*)>(Remove)(self, head);
+    } while (*reinterpret_cast<void**>(bytes + 8));
+  }
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// SoeUtil::Map (0x18 bytes): free the tree from the root (+8), clear root
+// and count (+0x10), sized delete.
+template <uint64_t Vtable, uint64_t FreeTree>
+void* MapDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  game::Call<void (*)(void*, void*)>(FreeTree)(self, *reinterpret_cast<void**>(bytes + 8));
+  *reinterpret_cast<void**>(bytes + 8) = nullptr;
+  *reinterpret_cast<int*>(bytes + 0x10) = 0;
+  if (flags & 1) SizedDelete(self, 0x18);
+  return self;
+}
+// RefObjectPool<T>: the ref-count interface (at +0x18 in the pooled object)
+// hit zero. Destroy the object in place (vtable slot 0, no delete), then
+// return it to the pool (pointer at PoolOffset) under the pool's lock.
+template <size_t PoolOffset, size_t LockOffset, uint64_t Return>
+void RefObjectPoolRelease(uint8_t* refInterface) {
+  uint8_t* object = refInterface - 0x18;
+  uint8_t* pool = *reinterpret_cast<uint8_t**>(refInterface + PoolOffset);
+  (*reinterpret_cast<void (***)(void*, unsigned)>(object))[0](object, 0);
+  uint8_t* lock = pool + LockOffset;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  game::Call<void (*)(void*, void*)>(Return)(pool, object);
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+}
+// GameCommerce definitions with a destructor and class operator delete
+// (see PoolDeletingDestructor).
+template <uint64_t Destructor, size_t Size>
+void* PoolDestructorDeletingDestructor(void* self, unsigned flags) {
+  game::Call<void (*)(void*)>(Destructor)(self);
+  if (flags & 1) {
+    if (flags & 4)
+      game::Call<void (*)(void*, size_t)>(0x1402ec800)(self, Size);
+    else if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
+      game::Call<void (*)(void*, int)>(0x14032f980)(self, 0);
+    else
+      game::Call<void (*)(void*)>(0x1402fc170)(self);
+  }
+  return self;
+}
+// Class vtable, member destructor at Offset, base vtable, sized delete.
+template <uint64_t Vtable, size_t Offset, uint64_t MemberDestructor, uint64_t BaseVtable, size_t Size>
+void* MemberBaseDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  game::Call<void (*)(void*)>(MemberDestructor)(bytes + Offset);
+  *reinterpret_cast<uint64_t*>(bytes) = BaseVtable;
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(List_T1ad770_DeletingDestructor_140313250, 0x140313250, (HeadListDeletingDestructor<0x14204b538, 0x140314750, 0x20>));
+REBUILD_FUNCTION(List_T6c5e26_DeletingDestructor_1403274b0, 0x1403274b0, (HeadListDeletingDestructor<0x14204e558, 0x14032b9c0, 0x20>));
+REBUILD_FUNCTION(List_Tbd54a8_DeletingDestructor_140adc0f0, 0x140adc0f0, (HeadListDeletingDestructor<0x1424bfd80, 0x140adcbf0, 0x20>));
+REBUILD_FUNCTION(Map_Te94e77_DeletingDestructor_140321d00, 0x140321d00, (MapDeletingDestructor<0x14204d3f8, 0x140324d60>));
+REBUILD_FUNCTION(Map_T072562_DeletingDestructor_14033d660, 0x14033d660, (MapDeletingDestructor<0x1420517f0, 0x140343700>));
+REBUILD_FUNCTION(Map_Ta00205_DeletingDestructor_141e93d70, 0x141e93d70, (MapDeletingDestructor<0x1425a7ba0, 0x141e94d90>));
+REBUILD_FUNCTION(RefObjectPool_Tac9a7c_ReleaseObject_140342de0, 0x140342de0, (RefObjectPoolRelease<0x18, 0x20, 0x140340ad0>));
+REBUILD_FUNCTION(RefObjectPool_Tfded9b_ReleaseObject_141654630, 0x141654630, (RefObjectPoolRelease<0x10, 0xc028, 0x140bd4640>));
+REBUILD_FUNCTION(RefObjectPool_T914a1c_ReleaseObject_14165b3e0, 0x14165b3e0, (RefObjectPoolRelease<0x28, 0x20, 0x1403f28f0>));
+REBUILD_FUNCTION(GameCommerce__MarketingBundleDefinition__Entry_DeletingDestructor_14161a650, 0x14161a650, (PoolDestructorDeletingDestructor<0x14161a1a0, 0x48>));
+REBUILD_FUNCTION(GameCommerce__MarketingBundleDefinition_DeletingDestructor_14161a6c0, 0x14161a6c0, (PoolDestructorDeletingDestructor<0x14161a240, 0x1a0>));
+REBUILD_FUNCTION(GameCommerce__ImageDataDefinition_DeletingDestructor_141621720, 0x141621720, (PoolDestructorDeletingDestructor<0x141621640, 0x38>));
+REBUILD_FUNCTION(MarketingDataElementInstance_Tf11b63_DeletingDestructor_141622cf0, 0x141622cf0, (MemberBaseDeletingDestructor<0x1424bd080, 8, 0x141622600, 0x1424bcf70, 0x68>));
+REBUILD_FUNCTION(MarketingDataElementInstance_Ta77bbe_DeletingDestructor_141622c50, 0x141622c50, (MemberBaseDeletingDestructor<0x1424bd108, 8, 0x141622460, 0x1424bcf70, 0x68>));
+REBUILD_FUNCTION(MarketingDataElementInstance_Teef970_DeletingDestructor_141622ca0, 0x141622ca0, (MemberBaseDeletingDestructor<0x1424bd190, 8, 0x14072e550, 0x1424bcf70, 0x228>));
