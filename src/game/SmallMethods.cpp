@@ -1,5 +1,6 @@
 // One-off small vtable methods across GameCommerce, Crypto, TaskManagement,
 // SpeedTree, LZMA and the input manager (classes with no shared shape).
+#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 
@@ -267,6 +268,156 @@ uint64_t Sha256Hash(void* self, const void* data, int length, void* out, int out
   return Virtual<uint64_t>(self, 4, out, outLength);
 }
 
+namespace {
+void FreeHeapOrThread(void* data, int threadFlag) {
+  if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+    game::Call<void (*)(void*)>(0x1402fc170)(data);
+  else
+    game::Call<void (*)(void*, int)>(0x14032f980)(data, threadFlag);
+}
+}  // namespace
+
+// 0x141628220: MarketingDataSourceFlatFileLoader Reset: drop the read
+// buffer (+0x10), clear the read position (+0x248) and done flag (+0x253).
+void FlatFileLoaderReset(uint8_t* self) {
+  auto* buffer = reinterpret_cast<soeutil::IString*>(self + 0x10);
+  soeutil::StringRelease(buffer);
+  buffer->data = soeutil::EmptyStringData();
+  At<uint64_t>(self, 0x20) = 0;
+  At<uint64_t>(self, 0x248) = 0;
+  At<uint8_t>(self, 0x253) = 0;
+}
+
+// 0x1403187a0: wws::CrashReport::Private::Logger::Log(level, format, ...):
+// forward to the installed callback (settings at 0x142b06950) when the
+// level passes, or to the default printer when none is installed.
+void CrashReportLoggerLog(void*, int level, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  uint8_t* settings = *reinterpret_cast<uint8_t**>(0x142b06950);
+  if (settings) {
+    if (level > At<int>(settings, 0xB0)) return;
+    if (auto callback = At<void (*)(void*, int, const char*, va_list)>(settings, 0xB8)) {
+      callback(At<void*>(settings, 0xC0), level, format, args);
+      return;
+    }
+  }
+  game::Call<void (*)(int, const char*, va_list)>(0x1403188b0)(level, format, args);
+}
+
+// 0x140318740: BufferLogger::Log: vsprintf_s into the 512-byte buffer (+8)
+// and remember the level (+0x208).
+void CrashReportBufferLoggerLog(uint8_t* self, int level, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  uint64_t options = *game::Call<uint64_t* (*)()>(0x1402f1040)();
+  game::Call<int (*)(uint64_t, char*, size_t, const char*, void*, va_list)>(0x140d3d160)(options | 2, reinterpret_cast<char*>(self + 8), 0x200, format,
+                                                                                          nullptr, args);
+  At<int>(self, 0x208) = level;
+}
+
+// 0x141ebfca0: Deque scalar deleting destructor.
+void* DequeDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425acd78;
+  game::Call<void (*)(void*, int)>(0x141ec11b0)(self, At<int>(self, 0x48));
+  game::Call<void (*)(void*)>(0x141ec0060)(self);
+  game::Call<void (*)(void*)>(0x141ebf990)(self + 8);
+  if (flags & 1) SizedDelete(self, 0x60);
+  return self;
+}
+
+// 0x140312040: SoeUtil::TRateTracker Add(value): refresh, then add to the
+// current bucket (128 buckets of sums +8 and counts +0x208) and the totals.
+void RateTrackerAdd(uint8_t* self, int value) {
+  game::Call<void (*)(void*)>(0x140311910)(self);
+  At<int>(self, 8 + (At<int>(self, 0x408) % 128) * 4) += value;
+  ++At<int>(self, 0x208 + (At<int>(self, 0x408) % 128) * 4);
+  At<int>(self, 0x40C) += value;
+  ++At<int>(self, 0x410);
+}
+
+// 0x141e5eac0: SpeedTree CBlockPool scalar deleting destructor.
+void* BlockPoolDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a1578;
+  game::Call<void (*)(void*)>(0x1402fc170)(At<void*>(self, 8));
+  game::Call<void (*)(void*)>(0x1402fc170)(At<void*>(self, 0x10));
+  for (size_t offset = 8; offset <= 0x20; offset += 8) At<uint64_t>(self, offset) = 0;
+  if (flags & 1) SizedDelete(self, 0x30);
+  return self;
+}
+
+// 0x140d1cb70: undname pairNode::length: cached sum of both children's
+// lengths (right +0x10 first, then left +8).
+int PairNodeLength(uint8_t* self) {
+  if (At<int>(self, 0x18) < 0) {
+    auto childLength = [](void* child) {
+      void* target = (*reinterpret_cast<void***>(child))[0];
+      game::Call<void (*)(void*)>(0x140d11434)(target);  // _guard_check_icall
+      return reinterpret_cast<int (*)(void*)>(target)(child);
+    };
+    void* right = At<void*>(self, 0x10);
+    void* left = At<void*>(self, 8);
+    int sum = childLength(right);
+    At<int>(self, 0x18) = sum + childLength(left);
+  }
+  return At<int>(self, 0x18);
+}
+
+// 0x141ec3080: DataManagement::FlatFileDataLoader Open(path): reset, load
+// the file into +0xF0, remember the path (+0x108); warn on failure.
+bool FlatFileDataLoaderOpen(uint8_t* self, const char* path) {
+  game::Call<void (*)(void*)>(0x141ec3aa0)(self);
+  if (!game::Call<bool (*)(const char*, void*, bool)>(0x140339860)(path, self + 0xF0, true)) {
+    game::Call<void (*)(void*, const char*, ...)>(0x1402baba0)(*reinterpret_cast<void**>(0x142ad5948), reinterpret_cast<const char*>(0x1425ad380), path);
+    return false;
+  }
+  soeutil::StringAssign(self + 0x108, path);
+  return true;
+}
+
+// 0x1403b5b70: Array (64-byte elements) scalar deleting destructor: destroy
+// the elements, free the storage (thread allocator alignment 8).
+void* Array64DeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424bd140;
+  game::Call<void (*)(void*, int)>(0x140459660)(self, At<int>(self, 0x10));
+  FreeHeapOrThread(At<void*>(self, 8), 8);
+  At<void*>(self, 8) = nullptr;
+  if (flags & 1) SizedDelete(self, 0x18);
+  return self;
+}
+
+// 0x1417108d0: HashMap scalar deleting destructor.
+void* HashMapDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425ad2e0;
+  game::Call<void (*)(void*)>(0x1417117b0)(self);
+  FreeHeapOrThread(At<void*>(self, 0x18), 0);
+  if (flags & 1) SizedDelete(self, 0x20);
+  return self;
+}
+
+// 0x1415fa150: Crypto::Sha256 scalar deleting destructor: wipe and free the
+// 0x68-byte context, drop to the HashBase vtable.
+void* Sha256DeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424b32f8;
+  Memset(At<void*>(self, 8), 0, 0x68);
+  At<bool>(self, 0x10) = false;
+  SizedDelete(At<void*>(self, 8), 0x68);
+  At<void*>(self, 8) = nullptr;
+  At<uint64_t>(self, 0) = 0x1424b32a8;
+  if (flags & 1) SizedDelete(self, 0x18);
+  return self;
+}
+
+// 0x14160ec60: UramApiIsSteamCustomerResponse scalar deleting destructor.
+void* IsSteamCustomerResponseDeletingDestructor(uint8_t* self, unsigned flags) {
+  auto* text = reinterpret_cast<soeutil::IString*>(self + 0x50);
+  text->vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(text);
+  game::Call<void (*)(void*)>(0x14160ddd0)(self);
+  if (flags & 1) SizedDelete(self, 0x68);
+  return self;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -298,3 +449,15 @@ REBUILD_FUNCTION(pairNode_Either, 0x140d19e54, PairNodeEither);
 REBUILD_FUNCTION(UramApiCreditCardTypesResponse_DeletingDestructor, 0x14160e980, CreditCardTypesResponseDeletingDestructor);
 REBUILD_FUNCTION(IString_T3416a5_DeletingDestructor, 0x1402ed3e0, PlainIStringDeletingDestructor);
 REBUILD_FUNCTION(Crypto_Sha256_Hash, 0x1415fa1d0, Sha256Hash);
+REBUILD_FUNCTION(MarketingDataSourceFlatFileLoader_Reset, 0x141628220, FlatFileLoaderReset);
+REBUILD_FUNCTION(CrashReport_Logger_Log, 0x1403187a0, CrashReportLoggerLog);
+REBUILD_FUNCTION(CrashReport_BufferLogger_Log, 0x140318740, CrashReportBufferLoggerLog);
+REBUILD_FUNCTION(Deque_T65e4fa_DeletingDestructor, 0x141ebfca0, DequeDeletingDestructor);
+REBUILD_FUNCTION(TRateTracker_Add, 0x140312040, RateTrackerAdd);
+REBUILD_FUNCTION(SpeedTree_CBlockPool_DeletingDestructor, 0x141e5eac0, BlockPoolDeletingDestructor);
+REBUILD_FUNCTION(pairNode_Length, 0x140d1cb70, PairNodeLength);
+REBUILD_FUNCTION(FlatFileDataLoader_Open, 0x141ec3080, FlatFileDataLoaderOpen);
+REBUILD_FUNCTION(Array_Ta2a1d0_DeletingDestructor, 0x1403b5b70, Array64DeletingDestructor);
+REBUILD_FUNCTION(HashMap_Tf9454d_DeletingDestructor, 0x1417108d0, HashMapDeletingDestructor);
+REBUILD_FUNCTION(Crypto_Sha256_DeletingDestructor, 0x1415fa150, Sha256DeletingDestructor);
+REBUILD_FUNCTION(UramApiIsSteamCustomerResponse_DeletingDestructor, 0x14160ec60, IsSteamCustomerResponseDeletingDestructor);
