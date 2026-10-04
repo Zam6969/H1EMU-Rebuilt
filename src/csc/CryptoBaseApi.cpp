@@ -286,6 +286,38 @@ bool CryptoBaseApiSendSecure(uint8_t* api, const uint8_t* data, int length) {
   return sent;
 }
 
+// 0x1415f9180 (CryptoBaseApi slot 22): SendSecureHeavy(data, length) -
+// wrap with the second cipher (+0xD30, cipher type 1) and send reliably.
+// With the session cipher active (+0xD38) the session cipher (+0xD28, slot
+// 4) encodes the original data instead and that result is sent.
+bool CryptoBaseApiSendSecureHeavy(uint8_t* api, const uint8_t* data, int length) {
+  uint8_t* cipher = game::Field<uint8_t*>(api, 0xD30);
+  if (!cipher || !game::Field<void*>(api, 0x2C0)) return false;
+  auto channel = [&] { return game::Field<const char*>(game::Field<uint8_t*>(api, 0x2D0), 0x250); };  // read only on failure
+  using SendRawFn = bool (*)(uint8_t*, const uint8_t*, int, bool);
+  soeutil::ByteArray8k wrapped{reinterpret_cast<void**>(soeutil::kVtByteArray8k), nullptr, 0, 0, {}};
+  bool sent = false;
+  if (WrapPacket(data, length, reinterpret_cast<PacketBytes*>(&wrapped), 1, cipher) != 1) {
+    game::Call<void (*)(const char*, const char*)>(0x1402baba0)(
+        channel(), reinterpret_cast<const char*>(0x1424b3140));  // "CryptoBaseApi::InternalSendSecureHeavy - Failed to encode heavy secure packet."
+  } else if (!game::Field<bool>(api, 0xD38)) {
+    sent = game::Call<SendRawFn>(0x1415f4920)(api, wrapped.size != 0 ? wrapped.data : nullptr, wrapped.size, true);
+  } else {
+    soeutil::ByteArray8k encoded{reinterpret_cast<void**>(soeutil::kVtByteArray8k), nullptr, 0, 0, {}};
+    uint8_t* session = game::Field<uint8_t*>(api, 0xD28);
+    using EncodeFn = int (*)(uint8_t*, const uint8_t*, int, soeutil::ByteArray8k*);
+    if (reinterpret_cast<EncodeFn>((*reinterpret_cast<void***>(session))[0x20 / 8])(session, data, length, &encoded) == 1) {
+      sent = game::Call<SendRawFn>(0x1415f4920)(api, encoded.size != 0 ? encoded.data : nullptr, encoded.size, true);
+    } else {
+      game::Call<void (*)(const char*, const char*)>(0x1402baba0)(
+          channel(), reinterpret_cast<const char*>(0x1424b30f0));  // "...InternalSendSecure - Failed to encode fast secure packet."
+    }
+    soeutil::ByteArrayDestroy(&encoded);
+  }
+  soeutil::ByteArrayDestroy(&wrapped);
+  return sent;
+}
+
 // 0x1415f9330 (CryptoBaseApi, UdpConnectionHandler sub-object at +0x80,
 // slot 1): decrypt / unwrap an incoming packet, then BaseApi::OnRoutePacket.
 // A packet that fails to decode is hex-dumped (first 128 bytes) to the log.
@@ -326,6 +358,7 @@ REBUILD_FUNCTION(PacketUtils_WrapPacket, 0x1415f96b0, WrapPacket);
 REBUILD_FUNCTION(PacketUtils_UnwrapPacket, 0x1415f95d0, UnwrapPacket);
 REBUILD_FUNCTION(CryptoBaseApi_Send, 0x1415f8ec0, CryptoBaseApiSend);
 REBUILD_FUNCTION(CryptoBaseApi_SendSecure, 0x1415f8ff0, CryptoBaseApiSendSecure);
+REBUILD_FUNCTION(CryptoBaseApi_SendSecureHeavy, 0x1415f9180, CryptoBaseApiSendSecureHeavy);
 REBUILD_FUNCTION(CryptoBaseApi_OnRoutePacket, 0x1415f9330, CryptoBaseApiOnRoutePacket);
 REBUILD_FUNCTION(CryptoBaseApi_EncodeSecure, 0x1415f8e70, CryptoBaseApiEncodeSecure);
 
