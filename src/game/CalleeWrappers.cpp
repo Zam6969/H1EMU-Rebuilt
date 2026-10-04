@@ -648,6 +648,244 @@ uint64_t ResetBuffers2050(uint8_t* self) {
   return game::Call<uint64_t (*)(void*)>(0x140556cc0)(self + 0x2090);
 }
 
+
+// 0x141502400: audio manager: if ready (+0x18), run 0x14150bd50 on the
+// game object; true when it returns 1.
+bool AudioRunOnObject(uint8_t* self, void* gameObject) {
+  if (!At<bool>(self, 0x18)) return false;
+  return game::Call<int (*)(void*)>(0x14150bd50)(gameObject) == 1;
+}
+
+// 0x141501840: the audio manager singleton (0x143c76c60), created on first
+// use as a zeroed 0x20-byte block.
+void* AudioManagerInstance() {
+  void*& instance = *reinterpret_cast<void**>(0x143c76c60);
+  if (instance) return instance;
+  auto* created = game::Call<uint8_t* (*)(size_t)>(0x1402fc0f0)(0x20);
+  if (created) {
+    At<uint64_t>(created, 0) = 0;
+    At<uint64_t>(created, 8) = 0;
+    At<uint64_t>(created, 0x10) = 0;
+    At<uint8_t>(created, 0x18) = 0;
+  }
+  instance = created;
+  return created;
+}
+
+// 0x14049c180: accept 0 or values 0x180..0xDAC (+0x3B728 -> +0x4C), apply
+// through 0x140ab6ab0 and flag the change.
+bool SetValue180ToDac(uint8_t* self, int value) {
+  if (value != 0 && static_cast<uint32_t>(value - 0x180) > 0xC2C) return false;
+  At<int>(At<void*>(self, 0x3B728), 0x4C) = value;
+  game::Call<void (*)(void*)>(0x140ab6ab0)(*reinterpret_cast<void**>(0x142b199f0));
+  At<uint8_t>(self, 0x3B730) = 1;
+  return true;
+}
+
+namespace {
+// Variant: destroy the held object for types 3 / 7 / 8 / 9 before
+// overwriting.
+void VariantClearHeld(uint8_t* self) {
+  int type = At<int>(self, 0);
+  if (type == 3 || type == 7 || type == 8 || type == 9) Virtual(self + 8, 0, 0);
+}
+}  // namespace
+
+// 0x14046d940 / 0x14046be30 / 0x14046d800: variant set bool (type 6),
+// pointer (type 4), double (type 2).
+void VariantSetBool(uint8_t* self, uint8_t value) {
+  VariantClearHeld(self);
+  At<uint8_t>(self, 8) = value;
+  At<int>(self, 0) = 6;
+}
+void VariantSetPointer(uint8_t* self, uint64_t value) {
+  VariantClearHeld(self);
+  At<uint64_t>(self, 8) = value;
+  At<int>(self, 0) = 4;
+}
+void VariantSetDouble(uint8_t* self, double value) {
+  VariantClearHeld(self);
+  At<double>(self, 8) = value;
+  At<int>(self, 0) = 2;
+}
+
+// 0x1406297b0: insert the id into the 32-bucket map at +0xB4F0 unless
+// present (0x14061f450).
+bool InsertIfMissing(uint8_t* self, const int* id) {
+  uint8_t* map = self + 0xB4F0;
+  for (uint8_t* node = At<uint8_t*>(map, 0x28 + (*id & 0x1F) * 8); node; node = At<uint8_t*>(node, 0x20))
+    if (At<int>(node, 0x18) == *id) return false;
+  game::Call<void (*)(void*, const int*, const int*)>(0x14061f450)(map, id, id);
+  return true;
+}
+
+// 0x1404cf240: start (timestamp +0x70) or clear the timer with a value.
+void StartTimer6c(uint8_t* self, int value) {
+  if (value == 0) {
+    At<uint8_t>(self, 0x78) = 0;
+    At<int>(self, 0x6C) = 0;
+    return;
+  }
+  At<int64_t>(self, 0x70) = TimeNow();
+  At<uint8_t>(self, 0x78) = 1;
+  At<int>(self, 0x6C) = value;
+}
+
+// 0x14079c110: reset +0x80 (0x1404539a0), copy value +0x10 into it
+// (0x14079b520), then slot 5.
+uint64_t ResetCopyThenSlot5(uint8_t* self, uint8_t* value) {
+  game::Call<void (*)(void*)>(0x1404539a0)(self + 0x80);
+  game::Call<void (*)(void*, void*)>(0x14079b520)(self + 0x80, value + 0x10);
+  return Virtual<uint64_t>(self, 5);
+}
+
+// 0x140631cd0: find the owner (0x14062e380), its entry (a4, a5) and act on
+// it (0x140b3d880).
+uint64_t FindEntryAndApply(void* a, void* b, void* c, int key, int sub) {
+  uint8_t* owner = game::Call<uint8_t* (*)(void*, void*, void*, int)>(0x14062e380)(a, b, c, key);
+  if (!owner) return 0;
+  void* entry = game::Call<void* (*)(void*, int, int)>(0x141762420)(owner + 0xA8, key, sub);
+  if (!entry) return 0;
+  return game::Call<uint64_t (*)(void*, void*)>(0x140b3d880)(owner, entry);
+}
+
+// 0x14049b6a0: stamp the times (+0x18 now, +0x20 secondary clock), and
+// unless paused (+0x14) the deadline (+0x28 = now + +0x2C).
+void StampTimes(uint8_t* self) {
+  int64_t scratch;
+  At<int64_t>(self, 0x18) = *game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&scratch);
+  At<int64_t>(self, 0x20) = *game::Call<int64_t* (*)(int64_t*)>(0x14032fe90)(&scratch);
+  if (At<uint8_t>(self, 0x14)) return;
+  At<int>(self, 0x28) = static_cast<int>(*game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&scratch)) + At<int>(self, 0x2C);
+}
+
+// 0x1414585d0: set the global toggle (0x142aae24a) and apply it to every
+// registered entry (list 0x142aae268, next +0x18).
+void SetGlobalToggle(uint8_t enabled) {
+  *reinterpret_cast<uint8_t*>(0x142aae24a) = enabled;
+  uint8_t flag = enabled;
+  for (uint8_t* entry = *reinterpret_cast<uint8_t**>(0x142aae268); entry; entry = At<uint8_t*>(entry, 0x18)) {
+    if (!flag) {
+      void* target = At<void*>(At<void*>(entry, 0), 0x48);
+      Virtual(target, 7, 0);
+    }
+    At<uint32_t>(entry, 0x14) |= 0x10000000;
+    flag = *reinterpret_cast<uint8_t*>(0x142aae24a);
+  }
+}
+
+// 0x14050dd30: atan2-style result (0x140d55d44) of the transform's +0x20
+// and +0x28 components.
+float TransformAngle(uint8_t* self) {
+  void* transform = Virtual<void*>(self + 0x20, 22);
+  float y = At<float>(Virtual<uint8_t*>(transform, 3), 0x28);
+  float x = At<float>(Virtual<uint8_t*>(transform, 3), 0x20);
+  return game::Call<float (*)(float, float)>(0x140d55d44)(x, y);
+}
+
+// 0x140ab7b20: reload the ini at +0x1D38 from +0x2BF0 and merge +8 in.
+uint64_t ReloadIni1d38(uint8_t* self) {
+  game::Call<void (*)(void*, bool)>(0x1403322c0)(self + 0x1D38, true);
+  game::Call<void (*)(void*, void*)>(0x140334100)(self + 0x1D38, At<void*>(self, 0x2BF0));
+  return game::Call<uint64_t (*)(void*, void*, int)>(0x140335530)(self + 0x1D38, self + 8, 0);
+}
+
+// 0x14047acd0: two slot-21 calls on +0x3D3C0 with constant string pairs.
+uint64_t ApplyStringPairs3d3c0(uint8_t* self) {
+  auto str = [](uint64_t address) { return reinterpret_cast<const char*>(address); };
+  Virtual(At<void*>(self, 0x3D3C0), 21, str(0x142072be4), str(0x142072be0));
+  return Virtual<uint64_t>(At<void*>(self, 0x3D3C0), 21, str(0x142072be8), str(0x142072be4));
+}
+
+// 0x141845390: constructor: base (0x141845160), flag +0x8318, three
+// vtables (+0, +8, +0x48).
+void* Construct14250ce68(uint8_t* self, void* a, void* b, uint8_t flag) {
+  game::Call<void (*)(void*, void*, void*, uint8_t)>(0x141845160)(self, a, b, flag);
+  At<uint8_t>(self, 0x8318) = flag;
+  At<uint64_t>(self, 0) = 0x14250ce68;
+  At<uint64_t>(self, 8) = 0x14250ceb0;
+  At<uint64_t>(self, 0x48) = 0x14250ced8;
+  return self;
+}
+
+// 0x14039c860: copy a packed (31-bit value + flag bit) pair; values
+// below the flag bit go through 0x1402ee1f0.
+uint32_t* CopyPacked31(uint32_t* self, const uint32_t* source) {
+  self[1] = 0;
+  self[0] = 0x80000000u;
+  self[1] = source[1];
+  uint32_t raw = source[0];
+  int32_t value;
+  if (raw >= 0x80000000u)
+    value = static_cast<int32_t>(raw << 1) >> 1;
+  else
+    value = game::Call<int32_t (*)(int32_t)>(0x1402ee1f0)(static_cast<int32_t>(raw << 1) >> 1);
+  self[0] = (self[0] & 0x80000000u) | (static_cast<uint32_t>(value) & 0x7FFFFFFFu);
+  return self;
+}
+
+// 0x14165c630: SoeGems::LoggingHeader destructor.
+void LoggingHeaderDestructor(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x1424c37d8;
+  auto* text = reinterpret_cast<uint8_t*>(self + 8);
+  At<uint64_t>(text, 0) = 0x142049b50;
+  if (At<int>(text, 0x14) > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(At<uint8_t*>(text, 8) - 4), -1) - 1 <= 0) Virtual(text, 2);
+}
+
+// 0x14046d1d0: copy three strings and two settings, mark dirty (+0x50).
+void CopyThreeStrings(uint8_t* self, uint8_t* other) {
+  using AssignFn = void (*)(void*, void*);
+  game::Call<AssignFn>(0x1402bd560)(self, other);
+  game::Call<AssignFn>(0x1402bd560)(self + 0x18, other + 0x18);
+  game::Call<AssignFn>(0x1402bd560)(self + 0x30, other + 0x30);
+  At<int>(self, 0x48) = At<int>(other, 0x48);
+  At<uint8_t>(self, 0x4C) = At<uint8_t>(other, 0x4C);
+  At<uint8_t>(self, 0x50) = 1;
+}
+
+// 0x14039d9f0: constructor (type 0xE3, vtable 0x1420663b0).
+void* Construct1420663b0(uint8_t* self) {
+  At<int>(self, 8) = 0xE3;
+  At<uint64_t>(self, 0) = 0x1420663b0;
+  At<int>(self, 0x10) = 5;
+  At<int>(self, 0x30) = 0;
+  At<uint64_t>(self, 0x20) = 0;
+  At<uint64_t>(self, 0x28) = 0;
+  At<uint64_t>(self, 0x18) = 0x142066390;
+  game::Call<void (*)(void*)>(0x140394720)(self + 0x38);
+  return self;
+}
+
+// 0x140428fc0: look up the id in +0x38860 and return its +0x1D0 value (or
+// the invalid id 0x142b181f8).
+uint64_t* LookupValue1d0(uint8_t* self, uint64_t* out, const int* id) {
+  int key = *id;
+  uint8_t* found = game::Call<uint8_t* (*)(void*, int*)>(0x14071f100)(At<void*>(self, 0x38860), &key);
+  *out = found ? At<uint64_t>(found, 0x1D0) : *reinterpret_cast<uint64_t*>(0x142b181f8);
+  return out;
+}
+
+// 0x14062bbd0: update +0x1F8, slot 17 on +0xAD70 and +0xAD78, then
+// 0x140b8d900(+0xAFA0, +0x2D0).
+uint64_t UpdateViews(uint8_t* self) {
+  game::Call<void (*)(void*)>(0x14062bee0)(self + 0x1F8);
+  Virtual(At<void*>(self, 0xAD70), 17);
+  Virtual(At<void*>(self, 0xAD78), 17);
+  return game::Call<uint64_t (*)(void*, int)>(0x140b8d900)(self + 0xAFA0, At<int>(self, 0x2D0));
+}
+
+// 0x1404685a0: store up to 8 bytes (zero padded) and their count (+8).
+void StoreSmallBytes(uint8_t* self, const uint8_t* source, uint32_t count) {
+  At<uint32_t>(self, 8) = count;
+  if (count >= 8) {
+    At<uint64_t>(self, 0) = *reinterpret_cast<const uint64_t*>(source);
+    return;
+  }
+  int64_t length = static_cast<int32_t>(count);
+  game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(self, source, length);
+  game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + length, 0, 8 - length);
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -732,3 +970,26 @@ REBUILD_FUNCTION(ElementAtGrowA8, 0x1403b4810, ElementAtGrowA8);
 REBUILD_FUNCTION(LookupFrom3920Slot83, 0x14050f340, LookupFrom3920Slot83);
 REBUILD_FUNCTION(Construct_142064398, 0x14039a4e0, Construct142064398);
 REBUILD_FUNCTION(ResetBuffers2050, 0x140558310, ResetBuffers2050);
+REBUILD_FUNCTION(Audio_RunOnObject, 0x141502400, AudioRunOnObject);
+REBUILD_FUNCTION(Audio_ManagerInstance, 0x141501840, AudioManagerInstance);
+REBUILD_FUNCTION(SetValue180ToDac, 0x14049c180, SetValue180ToDac);
+REBUILD_FUNCTION(Variant_SetBool, 0x14046d940, VariantSetBool);
+REBUILD_FUNCTION(Variant_SetPointer, 0x14046be30, VariantSetPointer);
+REBUILD_FUNCTION(Variant_SetDouble, 0x14046d800, VariantSetDouble);
+REBUILD_FUNCTION(InsertIfMissing, 0x1406297b0, InsertIfMissing);
+REBUILD_FUNCTION(StartTimer6c, 0x1404cf240, StartTimer6c);
+REBUILD_FUNCTION(ResetCopyThenSlot5, 0x14079c110, ResetCopyThenSlot5);
+REBUILD_FUNCTION(FindEntryAndApply, 0x140631cd0, FindEntryAndApply);
+REBUILD_FUNCTION(StampTimes, 0x14049b6a0, StampTimes);
+REBUILD_FUNCTION(SetGlobalToggle, 0x1414585d0, SetGlobalToggle);
+REBUILD_FUNCTION(TransformAngle, 0x14050dd30, TransformAngle);
+REBUILD_FUNCTION(ReloadIni1d38, 0x140ab7b20, ReloadIni1d38);
+REBUILD_FUNCTION(ApplyStringPairs3d3c0, 0x14047acd0, ApplyStringPairs3d3c0);
+REBUILD_FUNCTION(Construct_14250ce68, 0x141845390, Construct14250ce68);
+REBUILD_FUNCTION(CopyPacked31, 0x14039c860, CopyPacked31);
+REBUILD_FUNCTION(LoggingHeader_Destructor, 0x14165c630, LoggingHeaderDestructor);
+REBUILD_FUNCTION(CopyThreeStrings, 0x14046d1d0, CopyThreeStrings);
+REBUILD_FUNCTION(Construct_1420663b0, 0x14039d9f0, Construct1420663b0);
+REBUILD_FUNCTION(LookupValue1d0, 0x140428fc0, LookupValue1d0);
+REBUILD_FUNCTION(UpdateViews, 0x14062bbd0, UpdateViews);
+REBUILD_FUNCTION(StoreSmallBytes, 0x1404685a0, StoreSmallBytes);
