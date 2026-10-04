@@ -543,6 +543,121 @@ int64_t ScheduledTaskTimeRemaining(void** self, const int64_t* now) {
   return At<int64_t>(At<void*>(self, 0x30), 0x100) + delay - *now;
 }
 
+// 0x141e5ec00: SpeedTree::CCore scalar deleting destructor: release the
+// file buffer (+0x118), destroy the three 0x2A8-byte LOD entries (+0x160).
+void* SpeedTreeCoreDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a1598;
+  if (At<void*>(self, 0x118)) game::Call<void (*)(void*)>(0x141e57a10)(self + 0x118);
+  game::Call<void (*)(void*, size_t, size_t, void*)>(0x140d10830)(self + 0x160, 0x2A8, 3, reinterpret_cast<void*>(0x141803c20));  // eh vector dtor
+  At<uint64_t>(self, 8) = 0x1425a0f18;
+  if (flags & 1) SizedDelete(self, 0x118C);
+  return self;
+}
+
+// 0x14167fa60: SoeGems::Event scalar deleting destructor (embedded hash
+// list at +0x10 with its bucket member at +0x238).
+void* SoeGemsEventDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424c6ee0;
+  At<uint64_t>(self, 0x10) = 0x1424c6ea8;
+  game::Call<void (*)(void*)>(0x141681a60)(self + 0x10);
+  game::Call<void (*)(void*)>(0x14167f780)(self + 0x238);
+  At<uint64_t>(self, 0x10) = 0x1424c6e70;
+  game::Call<void (*)(void*)>(0x141681a60)(self + 0x10);
+  if (flags & 1) SizedDelete(self, 0x440);
+  return self;
+}
+
+// 0x14160ed20: UramApiPaymentSourceResponse scalar deleting destructor.
+void* PaymentSourceResponseDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0x60) = 0x1424ba000;
+  game::Call<void (*)(void*)>(0x141613810)(self + 0x60);
+  auto* text = reinterpret_cast<soeutil::IString*>(self + 0x48);
+  text->vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(text);
+  game::Call<void (*)(void*)>(0x14160ddd0)(self);
+  if (flags & 1) SizedDelete(self, 0x88);
+  return self;
+}
+
+// 0x141e57ed0: SpeedTree::CFileSystem CompareFileTimes(a, b): 0 same,
+// 1 a older, 2 a newer, 3 either stat failed.
+int SpeedTreeCompareFileTimes(void*, const char* first, const char* second) {
+  struct Stat64i32 {
+    uint8_t head[0x18];
+    int64_t accessTime;
+    int64_t modifyTime;
+    int64_t changeTime;
+  };
+  static_assert(offsetof(Stat64i32, modifyTime) == 0x20 && sizeof(Stat64i32) == 0x30);
+  using StatFn = int (*)(const char*, Stat64i32*);
+  Stat64i32 a, b;
+  int resultA = game::Call<StatFn>(0x140d42078)(first, &a);
+  int resultB = game::Call<StatFn>(0x140d42078)(second, &b);
+  if (resultA != 0 || resultB != 0) return 3;
+  if (a.modifyTime < b.modifyTime) return resultA + 1;
+  return a.modifyTime > b.modifyTime ? 2 : resultB;
+}
+
+// 0x14161d5b0: StoreBundleGroupDefinition scalar deleting destructor.
+void* StoreBundleGroupDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1424bc4f8;
+  At<uint64_t>(self, 0x58) = 0x1424bc4c0;
+  game::Call<void (*)(void*)>(0x140831ba0)(self + 0x58);
+  game::Call<void (*)(void*)>(0x141621640)(self + 0x18);
+  At<uint64_t>(self, 0) = 0x1424bc080;
+  if (flags & 1) {
+    if (flags & 4)
+      game::Call<void (*)(void*, size_t)>(0x1402ec800)(self, 0xC0);
+    else if (*reinterpret_cast<void**>(0x143e09638) != nullptr)
+      game::Call<void (*)(void*, int)>(0x14032f980)(self, 0);
+    else
+      game::Call<void (*)(void*)>(0x1402fc170)(self);
+  }
+  return self;
+}
+
+// 0x1416278a0: MarketingDataUpdater Finish(.., .., success): mark done,
+// record the elapsed milliseconds (+0x36C) and log them.
+void MarketingDataUpdaterFinish(uint8_t* self, void*, void*, bool success) {
+  auto elapsedSinceStart = [&] {
+    int64_t start = At<int64_t>(self, 0x398);
+    int64_t now;
+    int64_t elapsed = *game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&now) - start;
+    return static_cast<int>(elapsed > 0x7FFFFFFF ? 0x7FFFFFFF : elapsed);
+  };
+  At<int>(self, 0x388) = 2;
+  At<bool>(self, 0x3A0) = success;
+  At<int>(self, 0x36C) = elapsedSinceStart();
+  int elapsed = elapsedSinceStart();
+  game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(At<void*>(self, 0xB0), reinterpret_cast<const char*>(0x1424bd700), At<uint8_t>(self, 0x3A0),
+                                                            elapsed);
+}
+
+// 0x141e96940: StoreBundleCategoryMapEntryDefinition ToString. Builds (and
+// drops) an unused empty StringFixed<256> scratch, as the original does.
+const char* CategoryMapEntryToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::IString scratch{reinterpret_cast<void**>(0x142049e08), soeutil::EmptyStringData(), 0, 0};
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1425aa5f8), At<int>(self, 8), At<int>(self, 0xC), At<int>(self, 0x10));
+  const char* text = out->data;
+  scratch.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&scratch);
+  return text;
+}
+
+// 0x141ec3230: DataManagement::FlatFileDataLoader Load(sink, path): open
+// and parse, reporting errors (slot 4) and completion (slot 3) to the sink.
+bool FlatFileDataLoaderLoad(uint8_t* self, void* sink, const char* path) {
+  soeutil::StringAssign(self + 0x70, path);
+  At<uint64_t>(self, 0xD0) = At<uint64_t>(self, 0xF8);
+  bool ok = false;
+  if (game::Call<bool (*)(void*, void*, const char*)>(0x141ec32d0)(self, sink, path))
+    ok = game::Call<bool (*)(void*, void*)>(0x141ec35f0)(self, sink);
+  else
+    Virtual(sink, 4, static_cast<void*>(self), path, reinterpret_cast<const char*>(0x1425ad398));
+  Virtual(sink, 3, static_cast<void*>(self), path, ok);
+  return ok;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -595,3 +710,11 @@ REBUILD_FUNCTION(StoreBundleDefinition_DeletingDestructor, 0x141e96310, StoreBun
 REBUILD_FUNCTION(RefArrayPooled_Free, 0x140340bd0, RefArrayPooledFree);
 REBUILD_FUNCTION(pairNode_GetString, 0x140d1b664, PairNodeGetString);
 REBUILD_FUNCTION(ScheduledTaskNode_TimeRemaining, 0x141679060, ScheduledTaskTimeRemaining);
+REBUILD_FUNCTION(SpeedTree_CCore_DeletingDestructor, 0x141e5ec00, SpeedTreeCoreDeletingDestructor);
+REBUILD_FUNCTION(SoeGems_Event_DeletingDestructor, 0x14167fa60, SoeGemsEventDeletingDestructor);
+REBUILD_FUNCTION(UramApiPaymentSourceResponse_DeletingDestructor, 0x14160ed20, PaymentSourceResponseDeletingDestructor);
+REBUILD_FUNCTION(SpeedTree_CFileSystem_CompareFileTimes, 0x141e57ed0, SpeedTreeCompareFileTimes);
+REBUILD_FUNCTION(StoreBundleGroupDefinition_DeletingDestructor, 0x14161d5b0, StoreBundleGroupDeletingDestructor);
+REBUILD_FUNCTION(MarketingDataUpdater_Finish, 0x1416278a0, MarketingDataUpdaterFinish);
+REBUILD_FUNCTION(StoreBundleCategoryMapEntryDefinition_ToString, 0x141e96940, CategoryMapEntryToString);
+REBUILD_FUNCTION(FlatFileDataLoader_Load, 0x141ec3230, FlatFileDataLoaderLoad);
