@@ -343,3 +343,77 @@ REBUILD_FUNCTION(Array_Tb71391_DeletingDestructor_ebfbf0, 0x141ebfbf0, (Deleting
 REBUILD_FUNCTION(Array_T6695d6_DeletingDestructor_77eb90, 0x14077eb90, (DeletingDestructor<0x14077e0f0, 0x38>));
 REBUILD_FUNCTION(DataManagement__FlatFileLineData_DeletingDestructor_ec2e60, 0x141ec2e60, (DeletingDestructor<0x141710630, 0xc0>));
 REBUILD_FUNCTION(DataManagement__FlatFileDataLoader_DeletingDestructor_ec2e20, 0x141ec2e20, (DeletingDestructor<0x141710540, 0x128>));
+
+namespace rebuild::game_misc {
+// Set the class vtable, run the base/member destructor, sized delete.
+template <uint64_t Vtable, uint64_t Destructor, size_t Size>
+void* VtableDeletingDestructor(void* self, unsigned flags) {
+  *static_cast<uint64_t*>(self) = Vtable;
+  game::Call<void (*)(void*)>(Destructor)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// Set the class vtable, free the pointer field at Offset, drop to the base
+// vtable, sized delete (std locale facets and similar).
+template <uint64_t Vtable, size_t Offset, uint64_t Free, uint64_t BaseVtable, size_t Size>
+void* FieldDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  game::Call<void (*)(void*)>(Free)(*reinterpret_cast<void**>(bytes + Offset));
+  *reinterpret_cast<uint64_t*>(bytes) = BaseVtable;
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+// Generated lists.
+REBUILD_FUNCTION(HashListMap_T6800c7_DeletingDestructor_140306040, 0x140306040, (VtableDeletingDestructor<0x142049bc8, 0x140309670, 0x4028>));
+REBUILD_FUNCTION(List_T5e5512_DeletingDestructor_14030cc00, 0x14030cc00, (VtableDeletingDestructor<0x14204ae30, 0x14030f960, 0x20>));
+REBUILD_FUNCTION(HashMap_Tc1bfb8_DeletingDestructor_14030ca30, 0x14030ca30, (VtableDeletingDestructor<0x14204aec0, 0x14030f8e0, 0x1018>));
+REBUILD_FUNCTION(Hash_Tc1c96b_DeletingDestructor_14030c9e0, 0x14030c9e0, (VtableDeletingDestructor<0x14204aec0, 0x14030f8e0, 0x1018>));
+REBUILD_FUNCTION(List_T009099_DeletingDestructor_1403158e0, 0x1403158e0, (VtableDeletingDestructor<0x14204bac8, 0x140316ed0, 0x20>));
+REBUILD_FUNCTION(List_T4aea37_DeletingDestructor_1403319f0, 0x1403319f0, (VtableDeletingDestructor<0x14204f510, 0x140334af0, 0x20>));
+REBUILD_FUNCTION(List_T847fe1_DeletingDestructor_140331b20, 0x140331b20, (VtableDeletingDestructor<0x14204f560, 0x140334b80, 0x20>));
+REBUILD_FUNCTION(HashListMap_T9d73be_DeletingDestructor_14034a2e0, 0x14034a2e0, (VtableDeletingDestructor<0x142052430, 0x14034aaa0, 0x2028>));
+REBUILD_FUNCTION(HashList_T1bcb1f_DeletingDestructor_14034a290, 0x14034a290, (VtableDeletingDestructor<0x142052430, 0x14034aaa0, 0x2028>));
+REBUILD_FUNCTION(List_T02c89f_DeletingDestructor_14034ec10, 0x14034ec10, (VtableDeletingDestructor<0x142052f98, 0x140351290, 0x20>));
+REBUILD_FUNCTION(List_Tdc1615_DeletingDestructor_1403beb90, 0x1403beb90, (VtableDeletingDestructor<0x1424b0380, 0x140453600, 0x20>));
+REBUILD_FUNCTION(List_T8fae42_DeletingDestructor_14160e790, 0x14160e790, (VtableDeletingDestructor<0x1424b9f20, 0x141613a90, 0x20>));
+REBUILD_FUNCTION(List_T893ed4_DeletingDestructor_14160e6f0, 0x14160e6f0, (VtableDeletingDestructor<0x1424b9f48, 0x141613980, 0x20>));
+REBUILD_FUNCTION(List_T375663_DeletingDestructor_14160e740, 0x14160e740, (VtableDeletingDestructor<0x1424b9f70, 0x141613a00, 0x20>));
+REBUILD_FUNCTION(List_Tece4be_DeletingDestructor_14160e650, 0x14160e650, (VtableDeletingDestructor<0x1424ba000, 0x141613810, 0x20>));
+REBUILD_FUNCTION(List_T0abc9f_DeletingDestructor_14160e7e0, 0x14160e7e0, (VtableDeletingDestructor<0x1424ba230, 0x141613b40, 0x20>));
+REBUILD_FUNCTION(List_T1ea3e7_DeletingDestructor_14160e6a0, 0x14160e6a0, (VtableDeletingDestructor<0x1424ba340, 0x141613890, 0x20>));
+REBUILD_FUNCTION(List_T21c4ac_DeletingDestructor_14160e600, 0x14160e600, (VtableDeletingDestructor<0x1424ba4a8, 0x141613790, 0x20>));
+REBUILD_FUNCTION(List_T65a21e_DeletingDestructor_141615c10, 0x141615c10, (VtableDeletingDestructor<0x1424bb940, 0x141618eb0, 0x20>));
+REBUILD_FUNCTION(List_T172ea8_DeletingDestructor_14161a540, 0x14161a540, (VtableDeletingDestructor<0x1424bc110, 0x140832150, 0x20>));
+REBUILD_FUNCTION(List_Tf73bdd_DeletingDestructor_14161a600, 0x14161a600, (VtableDeletingDestructor<0x1424bc160, 0x1408321d0, 0x20>));
+REBUILD_FUNCTION(HashListMap_T6529a4_DeletingDestructor_14161d500, 0x14161d500, (VtableDeletingDestructor<0x1424bc4c0, 0x140831ba0, 0x68>));
+REBUILD_FUNCTION(HashListMap_T05c9dc_DeletingDestructor_140628600, 0x140628600, (VtableDeletingDestructor<0x1424bebd8, 0x140636020, 0x68>));
+REBUILD_FUNCTION(List_T4c9be1_DeletingDestructor_1406288a0, 0x1406288a0, (VtableDeletingDestructor<0x1424bec10, 0x140636390, 0x20>));
+REBUILD_FUNCTION(List_T57d626_DeletingDestructor_1406287e0, 0x1406287e0, (VtableDeletingDestructor<0x1424bec60, 0x140636300, 0x20>));
+REBUILD_FUNCTION(CLZInWindow_DeletingDestructor_141642010, 0x141642010, (VtableDeletingDestructor<0x1424c08e8, 0x14164a590, 0x40>));
+REBUILD_FUNCTION(IMatchFinder_DeletingDestructor_141642360, 0x141642360, (VtableDeletingDestructor<0x1424c08e8, 0x14164a590, 0x48>));
+REBUILD_FUNCTION(HashListMap_T6ec29d_DeletingDestructor_14164d310, 0x14164d310, (VtableDeletingDestructor<0x1424c14c8, 0x1416558d0, 0x428>));
+REBUILD_FUNCTION(HashListMap_T7d2c72_DeletingDestructor_14164d360, 0x14164d360, (VtableDeletingDestructor<0x1424c1500, 0x141655970, 0x428>));
+REBUILD_FUNCTION(HashMap_Tcb7f7a_DeletingDestructor_14164d520, 0x14164d520, (VtableDeletingDestructor<0x1424c1538, 0x141655aa0, 0x418>));
+REBUILD_FUNCTION(HashMap_T9e1737_DeletingDestructor_14164d570, 0x14164d570, (VtableDeletingDestructor<0x1424c1608, 0x141655b20, 0x8018>));
+REBUILD_FUNCTION(HashMap_Tc45ed6_DeletingDestructor_14165a520, 0x14165a520, (VtableDeletingDestructor<0x1424c1d98, 0x14165a8d0, 0x418>));
+REBUILD_FUNCTION(HashMap_T3f5c54_DeletingDestructor_14165a1f0, 0x14165a1f0, (VtableDeletingDestructor<0x1424c1db8, 0x14165a7f0, 0x418>));
+REBUILD_FUNCTION(Map_Tc52974_DeletingDestructor_14165f2b0, 0x14165f2b0, (VtableDeletingDestructor<0x1424c4220, 0x1416659e0, 0x18>));
+REBUILD_FUNCTION(HashMap_T3478d2_DeletingDestructor_14166dae0, 0x14166dae0, (VtableDeletingDestructor<0x1424c5420, 0x1416708f0, 0x10018>));
+REBUILD_FUNCTION(HashMap_T105bd5_DeletingDestructor_14166da90, 0x14166da90, (VtableDeletingDestructor<0x1424c5440, 0x141670830, 0x10018>));
+REBUILD_FUNCTION(HashListMap_Tf44332_DeletingDestructor_141672260, 0x141672260, (VtableDeletingDestructor<0x1424c5578, 0x141672e30, 0x68>));
+REBUILD_FUNCTION(HashMap_Tbea0a3_DeletingDestructor_141674780, 0x141674780, (VtableDeletingDestructor<0x1424c5ba8, 0x1416774e0, 0x2018>));
+REBUILD_FUNCTION(HashMap_Tf4ddbf_DeletingDestructor_141674730, 0x141674730, (VtableDeletingDestructor<0x1424c5bc8, 0x141677460, 0x2018>));
+REBUILD_FUNCTION(HashListMap_T9b0c64_DeletingDestructor_14167f950, 0x14167f950, (VtableDeletingDestructor<0x1424c6e70, 0x141681a60, 0x228>));
+REBUILD_FUNCTION(HashListMap_T86526f_DeletingDestructor_14167fa10, 0x14167fa10, (VtableDeletingDestructor<0x1424c6f10, 0x141681b00, 0x348>));
+REBUILD_FUNCTION(Map_Ta14c65_DeletingDestructor_141e93dd0, 0x141e93dd0, (VtableDeletingDestructor<0x1425a7b78, 0x141e94e80, 0x18>));
+REBUILD_FUNCTION(List_T405eb1_DeletingDestructor_141eb6140, 0x141eb6140, (VtableDeletingDestructor<0x1425ab878, 0x141eb9e70, 0x20>));
+REBUILD_FUNCTION(time_put_T5f78c5_DeletingDestructor_141914220, 0x141914220, (FieldDeletingDestructor<0x142525cb8, 0x10, 0x140d42428, 0x142520e38, 0x18>));
+REBUILD_FUNCTION(collate_T7306a0_DeletingDestructor_141913bf8, 0x141913bf8, (FieldDeletingDestructor<0x142525e00, 0x18, 0x140d42428, 0x142520e38, 0x20>));
+REBUILD_FUNCTION(collate_T4a899a_DeletingDestructor_141913bac, 0x141913bac, (FieldDeletingDestructor<0x142526180, 0x18, 0x140d42428, 0x142520e38, 0x20>));
+REBUILD_FUNCTION(time_put_T8348f0_DeletingDestructor_1419141d4, 0x1419141d4, (FieldDeletingDestructor<0x1425263e0, 0x10, 0x140d42428, 0x142520e38, 0x18>));
+REBUILD_FUNCTION(collate_Ta29307_DeletingDestructor_14192ccb0, 0x14192ccb0, (FieldDeletingDestructor<0x142526bc0, 0x18, 0x140d42428, 0x142520e38, 0x20>));
+REBUILD_FUNCTION(time_put_Td2fe53_DeletingDestructor_14192ceb0, 0x14192ceb0, (FieldDeletingDestructor<0x142526e20, 0x10, 0x140d42428, 0x142520e38, 0x18>));
+REBUILD_FUNCTION(CaptureCommon__Buffer_DeletingDestructor_14194ede0, 0x14194ede0, (FieldDeletingDestructor<0x14252d738, 0x18, 0x1402fc170, 0x14252d690, 0x30>));
