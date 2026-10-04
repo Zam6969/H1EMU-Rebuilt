@@ -1,6 +1,8 @@
 // TcpLibrary::TcpConnectionPlatformDriver: the per-connection Winsock side
 // (0x70 bytes, built inline by TcpPlatformDriver Accept / Connect).
 #include <winsock2.h>
+#include <windows.h>
+#include <intrin.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +10,7 @@
 
 #include "core/game.h"
 #include "core/hook.h"
+#include "soeutil/String.h"
 
 namespace rebuild::udp {
 namespace {
@@ -194,6 +197,167 @@ void TcpConnectionPlatformDriverGiveTime(TcpConnectionPlatformDriver* self) {
   }
 }
 
+namespace {
+// SSPI buffer descriptors as the TLS code builds them on the stack.
+struct SecBuffer {
+  unsigned long size;
+  unsigned long type;
+  void* data;
+};
+struct SecBufferDesc {
+  unsigned long version;
+  unsigned long count;
+  SecBuffer* buffers;
+};
+static_assert(sizeof(SecBuffer) == 0x10 && sizeof(SecBufferDesc) == 0x10);
+
+uint8_t* SslFunctions(TcpConnectionPlatformDriver* self) {
+  return *reinterpret_cast<uint8_t**>(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self->platformDriver) + 0x10) + 0xE0);
+}
+int64_t TimeNow() {
+  int64_t now;
+  return *game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&now);
+}
+using LogFn = void (*)(const char*, const char*, ...);
+const char* SslErrorLog() { return *reinterpret_cast<const char**>(0x142ad58d8); }  // "TcpLibrarySslErrors.log"
+const char* SslLog() { return *reinterpret_cast<const char**>(0x142ad58e0); }       // "TcpLibrarySsl.log"
+
+// Logs "<format>%s" with the SSPI status text (0x141ebdc50).
+void LogSslStatus(uint64_t format, int status) {
+  soeutil::StringFixed<256> text;
+  soeutil::InitFixed(text, reinterpret_cast<void**>(0x142049e08));
+  const char* description = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(status, &text);
+  game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(format), description);
+  text.vtable = reinterpret_cast<void**>(0x142049de8);
+  soeutil::StringRelease(&text);
+}
+}  // namespace
+
+// 0x141ebf360 (slot 8): TerminateSslConnection - apply SCHANNEL_SHUTDOWN to
+// the context, build the close_notify alert with InitializeSecurityContextW
+// and send it.
+void TcpConnectionPlatformDriverTerminateSsl(TcpConnectionPlatformDriver* self) {
+  int64_t started = TimeNow();
+  unsigned long shutdown = 1;  // SCHANNEL_SHUTDOWN
+  SecBuffer buffer{4, 2, &shutdown};  // SECBUFFER_TOKEN
+  SecBufferDesc description{0, 1, &buffer};
+  void* context = reinterpret_cast<uint8_t*>(self) + 0x38;
+  using ApplyFn = int (*)(void*, SecBufferDesc*);
+  int status = (*reinterpret_cast<ApplyFn*>(SslFunctions(self) + 0x50))(context, &description);
+  if (status < 0) {
+    LogSslStatus(0x1425ac578, status);  // "Error terminating session ApplyControlToken - %s"
+    return;
+  }
+  buffer = SecBuffer{0, 2, nullptr};
+  description = SecBufferDesc{0, 1, &buffer};
+  uint8_t* driverHandle = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self->platformDriver) + 0x10);
+  unsigned long attributes;
+  int64_t expiry;
+  using InitContextFn = int (*)(void*, void*, const wchar_t*, unsigned long, unsigned long, unsigned long, void*, unsigned long, void*,
+                                SecBufferDesc*, unsigned long*, int64_t*);
+  status = (*reinterpret_cast<InitContextFn*>(*reinterpret_cast<uint8_t**>(driverHandle + 0xE0) + 0x30))(
+      driverHandle + 0xD0, context, nullptr, 0xC11C, 0, 0x10, nullptr, 0, context, &description, &attributes, &expiry);
+  if (status < 0) {
+    LogSslStatus(0x1425ac5d8, status);  // "Error terminating session InitSecurityContext - %s"
+  } else if (void* alert = buffer.data; alert && buffer.size) {
+    int sent = send(self->socket, static_cast<const char*>(alert), static_cast<int>(buffer.size), 0);
+    game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac5b0), sent < 0 ? 0 : sent);  // "Sending close notify (%d bytes)."
+    (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x80))(alert);  // FreeContextBuffer
+  }
+  int64_t delta = TimeNow() - started;
+  int elapsed = delta > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(delta);
+  if (elapsed > 1000)
+    game::Call<LogFn>(0x1402ef740)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac610), elapsed);  // "Warning! TerminateSslConnection took %d ms."
+}
+
+namespace {
+// SoeUtil::WideStringFixed<256>: {vtable, data, length, capacity, inline}.
+struct WideStringFixed256 {
+  void** vtable;
+  wchar_t* data;
+  int length;
+  int capacity;
+  uint8_t inlineBuffer[256 * 2 + 4];
+};
+static_assert(offsetof(WideStringFixed256, inlineBuffer) == 0x18);
+
+// Inline "make the buffer uniquely ours" step the game emits before handing
+// the wide string to SSPI.
+void MakeWideWritable(WideStringFixed256& text) {
+  int needed = text.length + 1;
+  if (needed <= text.capacity && !(text.capacity > 0 && reinterpret_cast<int*>(text.data)[-1] > 1)) return;
+  int allocated = 0;
+  bool isHeap = false;
+  using AllocFn = int* (*)(WideStringFixed256*, int, int*, bool*);
+  int* block = reinterpret_cast<AllocFn>(text.vtable[1])(&text, needed * 2 + 4, &allocated, &isHeap);
+  if (block) _InterlockedExchange(reinterpret_cast<volatile long*>(block), isHeap ? 1 : 0);
+  auto* copy = reinterpret_cast<wchar_t*>(block + 1);
+  int length = text.length;
+  std::memcpy(copy, text.data, static_cast<size_t>(length + 1) * 2);
+  if (text.capacity > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(text.data) - 1, -1) - 1 <= 0)
+    reinterpret_cast<void (*)(WideStringFixed256*)>(text.vtable[2])(&text);
+  text.data = copy;
+  text.capacity = static_cast<int>((static_cast<int64_t>(allocated) - 4) >> 1);
+  text.length = length;
+}
+}  // namespace
+
+// 0x141ebefe0 (slot 6): StartSslClientHandshake - first
+// InitializeSecurityContextW call for the server name, send the ClientHello
+// and switch to handshake state 1 with a 64 KB receive buffer (LocalAlloc).
+bool TcpConnectionPlatformDriverStartSslHandshake(TcpConnectionPlatformDriver* self) {
+  int64_t started = TimeNow();
+  self->timeout = static_cast<uint64_t>(TimeNow());
+  SecBuffer token{0, 2, nullptr};
+  SecBufferDesc output{0, 1, &token};
+  WideStringFixed256 serverName{reinterpret_cast<void**>(0x14204f158), reinterpret_cast<wchar_t*>(0x142ae85c8), 0, 0, {}};
+  void* name = *reinterpret_cast<void**>(*reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(self) + 0x30) + 8);
+  game::Call<void (*)(void*, WideStringFixed256*)>(0x140339e50)(name, &serverName);  // to wide
+  MakeWideWritable(serverName);
+  uint8_t* driverHandle = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self->platformDriver) + 0x10);
+  void* context = reinterpret_cast<uint8_t*>(self) + 0x38;
+  unsigned long attributes;
+  int64_t expiry;
+  using InitContextFn = int (*)(void*, void*, const wchar_t*, unsigned long, unsigned long, unsigned long, void*, unsigned long, void*,
+                                SecBufferDesc*, unsigned long*, int64_t*);
+  int status = (*reinterpret_cast<InitContextFn*>(*reinterpret_cast<uint8_t**>(driverHandle + 0xE0) + 0x30))(
+      driverHandle + 0xD0, nullptr, serverName.data, 0xC11C, 0, 0x10, nullptr, 0, context, &output, &attributes, &expiry);
+  bool ok;
+  if (status != 0x90312) {  // SEC_I_CONTINUE_NEEDED
+    game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac300), status);  // "InitializeSecurityContext failed - %d"
+    ok = false;
+  } else {
+    ok = true;
+    if (token.size && token.data) {
+      int sent;
+      while ((sent = send(self->socket, static_cast<const char*>(token.data), static_cast<int>(token.size), 0)) == SOCKET_ERROR &&
+             WSAGetLastError() == WSAEWOULDBLOCK)
+        game::Call<void (*)(int)>(0x14032ec60)(1);  // sleep 1 ms
+      if (sent == SOCKET_ERROR || sent == 0) {
+        game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac328),
+                                       WSAGetLastError());  // "Socket error %d sending data to server."
+        (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x48))(context);  // DeleteSecurityContext
+        ok = false;
+      }
+      (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x80))(token.data);  // FreeContextBuffer
+      token.data = nullptr;
+    }
+    if (ok) {
+      *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(self) + 0x50) = LocalAlloc(0, 0x10000);
+      self->sslState = 1;
+      *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(self) + 0x5C) = 0x90312;
+    }
+    int64_t delta = TimeNow() - started;
+    int elapsed = delta > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(delta);
+    if (elapsed > 1000)
+      game::Call<LogFn>(0x1402ef740)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac350), elapsed);  // "Warning! StartSslClientHandshake took %d ms."
+  }
+  serverName.vtable = reinterpret_cast<void**>(0x14204f138);
+  if (serverName.capacity > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(serverName.data) - 1, -1) - 1 <= 0)
+    reinterpret_cast<void (*)(WideStringFixed256*)>(serverName.vtable[2])(&serverName);
+  return ok;
+}
+
 }  // namespace rebuild::udp
 
 using namespace rebuild::udp;
@@ -205,3 +369,5 @@ REBUILD_FUNCTION(TcpConnectionPlatformDriver_Send, 0x141ebeaa0, TcpConnectionPla
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_IsSecure, 0x141ebe8e0, TcpConnectionPlatformDriverIsSecure);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_GetLocalPort, 0x141ebdab0, TcpConnectionPlatformDriverGetLocalPort);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_GiveTime, 0x141ebdf20, TcpConnectionPlatformDriverGiveTime);
+REBUILD_FUNCTION(TcpConnectionPlatformDriver_TerminateSsl, 0x141ebf360, TcpConnectionPlatformDriverTerminateSsl);
+REBUILD_FUNCTION(TcpConnectionPlatformDriver_StartSslHandshake, 0x141ebefe0, TcpConnectionPlatformDriverStartSslHandshake);
