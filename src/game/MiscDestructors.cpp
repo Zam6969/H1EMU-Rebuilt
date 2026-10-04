@@ -147,3 +147,52 @@ void InputThreadRun(uint8_t* self) {
 }  // namespace rebuild::game_misc
 
 REBUILD_FUNCTION(GameCore_InputThread_Run, 0x140351370, InputThreadRun);
+
+namespace rebuild::game_misc {
+// Thread subclasses: reset the vtable, run ~Thread (0x1403358a0), sized delete.
+template <uint64_t Vtable, size_t Size>
+void* ThreadDeletingDestructor(void* self, unsigned flags) {
+  *static_cast<uint64_t*>(self) = Vtable;
+  game::Call<void (*)(void*)>(0x1403358a0)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+
+// 0x1403be2c0: IStringNoShare deleting destructor (plain IString release).
+void* IStringNoShareDeletingDestructor(soeutil::IString* self, unsigned flags) {
+  self->vtable = soeutil::IStringVtable();
+  soeutil::StringRelease(self);
+  if (flags & 1) SizedDelete(self, 0x18);
+  return self;
+}
+
+// 0x14166a5a0 (SoeUtil::Internal::JobQueueWorkerThread slot 2): register
+// with the queue (+0xC0), then run jobs until asked to stop: hold a shared
+// reference, stamp the worker id (+0xC8 -> job +0x70), Execute (vfunc 0x20),
+// Finish (vfunc 0x10), report completion, release.
+void JobQueueWorkerRun(uint8_t* self) {
+  void* queue = *reinterpret_cast<void**>(self + 0xC0);
+  game::Call<void (*)(void*, uint8_t*)>(0x141669cd0)(queue, self);
+  while (!game::Call<bool (*)(void*)>(0x140335aa0)(self)) {
+    auto* job = game::Call<uint8_t* (*)(void*)>(0x14166aa90)(*reinterpret_cast<void**>(self + 0xC0));
+    if (!job) continue;
+    auto* counts = *reinterpret_cast<volatile long**>(job + 8);
+    _InterlockedIncrement(&counts[1]);
+    _InterlockedIncrement(&counts[0]);
+    *reinterpret_cast<int*>(job + 0x70) = *reinterpret_cast<int*>(self + 0xC8);
+    (*reinterpret_cast<void (***)(uint8_t*)>(job))[0x20 / 8](job);
+    (*reinterpret_cast<void (***)(uint8_t*)>(job))[0x10 / 8](job);
+    game::Call<void (*)(void*, uint8_t*)>(0x141669a70)(*reinterpret_cast<void**>(self + 0xC0), job);
+    counts = *reinterpret_cast<volatile long**>(job + 8);
+    bool lastStrong = _InterlockedDecrement(&counts[0]) == 0;
+    if (_InterlockedExchangeAdd(&counts[1], -1) == 1 && counts) SizedDelete(const_cast<long*>(counts), 0x10);
+    if (lastStrong) (*reinterpret_cast<void (***)(uint8_t*)>(job))[1](job);
+  }
+  game::Call<void (*)(void*, uint8_t*)>(0x141669d50)(*reinterpret_cast<void**>(self + 0xC0), self);
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(JobQueueWorkerThread_DeletingDestructor, 0x141668d30, (ThreadDeletingDestructor<0x1424c4a28, 0xd0>));
+REBUILD_FUNCTION(TinyHttp_HttpManagerThread_DeletingDestructor, 0x14167ab40, (ThreadDeletingDestructor<0x1424c62e0, 0xc0>));
+REBUILD_FUNCTION(IStringNoShare_DeletingDestructor, 0x1403be2c0, IStringNoShareDeletingDestructor);
+REBUILD_FUNCTION(JobQueueWorkerThread_Run, 0x14166a5a0, JobQueueWorkerRun);
