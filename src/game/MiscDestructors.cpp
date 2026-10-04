@@ -1047,3 +1047,4 @@ REBUILD_FUNCTION(collate_T7306a0_Compare_141921960, 0x141921960, (CollateCompare
 REBUILD_FUNCTION(collate_Ta29307_Compare_14192fcdc, 0x14192fcdc, (CollateCompare<0x141932918>));
 REBUILD_FUNCTION(Array_T968ad7_Reallocate_14194ee90, 0x14194ee90, (ArrayReallocate<8, 0x143c46658>));
 REBUILD_FUNCTION(Array_T095a01_Reallocate_1403cb1a0, 0x1403cb1a0, (ArrayReallocate<24, 0x143c46658, 8>));
+REBUILD_FUNCTION(Array_T8ff76d_Reallocate_14030d0d0, 0x14030d0d0, (ArrayReallocate<1, 0x143c46658, 1>));

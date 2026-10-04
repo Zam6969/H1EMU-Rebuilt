@@ -860,6 +860,104 @@ bool PrngSeed(uint8_t* self, uint8_t* seed) {
   return ok;
 }
 
+// 0x141e5eb30: SpeedTree CMap scalar deleting destructor: free the tree
+// from the root (+8, an offset into the block pool at +0x20), push the root
+// slot onto the free list (+0x28 / +0x38), then tear down the pool.
+void* SpeedTreeMapDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a1588;
+  if (At<uint8_t*>(self, 8)) {
+    game::Call<void (*)(void*, void*)>(0x141e5f160)(At<uint8_t*>(self, 8) + At<uint64_t>(self, 0x20), self);
+    uint8_t* root = At<uint8_t*>(self, 8) ? At<uint8_t*>(self, 8) + At<uint64_t>(self, 0x20) : nullptr;
+    At<uint64_t>(root, 0) = 0x1425a0f18;
+    At<uint64_t*>(self, 0x28)[At<uint64_t>(self, 0x38)] = At<uint64_t>(self, 8);
+    ++At<uint64_t>(self, 0x38);
+    At<uint64_t>(self, 8) = 0;
+  }
+  At<uint64_t>(self, 0x10) = 0;
+  At<uint64_t>(self, 0x18) = 0x1425a1578;
+  game::Call<void (*)(void*)>(0x1402fc170)(At<void*>(self, 0x20));
+  game::Call<void (*)(void*)>(0x1402fc170)(At<void*>(self, 0x28));
+  for (size_t offset = 0x20; offset <= 0x38; offset += 8) At<uint64_t>(self, offset) = 0;
+  if (flags & 1) SizedDelete(self, 0x50);
+  return self;
+}
+
+// 0x1418071c0: SpeedTree CArray (custom-allocated) scalar deleting
+// destructor: return the block (header at data - 8) to the SpeedTree
+// allocator, updating the global byte counter.
+void* SpeedTreeAllocatedArrayDeletingDestructor(uint8_t* self, unsigned flags) {
+  At<uint64_t>(self, 0) = 0x1425a1ff8;
+  if (At<bool>(self, 0x28)) {
+    At<uint64_t>(self, 0x10) = 0;
+    At<uint64_t>(self, 0x18) = 0;
+    At<void*>(self, 8) = nullptr;
+    At<bool>(self, 0x28) = false;
+  }
+  if (uint8_t* data = At<uint8_t*>(self, 8)) {
+    if (uint8_t* header = data - 8) {
+      int64_t* allocated = game::Call<int64_t* (*)()>(0x141e58110)();
+      *allocated += -8 - At<int64_t>(header, 0);
+      if (*game::Call<void** (*)()>(0x141e58100)())
+        Virtual(*game::Call<void** (*)()>(0x141e58100)(), 2, static_cast<void*>(header));
+      else
+        game::Call<void (*)(void*)>(0x140d42428)(header);
+    }
+  }
+  At<void*>(self, 8) = nullptr;
+  At<uint64_t>(self, 0x18) = 0;
+  At<uint64_t>(self, 0x10) = 0;
+  if (flags & 1) SizedDelete(self, 0x2C);
+  return self;
+}
+
+// 0x14034f0c0: GameClientInputManager PumpMessages: unless disabled
+// (+0x8010), drain the thread's message queue; keyboard and left-button
+// messages, and anything the UI hook (0x140cbc182) consumed, also go to
+// the input handler (+0x8210, slot 1). Win32 calls go through the IAT.
+void InputManagerPumpMessages(uint8_t* self) {
+  if (At<bool>(self, 0x8010)) return;
+  struct Message {
+    void* window;
+    uint32_t message;
+    uint64_t wParam;
+    int64_t lParam;
+    uint8_t rest[0x10];
+  };
+  static_assert(offsetof(Message, message) == 8 && offsetof(Message, lParam) == 0x18);
+  using PeekFn = int(__stdcall*)(Message*, void*, unsigned, unsigned, unsigned);
+  using MessageFn = int64_t(__stdcall*)(Message*);
+  Message message;
+  while ((*reinterpret_cast<PeekFn*>(0x1440a04e8))(&message, nullptr, 0, 0, 1)) {
+    bool consumed = game::Call<int (*)(void*, uint32_t, uint64_t, int64_t)>(0x140cbc182)(nullptr, message.message, message.wParam, message.lParam) != 0;
+    uint32_t id = message.message;
+    if (id - 0x100 <= 1 || consumed || id - 0x201 <= 1) {
+      if (void* handler = At<void*>(self, 0x8210)) Virtual(handler, 1, id, message.wParam, message.lParam, true);
+    }
+    (*reinterpret_cast<MessageFn*>(0x1440a04d0))(&message);  // TranslateMessage
+    (*reinterpret_cast<MessageFn*>(0x1440a04d8))(&message);  // DispatchMessage
+  }
+}
+
+// 0x14163fdd0: Login::GameServerData Assign(other, flagMask): copy the
+// masked flag bits (+0x11C8) and the server's names / ids / addresses.
+uint8_t* GameServerDataAssign(uint8_t* self, uint8_t* other, uint8_t mask) {
+  auto copyString = [&](size_t offset) {
+    soeutil::StringAssignString(reinterpret_cast<soeutil::IString*>(self + offset), reinterpret_cast<soeutil::IString*>(other + offset));
+  };
+  At<uint8_t>(self, 0x11C8) = (At<uint8_t>(other, 0x11C8) & mask) | (At<uint8_t>(self, 0x11C8) & static_cast<uint8_t>(~mask));
+  copyString(0x18);
+  At<int>(self, 0x78) = At<int>(other, 0x78);
+  copyString(0x80);
+  At<int>(self, 0x1A0) = At<int>(other, 0x1A0);
+  At<int>(self, 0x1A4) = At<int>(other, 0x1A4);
+  copyString(0x1A8);
+  At<int>(self, 0x11CC) = At<int>(other, 0x11CC);
+  copyString(0x11D0);
+  copyString(0x1A8);
+  copyString(0x11E8);
+  return self;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -930,3 +1028,7 @@ REBUILD_FUNCTION(GameClientInputManager_ShutdownDirectInput, 0x140351480, InputM
 REBUILD_FUNCTION(SpeedTree_CArray88_DeletingDestructor, 0x141807d50, SpeedTreeArray88DeletingDestructor);
 REBUILD_FUNCTION(SpeedTree_CArray_VectorDeletingDestructor, 0x1418065b0, SpeedTreeArrayVectorDeletingDestructor);
 REBUILD_FUNCTION(Crypto_Prng_Seed, 0x141603930, PrngSeed);
+REBUILD_FUNCTION(SpeedTree_CMap_DeletingDestructor, 0x141e5eb30, SpeedTreeMapDeletingDestructor);
+REBUILD_FUNCTION(SpeedTree_CArrayAllocated_DeletingDestructor, 0x1418071c0, SpeedTreeAllocatedArrayDeletingDestructor);
+REBUILD_FUNCTION(GameClientInputManager_PumpMessages, 0x14034f0c0, InputManagerPumpMessages);
+REBUILD_FUNCTION(Login_GameServerData_Assign, 0x14163fdd0, GameServerDataAssign);
