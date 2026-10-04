@@ -525,6 +525,129 @@ bool TcpConnectionPlatformDriverDecryptReceived(TcpConnectionPlatformDriver* sel
   return ok;
 }
 
+// 0x141ebce40 (slot 7): DoSslClientHandshake - feed server handshake bytes
+// (64 KB LocalAlloc buffer at +0x50) to InitializeSecurityContextW until it
+// completes (state 2), sending each output token; keeps SECBUFFER_EXTRA bytes
+// for the next round or as bundled application data. Status lives at +0x5C.
+bool TcpConnectionPlatformDriverDoSslHandshake(TcpConnectionPlatformDriver* self) {
+  constexpr int kContinue = 0x90312, kIncomplete = static_cast<int>(0x80090318), kIncompleteCredentials = 0x90320;
+  constexpr int kFailed = static_cast<int>(0x80090304);  // SEC_E_INTERNAL_ERROR
+  int64_t started = TimeNow();
+  auto* bytes = reinterpret_cast<uint8_t*>(self);
+  auto& status = *reinterpret_cast<int*>(bytes + 0x5C);
+  auto& receiveBuffer = *reinterpret_cast<uint8_t**>(bytes + 0x50);
+  auto& pending = *reinterpret_cast<uint8_t**>(bytes + 0x48);
+  void* context = bytes + 0x38;
+  if (self->timeout == *reinterpret_cast<uint64_t*>(0x143e08020)) self->timeout = static_cast<uint64_t>(TimeNow());
+  bool haveRead = self->flag68;  // the first round may use what is already buffered
+  unsigned received = 0;
+  auto logStatus = [&](uint64_t format, int code) {
+    soeutil::StringFixed<256> text;
+    soeutil::InitFixed(text, reinterpret_cast<void**>(0x142049e08));
+    const char* description = game::Call<const char* (*)(int, soeutil::IString*)>(0x141ebdc50)(code, &text);
+    game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(format), description);
+    text.vtable = reinterpret_cast<void**>(0x142049de8);
+    soeutil::StringRelease(&text);
+  };
+  for (;;) {
+    if (status != kContinue && status != kIncomplete && status != kIncompleteCredentials) break;
+    if (received == 0 || status == kIncomplete) {
+      if (!haveRead) {
+        haveRead = true;
+      } else {
+        int got = recv(self->socket, reinterpret_cast<char*>(receiveBuffer + received), 0x10000 - static_cast<int>(received), 0);
+        if (got == SOCKET_ERROR) {
+          if (WSAGetLastError() == WSAEWOULDBLOCK) {
+            game::Call<void (*)(int)>(0x14032ec60)(1);
+            continue;
+          }
+          game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac380), WSAGetLastError());  // "Error %d reading data from server."
+          status = kFailed;
+          break;
+        }
+        if (got == 0) {
+          game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac3a8));  // "Server unexpectedly disconnected during client handshake."
+          status = kFailed;
+          break;
+        }
+        game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac3e8), got);  // "%d bytes received during handshake."
+        received += static_cast<unsigned>(got);
+      }
+    }
+    SecBuffer input[2] = {{received, 2, receiveBuffer}, {0, 0, nullptr}};
+    SecBufferDesc inputDesc{0, 2, input};
+    SecBuffer output{0, 2, nullptr};
+    SecBufferDesc outputDesc{0, 1, &output};
+    uint8_t* driverHandle = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self->platformDriver) + 0x10);
+    unsigned long attributes;
+    int64_t expiry;
+    using InitContextFn = int (*)(void*, void*, const wchar_t*, unsigned long, unsigned long, unsigned long, SecBufferDesc*, unsigned long, void*,
+                                  SecBufferDesc*, unsigned long*, int64_t*);
+    status = (*reinterpret_cast<InitContextFn*>(*reinterpret_cast<uint8_t**>(driverHandle + 0xE0) + 0x30))(
+        driverHandle + 0xD0, context, nullptr, 0xC11C, 0, 0x10, &inputDesc, 0, nullptr, &outputDesc, &attributes, &expiry);
+    if ((status == 0 || status == kContinue || (status < 0 && (attributes & 0x4000))) && output.size && output.data) {
+      int sent = send(self->socket, static_cast<const char*>(output.data), static_cast<int>(output.size), 0);
+      if (static_cast<unsigned>(sent - 1) > 0xFFFFFFFDu) {  // 0 or SOCKET_ERROR
+        game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac410), WSAGetLastError());  // "Error %d sending data to server"
+        (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x80))(output.data);
+        (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x48))(context);
+        break;
+      }
+      game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac430), sent);  // "%d bytes of handshake data sent"
+      (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x80))(output.data);
+      output.data = nullptr;
+    }
+    if (status == kIncomplete) continue;
+    if (status == 0) {
+      game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac450));  // "Client handshake was successful"
+      if (input[1].type == 5) {  // application data bundled after the handshake
+        uint8_t* extra = receiveBuffer + (received - input[1].size);
+        if (!pending)
+          pending = game::Call<uint8_t* (*)(void*, const uint8_t*, unsigned long)>(0x141ec2150)(
+              *reinterpret_cast<void**>(static_cast<uint8_t*>(self->owner) + 0x40), extra, input[1].size);
+        else
+          game::Call<void (*)(uint8_t*, const uint8_t*, unsigned long)>(0x140313f70)(pending, extra, input[1].size);
+        game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac470), input[1].size);  // "%d bytes of app data was bundled with handshake data"
+      }
+      self->sslState = 2;
+      break;
+    }
+    if (status < 0) {
+      logStatus(0x1425ac4a8, status);  // "Error InitSecurityContext = %s"
+      break;
+    }
+    if (status == kIncompleteCredentials) {
+      game::Call<LogFn>(0x1402baba0)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac4c8), kIncompleteCredentials);  // "Error - Server rejected our credentials."
+      status = kFailed;
+      break;
+    }
+    if (input[1].type == 5) {  // keep the unconsumed tail for the next round
+      std::memmove(receiveBuffer, receiveBuffer + (received - input[1].size), input[1].size);
+      received = input[1].size;
+    } else {
+      received = 0;
+    }
+  }
+  if (status < 0) {
+    (*reinterpret_cast<int (**)(void*)>(SslFunctions(self) + 0x48))(context);  // DeleteSecurityContext
+    LocalFree(receiveBuffer);
+    logStatus(0x1425ac4f8, status);  // "Client handshake failed - %s."
+    return false;
+  }
+  if (self->sslState == 2) {
+    int64_t total = TimeNow() - static_cast<int64_t>(self->timeout);
+    game::Call<LogFn>(0x140428ce0)(SslLog(), reinterpret_cast<const char*>(0x1425ac518),
+                                   total > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(total));  // "Client handshake succeeded, totalTimeMs=%d."
+    LocalFree(receiveBuffer);
+    self->flag68 = false;
+  }
+  int64_t delta = TimeNow() - started;
+  int elapsed = delta > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(delta);
+  if (elapsed > 1000)
+    game::Call<LogFn>(0x1402ef740)(SslErrorLog(), reinterpret_cast<const char*>(0x1425ac548), elapsed);  // "Warning! DoSslClientHandshake took %d ms."
+  return true;
+}
+
 }  // namespace rebuild::udp
 
 using namespace rebuild::udp;
@@ -540,3 +663,4 @@ REBUILD_FUNCTION(TcpConnectionPlatformDriver_TerminateSsl, 0x141ebf360, TcpConne
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_StartSslHandshake, 0x141ebefe0, TcpConnectionPlatformDriverStartSslHandshake);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_SendEncrypted, 0x141ebead0, TcpConnectionPlatformDriverSendEncrypted);
 REBUILD_FUNCTION(TcpConnectionPlatformDriver_DecryptReceived, 0x141ebc7f0, TcpConnectionPlatformDriverDecryptReceived);
+REBUILD_FUNCTION(TcpConnectionPlatformDriver_DoSslHandshake, 0x141ebce40, TcpConnectionPlatformDriverDoSslHandshake);
