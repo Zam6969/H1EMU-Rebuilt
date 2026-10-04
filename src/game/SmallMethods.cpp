@@ -1320,6 +1320,126 @@ uint8_t* PrngGenerate(uint8_t* self, uint8_t* out, int count) {
   return out;
 }
 
+namespace {
+// SoeGems::PerformanceProfiler per-thread data (TLS slot at +8): depth
+// counter +0, enabled +0x10, current node +0x18, lock +0x20, node map
+// +0x68 (2048 buckets at +0x90), list links +0x150B8 / +0x150C0.
+uint8_t* ProfilerThreadData(uint8_t* self) {
+  using TlsGetFn = void*(__stdcall*)(unsigned long);
+  using TlsSetFn = int(__stdcall*)(unsigned long, void*);
+  auto* data = static_cast<uint8_t*>((*reinterpret_cast<TlsGetFn*>(0x14409fe38))(At<unsigned long>(self, 8)));
+  if (!data) {
+    uint8_t* lock = self + 0x31170;
+    game::Call<void (*)(void*)>(0x14032f270)(lock);
+    uint64_t threadId = game::Call<uint64_t (*)()>(0x14032e7b0)();
+    uint8_t* created = Virtual<uint8_t*>(self + 0x10, 2);
+    data = nullptr;
+    if (created) {
+      game::Call<void (*)(void*, uint64_t, uint8_t)>(0x140326c20)(created, threadId, At<uint8_t>(self, 0x31200));
+      data = created;
+    }
+    At<void*>(data, 0x150C0) = At<void*>(self, 0x20);
+    At<uint64_t>(data, 0x150B8) = 0;
+    if (!At<void*>(self, 0x20))
+      At<void*>(self, 0x18) = data;
+    else
+      At<void*>(At<void*>(self, 0x20), 0x150B8) = data;
+    At<void*>(self, 0x20) = data;
+    ++At<int>(self, 0x28);
+    (*reinterpret_cast<TlsSetFn*>(0x14409fe40))(At<unsigned long>(self, 8), data);
+    if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  } else if (At<int>(data, 0) == 0) {
+    At<uint8_t>(data, 0x10) = At<uint8_t>(self, 0x31200);
+  }
+  return data;
+}
+
+// Find the sample node for (hash, id, depth) in the thread's map.
+uint8_t* ProfilerFindNode(uint8_t* data, uint32_t hash, uint32_t id, uint32_t depth) {
+  for (uint8_t* node = At<uint8_t*>(data, 0x90 + (hash & 0x7FF) * 8); node; node = At<uint8_t*>(node, 0x80))
+    if (At<uint32_t>(node, 0x78) == hash && At<uint32_t>(node, 0x44) == id && At<uint32_t>(node, 0x30) == depth) return node;
+  return nullptr;
+}
+
+// Register the sample name (+0x15120 map, guarded by +0x311B8) on first
+// use.
+void ProfilerRegisterName(uint8_t* self, uint32_t* id, void** name) {
+  game::Call<void (*)(void*)>(0x14032f270)(self + 0x311B8);
+  bool known = false;
+  for (uint8_t* entry = At<uint8_t*>(self, 0x15148 + (*id & 0x7FF) * 8); entry; entry = At<uint8_t*>(entry, 0x58))
+    if (At<uint32_t>(entry, 0x50) == *id) {
+      known = true;
+      break;
+    }
+  if (!known) game::Call<void (*)(void*, uint32_t*, void**)>(0x1403265f0)(self + 0x15120, id, name);
+  game::Call<void (*)(void*)>(0x14032f360)(self + 0x311B8);
+}
+}  // namespace
+
+// 0x14032ac10: SoeGems::PerformanceProfiler::Begin(name, id, noTiming):
+// push a sample under the thread's current one (hashed with the parent and
+// depth) and start its timer unless noTiming.
+void ProfilerBegin(uint8_t* self, void* name, uint32_t id, bool noTiming) {
+  uint8_t* data = ProfilerThreadData(self);
+  ++At<int>(data, 0);
+  if (!At<uint8_t>(data, 0x10)) return;
+  uint32_t depth = At<uint32_t>(data, 0);
+  uint32_t hash = id;
+  if (At<void*>(data, 0x18)) hash = At<uint32_t>(At<void*>(data, 0x18), 0x40) ^ depth ^ id;
+  uint8_t* node = ProfilerFindNode(data, hash, id, depth);
+  if (!node) {
+    uint8_t* lock = data + 0x20;
+    game::Call<void (*)(void*)>(0x14032f270)(lock);
+    uint64_t key = hash;
+    node = game::Call<uint8_t* (*)(void*, uint64_t*, void*)>(0x140329ed0)(data + 0x68, &key, nullptr);
+    At<uint32_t>(node, 0x48) = noTiming ? 1 : 0;
+    At<void*>(node, 0x38) = At<void*>(data, 0x18);
+    At<uint32_t>(node, 0x40) = hash;
+    At<uint32_t>(node, 0x44) = id;
+    At<uint32_t>(node, 0x30) = At<uint32_t>(data, 0);
+    ProfilerRegisterName(self, &id, &name);
+    if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  }
+  if (At<uint32_t>(node, 0x48) == 0) {
+    uint64_t stamp;
+    At<uint64_t>(node, 0x50) = *game::Call<uint64_t* (*)(uint64_t*)>(0x14032fde0)(&stamp);
+  }
+  At<void*>(data, 0x18) = node;
+}
+
+// 0x14032aea0: SoeGems::PerformanceProfiler::AddValue(name, id, value):
+// accumulate a value sample one level below the current one (count, sum,
+// max, min, last).
+void ProfilerAddValue(uint8_t* self, void* name, uint32_t id, int64_t value) {
+  uint8_t* data = ProfilerThreadData(self);
+  if (!At<uint8_t>(data, 0x10)) return;
+  uint32_t depth = At<uint32_t>(data, 0) + 1;
+  uint32_t hash = id;
+  if (At<void*>(data, 0x18)) hash = At<uint32_t>(At<void*>(data, 0x18), 0x40) ^ depth ^ id;
+  uint8_t* node = ProfilerFindNode(data, hash, id, depth);
+  if (!node) {
+    uint8_t* lock = data + 0x20;
+    game::Call<void (*)(void*)>(0x14032f270)(lock);
+    uint8_t* parent = At<uint8_t*>(data, 0x18);
+    uint8_t* before = parent;
+    while (before && (before == parent || At<int>(parent, 0x30) < At<int>(before, 0x30))) before = At<uint8_t*>(before, 0x68);
+    uint64_t key = hash;
+    node = game::Call<uint8_t* (*)(void*, uint64_t*, void*)>(0x140329ed0)(data + 0x68, &key, before);
+    At<uint32_t>(node, 0x48) = 1;
+    At<void*>(node, 0x38) = At<void*>(data, 0x18);
+    At<uint32_t>(node, 0x40) = hash;
+    At<uint32_t>(node, 0x44) = id;
+    At<uint32_t>(node, 0x30) = depth;
+    ProfilerRegisterName(self, &id, &name);
+    if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  }
+  ++At<int64_t>(node, 0);
+  At<int64_t>(node, 0x20) = value;
+  At<int64_t>(node, 8) += value;
+  if (At<int64_t>(node, 0x10) < value) At<int64_t>(node, 0x10) = value;
+  if (value < At<int64_t>(node, 0x18)) At<int64_t>(node, 0x18) = value;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1405,3 +1525,5 @@ REBUILD_FUNCTION(CasApi_OnHttpResponse, 0x1416186c0, CasApiOnHttpResponse);
 REBUILD_FUNCTION(UramApi_OnHttpResponse, 0x141612900, UramApiOnHttpResponse);
 REBUILD_FUNCTION(StoreBundleCategoryGroupDefinition_ToString, 0x14161fb60, StoreCategoryGroupToString);
 REBUILD_FUNCTION(Crypto_Prng_Generate, 0x1416035a0, PrngGenerate);
+REBUILD_FUNCTION(PerformanceProfiler_Begin, 0x14032ac10, ProfilerBegin);
+REBUILD_FUNCTION(PerformanceProfiler_AddValue, 0x14032aea0, ProfilerAddValue);
