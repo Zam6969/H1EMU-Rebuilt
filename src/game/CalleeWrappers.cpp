@@ -886,6 +886,185 @@ void StoreSmallBytes(uint8_t* self, const uint8_t* source, uint32_t count) {
   game::Call<void* (*)(void*, int, size_t)>(0x140d12270)(self + length, 0, 8 - length);
 }
 
+
+// 0x14032fe90: wall-clock seconds cache: refresh the cached time()
+// (0x142b06c98) when the tick (IAT 0x1440a0090) moved by more than 10 or
+// wrapped, then add the configured offset (0x142b06c70).
+int64_t* WallClockNow(int64_t* out) {
+  uint32_t tick = (*reinterpret_cast<uint32_t(__stdcall**)()>(0x1440a0090))();
+  uint32_t& last = *reinterpret_cast<uint32_t*>(0x142b06ca0);
+  if (tick - last > 10 || tick < last) {
+    last = tick;
+    game::Call<int64_t (*)(int64_t*)>(0x140d43940)(reinterpret_cast<int64_t*>(0x142b06c98));
+  }
+  *out = static_cast<int64_t>(*reinterpret_cast<int*>(0x142b06c70)) + *reinterpret_cast<int64_t*>(0x142b06c98);
+  return out;
+}
+
+// 0x1403160f0: create the 0x93A0-byte object, publish it (0x142b06928) and
+// initialize it with the argument.
+uint64_t CreateAndInit93a0(void** out, void* argument) {
+  void* memory = game::Call<void* (*)(size_t)>(0x1402fc0f0)(0x93A0);
+  *out = memory ? game::Call<void* (*)(void*)>(0x1403152b0)(memory) : nullptr;
+  *reinterpret_cast<void**>(0x142b06928) = *out;
+  return game::Call<uint64_t (*)(void*, void**, void*)>(0x140316140)(*out, out, argument);
+}
+
+// 0x14150bd50: queue a command (0xC) for the game object on the audio
+// command queue (0x143c76d30); 2 for a null object.
+int AudioQueueObjectCommand(void* gameObject) {
+  if (!gameObject) return 2;
+  uint16_t id = game::Call<uint16_t (*)()>(0x141540460)();
+  uint8_t* entry = game::Call<uint8_t* (*)(void*, int, uint16_t)>(0x14153f910)(*reinterpret_cast<void**>(0x143c76d30), 0xC, id);
+  At<void*>(entry, 8) = gameObject;
+  _InterlockedDecrement(&At<volatile long>(*reinterpret_cast<void**>(0x143c76d30), 0xAC));
+  return 1;
+}
+
+// 0x140cff570: append self to its owner's list (head +0x28, tail +0x30,
+// count +0x38; links prev +0x50 / next +0x58) unless already linked.
+void AppendToOwnerList(uint8_t* self) {
+  uint8_t* list = game::Call<uint8_t* (*)(void*)>(0x1403f62a0)(self);
+  if (At<void*>(self, 0x50) || At<uint8_t*>(list, 0x28) == self) return;
+  uint8_t* tail = At<uint8_t*>(list, 0x30);
+  At<uint8_t*>(self, 0x50) = tail;
+  if (!tail) {
+    ++At<int>(list, 0x38);
+    At<uint8_t*>(list, 0x28) = self;
+    At<uint8_t*>(list, 0x30) = self;
+    return;
+  }
+  At<uint8_t*>(tail, 0x58) = self;
+  ++At<int>(list, 0x38);
+  At<uint8_t*>(list, 0x30) = self;
+}
+
+// 0x1403c2100: scalar deleting destructor (0x370 bytes).
+void* DeletingDestructor370(uint8_t* self, unsigned flags) {
+  game::Call<void (*)(void*)>(0x1403e32f0)(self);
+  game::Call<void (*)(void*)>(0x1416da170)(self + 0x160);
+  At<uint64_t>(self, 0x148) = 0x142064ad8;
+  if (flags & 1) game::Call<void (*)(void*, size_t)>(0x140d0fb84)(self, 0x370);
+  return self;
+}
+
+// 0x141e62cb0: SpeedTree file pool: release slot `index` (0x124-byte slots
+// at 0x143e03e60); logs an error for a free slot.
+bool SpeedTreeReleasePoolSlot(int index) {
+  uint8_t* slot = reinterpret_cast<uint8_t*>(0x143e03e60) + static_cast<int64_t>(index) * 0x124;
+  if (!At<uint8_t>(slot, 0x120)) {
+    game::Call<void (*)(const char*)>(0x141e626e0)(reinterpret_cast<const char*>(0x1425a1628));
+    return false;
+  }
+  At<uint8_t>(slot, 0x120) = 0;
+  At<uint64_t>(slot, 0x18) = 0;
+  At<uint8_t>(slot, 0x20) = 0;
+  return true;
+}
+
+// 0x140344910: set the flag at +0x190 inside the +0x330 section.
+void SetFlag190Locked(uint8_t* self, uint8_t value) {
+  game::Call<void (*)(void*)>(0x14034a560)(self + 0x330);
+  At<uint8_t>(self, 0x190) = value;
+  game::Call<void (*)(void*)>(0x14034a8b0)(self + 0x330);
+}
+
+// 0x1403531d0: destructor (vtable 0x142046860) deleting the owned object
+// at +8 (the check is repeated, as in the original).
+void Destructor142046860(uint8_t* self) {
+  At<uint64_t>(self, 0) = 0x142046860;
+  for (int pass = 0; pass < 2; ++pass) {
+    if (void* owned = At<void*>(self, 8)) {
+      Virtual(owned, 0, 1);
+      At<void*>(self, 8) = nullptr;
+    }
+  }
+}
+
+// 0x1402f3140: release the two owned objects (+8 through slot 2, +0x18
+// whose interface sits at +8), then 0x1402f6d80.
+uint64_t ReleaseOwned8And18(uint8_t* self) {
+  if (void* owned = At<void*>(self, 8)) {
+    Virtual(owned, 2, 1);
+    At<void*>(self, 8) = nullptr;
+  }
+  if (uint8_t* other = At<uint8_t*>(self, 0x18)) {
+    Virtual(other + 8, 0, 1);
+    At<void*>(self, 0x18) = nullptr;
+  }
+  return game::Call<uint64_t (*)(void*)>(0x1402f6d80)(self);
+}
+
+// 0x140474ab0: build an IString `out` from `source` (0x1402eea50).
+void* MakeStringFrom(void* source, uint8_t* out) {
+  At<uint64_t>(out, 0) = 0x142049b50;
+  At<uint64_t>(out, 8) = 0x143e09641;
+  At<uint64_t>(out, 0x10) = 0;
+  game::Call<void (*)(void*, void*)>(0x1402eea50)(source, out);
+  return out;
+}
+
+// 0x14032d190: SoeGems::InfiniteLoopMonitor Kick(enable): bind to the
+// first calling thread (+0xE8); on that thread set kicked (+0xDC) and swap
+// the enabled flag (+0xDD), returning the previous one.
+uint8_t InfiniteLoopMonitorKick(uint8_t* self, uint8_t enable) {
+  uint64_t thread = game::Call<uint32_t (*)()>(0x14032e7b0)();
+  if (At<uint64_t>(self, 0xE8) == 0) At<uint64_t>(self, 0xE8) = thread;
+  if (thread != At<uint64_t>(self, 0xE8)) return enable;
+  _InterlockedExchange8(&At<volatile char>(self, 0xDC), 1);
+  return static_cast<uint8_t>(_InterlockedExchange8(&At<volatile char>(self, 0xDD), static_cast<char>(enable)));
+}
+
+// 0x140b8d900: apply the value to every entry (+0x78, next +8) and the
+// main target (+0x90).
+uint64_t ApplyToAll78(uint8_t* self, int value) {
+  for (void** node = At<void**>(self, 0x78); node; node = static_cast<void**>(node[1])) game::Call<void (*)(void*, int)>(0x140cab520)(node[0], value);
+  return game::Call<uint64_t (*)(void*, int)>(0x140cab500)(At<void*>(self, 0x90), value);
+}
+
+namespace {
+bool ElapsedAtMost(int64_t start, float seconds) {
+  int64_t elapsed = TimeNow() - start;
+  int clamped = elapsed > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(elapsed);
+  return seconds >= static_cast<float>(clamped) * *reinterpret_cast<float*>(0x142047918);
+}
+}  // namespace
+
+// 0x140428200 / 0x140428130: has less than `seconds` passed since the
+// stamp at +0xD8 / +0xD0 (ms scaled by 0x142047918)?
+bool WithinSecondsD8(uint8_t* self, float seconds) { return ElapsedAtMost(At<int64_t>(self, 0xD8), seconds); }
+bool WithinSecondsD0(uint8_t* self, float seconds) { return ElapsedAtMost(At<int64_t>(self, 0xD0), seconds); }
+
+// 0x141884960: destructor (vtables 0x142512ab8 -> 0x142512aa0).
+void Destructor142512ab8(uint8_t* self) {
+  game::Call<void (*)(void*)>(0x141884b50)(self);
+  At<uint64_t>(self, 0) = 0x142512ab8;
+  game::Call<void (*)(void*)>(0x141885270)(self);
+  game::Call<void (*)(void*)>(0x1403a77f0)(self + 0x818);
+  At<uint64_t>(self, 0) = 0x142512aa0;
+  game::Call<void (*)(void*)>(0x141885270)(self);
+}
+
+// 0x140611910: resolve the key through +0x12418 (fallback: the key) and
+// return the entry's byte at +0x30 from +0x290 (0 when missing).
+uint64_t ResolveEntryByte(uint8_t* self, void* key) {
+  void* resolved = game::Call<void* (*)(void*, void*)>(0x14060b850)(self + 0x12418, key);
+  if (!resolved) resolved = key;
+  uint8_t* entry = game::Call<uint8_t* (*)(void*, void*)>(0x14060b9f0)(self + 0x290, resolved);
+  return entry ? At<uint8_t>(entry, 0x30) : 0;
+}
+
+// Destructors that release one IString member and drop to the base
+// vtable 0x1420633d0 (0x1403ae270 / 0x1403ae490 / 0x1403ae580 /
+// 0x1403b0fb0 / 0x1403b0ed0 / 0x1403b0540).
+template <size_t Offset>
+void StringMemberDestructor1420633d0(uint8_t* self) {
+  uint8_t* text = self + Offset;
+  At<uint64_t>(text, 0) = 0x142049b50;
+  if (At<int>(text, 0x14) > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(At<uint8_t*>(text, 8) - 4), -1) - 1 <= 0) Virtual(text, 2);
+  At<uint64_t>(self, 0) = 0x1420633d0;
+}
+
 }  // namespace rebuild::game_callees
 
 using namespace rebuild::game_callees;
@@ -993,3 +1172,25 @@ REBUILD_FUNCTION(Construct_1420663b0, 0x14039d9f0, Construct1420663b0);
 REBUILD_FUNCTION(LookupValue1d0, 0x140428fc0, LookupValue1d0);
 REBUILD_FUNCTION(UpdateViews, 0x14062bbd0, UpdateViews);
 REBUILD_FUNCTION(StoreSmallBytes, 0x1404685a0, StoreSmallBytes);
+REBUILD_FUNCTION(WallClockNow, 0x14032fe90, WallClockNow);
+REBUILD_FUNCTION(CreateAndInit93a0, 0x1403160f0, CreateAndInit93a0);
+REBUILD_FUNCTION(Audio_QueueObjectCommand, 0x14150bd50, AudioQueueObjectCommand);
+REBUILD_FUNCTION(AppendToOwnerList, 0x140cff570, AppendToOwnerList);
+REBUILD_FUNCTION(DeletingDestructor370, 0x1403c2100, DeletingDestructor370);
+REBUILD_FUNCTION(SpeedTree_ReleasePoolSlot, 0x141e62cb0, SpeedTreeReleasePoolSlot);
+REBUILD_FUNCTION(SetFlag190Locked, 0x140344910, SetFlag190Locked);
+REBUILD_FUNCTION(Destructor_142046860, 0x1403531d0, Destructor142046860);
+REBUILD_FUNCTION(ReleaseOwned8And18, 0x1402f3140, ReleaseOwned8And18);
+REBUILD_FUNCTION(MakeStringFrom, 0x140474ab0, MakeStringFrom);
+REBUILD_FUNCTION(InfiniteLoopMonitor_Kick, 0x14032d190, InfiniteLoopMonitorKick);
+REBUILD_FUNCTION(ApplyToAll78, 0x140b8d900, ApplyToAll78);
+REBUILD_FUNCTION(WithinSecondsD8, 0x140428200, WithinSecondsD8);
+REBUILD_FUNCTION(WithinSecondsD0, 0x140428130, WithinSecondsD0);
+REBUILD_FUNCTION(Destructor_142512ab8, 0x141884960, Destructor142512ab8);
+REBUILD_FUNCTION(ResolveEntryByte, 0x140611910, ResolveEntryByte);
+REBUILD_FUNCTION(StringMemberDestructor_1403ae270, 0x1403ae270, StringMemberDestructor1420633d0<0x18>);
+REBUILD_FUNCTION(StringMemberDestructor_1403ae490, 0x1403ae490, StringMemberDestructor1420633d0<0x20>);
+REBUILD_FUNCTION(StringMemberDestructor_1403ae580, 0x1403ae580, StringMemberDestructor1420633d0<0x18>);
+REBUILD_FUNCTION(StringMemberDestructor_1403b0fb0, 0x1403b0fb0, StringMemberDestructor1420633d0<0x18>);
+REBUILD_FUNCTION(StringMemberDestructor_1403b0ed0, 0x1403b0ed0, StringMemberDestructor1420633d0<0x18>);
+REBUILD_FUNCTION(StringMemberDestructor_1403b0540, 0x1403b0540, StringMemberDestructor1420633d0<0x10>);
