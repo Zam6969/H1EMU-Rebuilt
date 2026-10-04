@@ -1702,6 +1702,109 @@ const char* MarketingBundleToString(uint8_t* self, soeutil::IString* out) {
   return result;
 }
 
+// 0x141e57a90: SpeedTree::CFileSystem::CleanPlatformFilename(out, path):
+// split the path on "\/" (strtok), collect the parts in a CArray of
+// CBasicFixedString<256> (reserve 100), and rejoin them with the platform
+// separator (0x142ad1610), keeping a leading "\\" for UNC paths. Fixed
+// 256-byte buffers are copied without bounds checks, as in the original.
+void* SpeedTreeCleanPlatformFilename(void*, uint8_t* out, const char* path) {
+  struct FixedString256 {
+    void** vtable;
+    uint64_t length;
+    char text[256];
+  };
+  static_assert(sizeof(FixedString256) == 0x110);
+  auto copy = [](void* target, const void* source, size_t bytes) { game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(target, source, bytes); };
+  At<uint64_t>(out, 0) = 0x1425a0f18;
+  At<uint64_t>(out, 8) = 0;
+  At<char>(out, 0x10) = 0;
+  if (!path) return out;
+  size_t length = 0;
+  while (path[length]) ++length;
+  if (static_cast<uint32_t>(length) == 0) return out;
+  bool unc = static_cast<uint32_t>(length) >= 2 && (path[0] == 0x5C || path[0] == '/') && (path[1] == 0x5C || path[1] == '/');  // '\\'
+  FixedString256 work;
+  work.vtable = reinterpret_cast<void**>(0x1425a0f18);
+  if (length) copy(work.text, path, length);
+  work.text[length] = 0;
+  work.length = length;
+  struct PartArray {
+    void* vtable;
+    uint8_t* data;
+    uint64_t size;
+    uint64_t capacity;
+    const char* name;
+    bool fixed;
+    uint8_t pad[0x17];
+  } parts;
+  static_assert(offsetof(PartArray, name) == 0x20 && offsetof(PartArray, fixed) == 0x28);
+  game::Call<void (*)(void*, int, const char*)>(0x1417fd190)(&parts, 100, reinterpret_cast<const char*>(0x1425a0f60));
+  using StrtokFn = char* (*)(char*, const char*);
+  for (char* token = game::Call<StrtokFn>(0x141ec5ffc)(work.text, reinterpret_cast<const char*>(0x1421e7be8)); token;
+       token = game::Call<StrtokFn>(0x141ec5ffc)(nullptr, reinterpret_cast<const char*>(0x1421e7be8))) {
+    FixedString256 part;
+    part.vtable = reinterpret_cast<void**>(0x1425a0f18);
+    size_t partLength = 0;
+    while (token[partLength]) ++partLength;
+    if (partLength) copy(part.text, token, partLength);
+    part.text[partLength] = 0;
+    part.length = partLength;
+    if (!parts.fixed) {
+      if (parts.size == parts.capacity) {
+        if (parts.capacity < 8) parts.capacity = 8;
+        uint64_t grown = parts.capacity * 2 + 1;
+        if (parts.capacity < grown) {
+          const char* name = parts.name ? parts.name : reinterpret_cast<const char*>(0x14250a78c);  // "CArray"
+          auto* data = game::Call<uint8_t* (*)(uint64_t, const char*, int)>(0x1417fb200)(grown, name, 1);
+          for (uint64_t i = 0; i < parts.size; ++i) {
+            uint8_t* to = data + i * 0x110;
+            uint8_t* from = parts.data + i * 0x110;
+            At<uint64_t>(to, 8) = At<uint64_t>(from, 8);
+            if (At<uint64_t>(from, 8)) copy(to + 0x10, from + 0x10, At<uint64_t>(from, 8));
+            to[0x10 + At<uint64_t>(to, 8)] = 0;
+          }
+          uint8_t* old = parts.data;
+          game::Call<void (*)(uint8_t**)>(0x1417f9d60)(&old);
+          parts.data = data;
+          parts.capacity = grown;
+        }
+      }
+    } else if (parts.size >= parts.capacity) {
+      continue;
+    }
+    uint8_t* slot = parts.data + parts.size++ * 0x110;
+    At<uint64_t>(slot, 8) = part.length;
+    if (part.length) copy(slot + 0x10, part.text, part.length);
+    slot[0x10 + At<uint64_t>(slot, 8)] = 0;
+  }
+  char* text = reinterpret_cast<char*>(out + 0x10);
+  if (unc) {
+    copy(text, reinterpret_cast<const void*>(0x1422c9738), 2);
+    At<uint64_t>(out, 8) = 2;
+    text[2] = 0;
+  }
+  for (uint64_t i = 0; i < parts.size; ++i) {
+    uint8_t* part = parts.data + i * 0x110;
+    if (At<uint64_t>(part, 8)) {
+      copy(text + At<uint64_t>(out, 8), part + 0x10, At<uint64_t>(part, 8));
+      At<uint64_t>(out, 8) += At<uint64_t>(part, 8);
+      text[At<uint64_t>(out, 8)] = 0;
+    }
+    const char* separator = *reinterpret_cast<const char**>(0x142ad1610);
+    if (i < parts.size - 1 && separator) {
+      size_t separatorLength = 0;
+      while (separator[separatorLength]) ++separatorLength;
+      if (separatorLength) {
+        copy(text + At<uint64_t>(out, 8), separator, separatorLength);
+        At<uint64_t>(out, 8) += separatorLength;
+        text[At<uint64_t>(out, 8)] = 0;
+      }
+    }
+  }
+  game::Call<void (*)(void*)>(0x141802070)(&parts);
+  return out;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1794,3 +1897,4 @@ REBUILD_FUNCTION(GameClientInputManager_Initialize, 0x14034f1a0, InputManagerIni
 REBUILD_FUNCTION(MarketingDataSource_AddGroup, 0x141623580, MarketingDataSourceAddGroup);
 REBUILD_FUNCTION(BaseInGamePurchaseOrder_ToString, 0x141628ed0, PurchaseOrderToString);
 REBUILD_FUNCTION(MarketingBundleDefinition_ToString, 0x14161b4f0, MarketingBundleToString);
+REBUILD_FUNCTION(SpeedTree_CFileSystem_CleanPlatformFilename, 0x141e57a90, SpeedTreeCleanPlatformFilename);
