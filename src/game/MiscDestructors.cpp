@@ -856,3 +856,93 @@ REBUILD_FUNCTION(GameCommerce__ImageDataDefinition_DeletingDestructor_141621720,
 REBUILD_FUNCTION(MarketingDataElementInstance_Tf11b63_DeletingDestructor_141622cf0, 0x141622cf0, (MemberBaseDeletingDestructor<0x1424bd080, 8, 0x141622600, 0x1424bcf70, 0x68>));
 REBUILD_FUNCTION(MarketingDataElementInstance_Ta77bbe_DeletingDestructor_141622c50, 0x141622c50, (MemberBaseDeletingDestructor<0x1424bd108, 8, 0x141622460, 0x1424bcf70, 0x68>));
 REBUILD_FUNCTION(MarketingDataElementInstance_Teef970_DeletingDestructor_141622ca0, 0x141622ca0, (MemberBaseDeletingDestructor<0x1424bd190, 8, 0x14072e550, 0x1424bcf70, 0x228>));
+
+namespace rebuild::game_misc {
+void FreeArrayStorage(void* data) {
+  if (*reinterpret_cast<void**>(0x143e09638) == nullptr)
+    game::Call<void (*)(void*)>(0x1402fc170)(data);
+  else
+    game::Call<void (*)(void*, int)>(0x14032f980)(data, 1);
+}
+
+// SoeUtil::TRateTracker: refresh (0x140311910), then scale `value` by the
+// tracked total at Offset over the window length (+0x414).
+template <size_t Offset>
+int64_t RateTrackerScale(uint8_t* self, int value) {
+  game::Call<void (*)(void*)>(0x140311910)(self);
+  return static_cast<int64_t>(*reinterpret_cast<int*>(self + Offset)) * value / *reinterpret_cast<int*>(self + 0x414);
+}
+// IStringFixed / WideStringFixed<N> with their own empty-data sentinel.
+template <uint64_t InterfaceVtable, uint64_t EmptyData, uint64_t PlainVtable, size_t Size>
+void* FixedStringDeletingDestructorEx(void* self, unsigned flags) {
+  auto* text = static_cast<soeutil::IString*>(self);
+  text->vtable = reinterpret_cast<void**>(InterfaceVtable);
+  soeutil::StringRelease(text);
+  text->data = reinterpret_cast<char*>(EmptyData);
+  *reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(self) + 0x10) = 0;
+  text->vtable = reinterpret_cast<void**>(PlainVtable);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// GameClientInputManager: run Inner under the optional mutex (+0x81F0).
+template <uint64_t Inner>
+uint64_t InputManagerLocked(uint8_t* self) {
+  if (void* lock = *reinterpret_cast<void**>(self + 0x81F0)) game::Call<void (*)(void*)>(0x14032f270)(lock);
+  uint64_t result = game::Call<uint64_t (*)(void*)>(Inner)(self);
+  if (void* lock = *reinterpret_cast<void**>(self + 0x81F0)) game::Call<void (*)(void*)>(0x14032f360)(lock);
+  return result;
+}
+// SoeUtil::ArraySecure<T> (inline storage at +0x18): clear the count, free
+// heap storage, run the base destructor, sized delete.
+template <uint64_t Vtable, uint64_t BaseDestructor, size_t Size>
+void* ArraySecureDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  *reinterpret_cast<int*>(bytes + 0x10) = 0;
+  *reinterpret_cast<uint64_t*>(bytes) = Vtable;
+  void* data = *reinterpret_cast<void**>(bytes + 8);
+  if (data != bytes + 0x18) FreeArrayStorage(data);
+  *reinterpret_cast<void**>(bytes + 8) = nullptr;
+  game::Call<void (*)(void*)>(BaseDestructor)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+// ArraySecure storage release: wipe the live elements, then free the block
+// unless it is the inline buffer.
+template <uint64_t Wipe>
+void ArraySecureFreeStorage(uint8_t* self, void* data) {
+  int count = *reinterpret_cast<int*>(self + 0x10);
+  if (count > 0) game::Call<void (*)(void*, int, int)>(Wipe)(self, 0, count);
+  if (data != self + 0x18) FreeArrayStorage(data);
+}
+// GameCommerce::UramApi*Request: release the IString at StringOffset, run
+// the optional member destructor at +0x80, then the UramApiRequest base
+// destructor (0x14160dcc0), sized delete.
+template <uint64_t StringVtable, size_t StringOffset, uint64_t MemberDestructor, size_t Size>
+void* UramRequestDeletingDestructor(void* self, unsigned flags) {
+  auto* bytes = static_cast<uint8_t*>(self);
+  auto* text = reinterpret_cast<soeutil::IString*>(bytes + StringOffset);
+  text->vtable = reinterpret_cast<void**>(StringVtable);
+  soeutil::StringRelease(text);
+  if constexpr (MemberDestructor != 0) game::Call<void (*)(void*)>(MemberDestructor)(bytes + 0x80);
+  game::Call<void (*)(void*)>(0x14160dcc0)(self);
+  if (flags & 1) SizedDelete(self, Size);
+  return self;
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(TRateTracker_Td27331_Scale_140311f00, 0x140311f00, (RateTrackerScale<0x40c>));
+REBUILD_FUNCTION(TRateTracker_Td27331_Scale_140311e50, 0x140311e50, (RateTrackerScale<0x410>));
+REBUILD_FUNCTION(IStringFixed_T0e8e62_DeletingDestructor_14032dae0, 0x14032dae0, (FixedStringDeletingDestructorEx<0x14204f080, 0x142ae85c8, 0x14204efd0, 0x1020>));
+REBUILD_FUNCTION(IStringFixed_T36b58f_DeletingDestructor_14032f0a0, 0x14032f0a0, (FixedStringDeletingDestructorEx<0x14204f138, 0x142ae85c8, 0x14204efd0, 0x220>));
+REBUILD_FUNCTION(WideStringFixed_T6bbbe2_DeletingDestructor_14032db60, 0x14032db60, (FixedStringDeletingDestructorEx<0x14204f080, 0x142ae85c8, 0x14204efd0, 0x1020>));
+REBUILD_FUNCTION(WideStringFixed_T53800f_DeletingDestructor_14032f120, 0x14032f120, (FixedStringDeletingDestructorEx<0x14204f138, 0x142ae85c8, 0x14204efd0, 0x220>));
+REBUILD_FUNCTION(GameCore__GameClientInputManager_Locked_140351880, 0x140351880, (InputManagerLocked<0x1416679a0>));
+REBUILD_FUNCTION(GameCore__GameClientInputManager_Locked_1403518d0, 0x1403518d0, (InputManagerLocked<0x1416679d0>));
+REBUILD_FUNCTION(ArraySecure_T8028d8_DeletingDestructor_1415f9c80, 0x1415f9c80, (ArraySecureDeletingDestructor<0x1424b3258, 0x1415f9ae0, 0x60>));
+REBUILD_FUNCTION(ArraySecure_T7afc2a_DeletingDestructor_1415fd0b0, 0x1415fd0b0, (ArraySecureDeletingDestructor<0x1424b3ba8, 0x140d08d60, 0x40>));
+REBUILD_FUNCTION(ArraySecure_T8028d8_FreeStorage_1415f9de0, 0x1415f9de0, (ArraySecureFreeStorage<0x140479e80>));
+REBUILD_FUNCTION(ArraySecure_T7afc2a_FreeStorage_1415fd7b0, 0x1415fd7b0, (ArraySecureFreeStorage<0x1415fdd00>));
+REBUILD_FUNCTION(GameCommerce__UramApiAddCreditCardRequest_DeletingDestructor_14160e870, 0x14160e870, (UramRequestDeletingDestructor<0x142049b50, 0x1f0, 0x140812b80, 0x208>));
+REBUILD_FUNCTION(GameCommerce__UramApiUpdateCreditCardRequest_DeletingDestructor_14160eff0, 0x14160eff0, (UramRequestDeletingDestructor<0x142049b50, 0x1f0, 0x140812b80, 0x210>));
+REBUILD_FUNCTION(GameCommerce__UramApiDeleteCreditCardRequest_DeletingDestructor_14160e9e0, 0x14160e9e0, (UramRequestDeletingDestructor<0x142049b50, 0x80, 0, 0xa0>));
+REBUILD_FUNCTION(GameCommerce__UramApiFinalizeSteamTransactionRequest_DeletingDestructor_14160eaa0, 0x14160eaa0, (UramRequestDeletingDestructor<0x142049b50, 0x80, 0, 0xa0>));
