@@ -1190,6 +1190,136 @@ void CasApiOnHttpResponse(uint8_t* self, void*, const char* url, uint32_t reques
   if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
 }
 
+// 0x141612900: GameCommerce::UramApi (HttpListener subobject at +0x28)
+// OnHttpResponse: as CasApi, with 16 buckets at +0xE0, the server
+// response time (+0x568) logged alongside the total (+0x560).
+void UramApiOnHttpResponse(uint8_t* self, void*, const char* url, uint32_t requestId, uint8_t* data, uint32_t httpCode) {
+  uint8_t* lock = self + 0x178;
+  game::Call<void (*)(void*)>(0x14032f270)(lock);
+  using LogFn = void (*)(void*, void*, const char*, ...);
+  auto sinceMs = [](int64_t start) {
+    int64_t now;
+    int64_t elapsed = *game::Call<int64_t* (*)(int64_t*)>(0x14032fd30)(&now) - start;
+    return elapsed > 0x7FFFFFFF ? 0x7FFFFFFF : static_cast<int>(elapsed);
+  };
+  for (uint8_t* request = At<uint8_t*>(self, 0xE0 + (requestId & 0xF) * 8);; request = At<uint8_t*>(request, 0x5A8)) {
+    if (!request) {
+      game::Call<LogFn>(0x14165c700)(self - 0x28, At<void*>(self, 0x2C8), reinterpret_cast<const char*>(0x1424baa60), data ? At<int>(data, 0x10) : 0, url,
+                                     requestId, httpCode);
+      break;
+    }
+    if (At<uint32_t>(request, 0x5A0) != requestId) continue;
+    int length = data ? At<int>(data, 0x10) : 0;
+    int totalMs = sinceMs(At<int64_t>(request, 0x560));
+    int serverMs = sinceMs(At<int64_t>(request, 0x568));
+    game::Call<LogFn>(0x14165c9a0)(self - 0x28, At<void*>(self, 0x2C8), reinterpret_cast<const char*>(0x1424ba9e0), length, url, requestId, httpCode, serverMs,
+                                   totalMs);
+    if (data) {
+      if (char* terminator = game::Call<char* (*)(void*)>(0x140aa52a0)(data)) *terminator = 0;
+    }
+    uint32_t* response = game::Call<uint32_t* (*)(void*)>(0x141611c30)(self + 0x1C0);
+    *response = requestId;
+    soeutil::StringAssign(response + 2, url);
+    if (data) {
+      *reinterpret_cast<uint8_t**>(response + 8) = data;
+      auto* counts = At<volatile long*>(data, 0x20);
+      _InterlockedIncrement(&counts[1]);
+      _InterlockedIncrement(&counts[0]);
+    }
+    response[10] = httpCode;
+    break;
+  }
+  if (lock) game::Call<void (*)(void*)>(0x14032f360)(lock);
+}
+
+// 0x14161fb60: StoreBundleCategoryGroupDefinition ToString: "groupId=%d,
+// categoryIds=(a, b, ...)" built in a StringFixed<1024>; the trailing ", "
+// is cut with the inlined copy-on-write truncate.
+const char* StoreCategoryGroupToString(uint8_t* self, soeutil::IString* out) {
+  soeutil::StringFixed<1024> ids;
+  soeutil::InitFixed(ids, reinterpret_cast<void**>(0x14204b2f0));
+  if (uint32_t* node = At<uint32_t*>(self, 0x18)) {
+    do {
+      game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402ed6c0)(&ids, reinterpret_cast<const char*>(0x1424bc8d0), *node);  // "%d, "
+      node = *reinterpret_cast<uint32_t**>(node + 2);
+    } while (node);
+    if (ids.length > 2) {
+      int newLength = ids.length - 2;
+      int needed = ids.length - 1;
+      char* buffer = ids.data;
+      int capacity = ids.capacity;
+      if (ids.capacity < needed || (ids.capacity > 0 && reinterpret_cast<int*>(ids.data)[-1] > 1)) {
+        if (needed < ids.length + 1) needed = ids.length + 1;
+        int granted;
+        char onHeap;
+        auto* block = reinterpret_cast<int*>(
+            reinterpret_cast<void* (*)(void*, int, int*, char*)>(ids.vtable[soeutil::kStringSlotAllocate])(&ids, needed + 4, &granted, &onHeap));
+        if (block) _InterlockedExchange(reinterpret_cast<volatile long*>(block), onHeap != 0);
+        buffer = reinterpret_cast<char*>(block + 1);
+        capacity = granted - 4;
+        game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(buffer, ids.data, static_cast<size_t>(ids.length + 1));
+        if (ids.capacity > 0 && _InterlockedExchangeAdd(reinterpret_cast<volatile long*>(ids.data - 4), -1) < 2)
+          reinterpret_cast<void (*)(void*)>(ids.vtable[soeutil::kStringSlotFree])(&ids);
+      }
+      ids.capacity = capacity;
+      ids.data = buffer;
+      ids.data[newLength] = 0;
+      ids.length = newLength;
+    }
+  }
+  game::Call<FormatFn>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x1424bc8d8), At<int>(self, 8), ids.data);
+  const char* text = out->data;
+  ids.vtable = reinterpret_cast<void**>(0x14204b2d0);
+  soeutil::StringRelease(&ids);
+  return text;
+}
+
+// 0x1416035a0: Crypto::Prng Generate(out, count): CTR-mode output. Drain
+// the leftover keystream block (+0x78, position +0xA0), encrypt the 128-bit
+// counter (+0x48) for each whole block, then one more block for the tail.
+uint8_t* PrngGenerate(uint8_t* self, uint8_t* out, int count) {
+  if (!At<bool>(self, 0xB0)) return nullptr;
+  uint8_t* cursor = out;
+  for (int position = At<int>(self, 0xA0); position > 0 && count > 0; --count) {
+    int index = At<int>(self, 0xA0)++;
+    *cursor++ = At<uint8_t*>(self, 0x78)[index];
+    position = At<int>(self, 0xA0) % 16;
+    At<int>(self, 0xA0) = position;
+  }
+  auto counterKey = [&] { return At<int>(self, 0x50) ? At<void*>(self, 0x48) : nullptr; };
+  while (count > 15) {
+    struct Block16 {
+      void** vtable;
+      uint8_t* data;
+      uint64_t sizes;
+      uint8_t inlineBuffer[16];
+    } block{reinterpret_cast<void**>(0x1424b3b30), nullptr, 0, {}};
+    if (Virtual<int>(self + 8, 4, counterKey(), 0x10, static_cast<void*>(&block)) != 1) {
+      game::Call<void (*)(void*)>(0x1415fcdd0)(&block);
+      return nullptr;
+    }
+    for (int64_t i = 15; i >= 0; --i)
+      if (++At<uint8_t*>(self, 0x48)[i] != 0) break;
+    ++At<int64_t>(self, 0xA8);
+    for (int i = 0; i < 16; ++i) cursor[i] = block.data[i];
+    cursor += 16;
+    count -= 16;
+    block.vtable = reinterpret_cast<void**>(0x1424b3b30);
+    block.sizes &= 0xFFFFFFFF00000000ull;
+    if (block.data != block.inlineBuffer) FreeHeapOrThread(block.data, 1);
+    block.data = nullptr;
+    block.vtable = reinterpret_cast<void**>(0x14204adc8);
+    block.sizes &= 0xFFFFFFFF00000000ull;
+    FreeHeapOrThread(nullptr, 1);
+  }
+  if (count < 1) return out;
+  if (Virtual<int>(self + 8, 4, counterKey(), 0x10, static_cast<void*>(self + 0x70)) != 1) return nullptr;
+  game::Call<void* (*)(void*, const void*, size_t)>(0x140d11e20)(cursor, At<uint8_t*>(self, 0x78) + (0x10 - count), static_cast<size_t>(count));
+  At<int>(self, 0xA0) = 0x10 - count;
+  game::Call<void (*)(void*)>(0x1416033b0)(self);
+  return out;
+}
+
 }  // namespace rebuild::game_small
 
 using namespace rebuild::game_small;
@@ -1272,3 +1402,6 @@ REBUILD_FUNCTION(Resource_DecompressionJob_Run, 0x14164fd60, DecompressionJobRun
 REBUILD_FUNCTION(RefArrayPooled_Reallocate, 0x14033e310, RefArrayPooledReallocate);
 REBUILD_FUNCTION(StoreBundleDefinition_ToString, 0x141e96390, StoreBundleToString);
 REBUILD_FUNCTION(CasApi_OnHttpResponse, 0x1416186c0, CasApiOnHttpResponse);
+REBUILD_FUNCTION(UramApi_OnHttpResponse, 0x141612900, UramApiOnHttpResponse);
+REBUILD_FUNCTION(StoreBundleCategoryGroupDefinition_ToString, 0x14161fb60, StoreCategoryGroupToString);
+REBUILD_FUNCTION(Crypto_Prng_Generate, 0x1416035a0, PrngGenerate);
