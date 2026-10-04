@@ -6657,6 +6657,65 @@ bool GameClientHandlePacket11(uint8_t* game, const uint8_t* data, int length) {
   return true;  // handled (failed reads return false above)
 }
 
+// Small game-client vtable slots that only forward to another function.
+// 0x14047bde0 (slot 1): log through slot 91 (vfunc 0x2D8).
+void GameClientLogForward(uint8_t* game, int level, const char* channel, const char* format, void* args) {
+  (*reinterpret_cast<void (***)(uint8_t*, int, const char*, const char*, void*)>(game))[0x2D8 / 8](game, level, channel, format, args);
+}
+// 0x1404742f0 (slot 35): update the state's +0x96A18 object (0x14166a8a0).
+void GameClientUpdateState96A18(uint8_t* game) {
+  game::Call<void (*)(uint8_t*)>(0x14166a8a0)(game::Field<uint8_t*>(game, 0x314A8) + 0x96A18);
+}
+// 0x140474570 (slot 44): hand a message to the +0x388C8 handler (0x1409e0740).
+void GameClientPostToHandler388C8(uint8_t* game, void* message) {
+  game::Call<void (*)(void*, void*)>(0x1409e0740)(game::Field<void*>(game, 0x388C8), message);
+}
+// 0x140428d40 (slot 52): log a message as "%s".
+void GameClientLogText(uint8_t* /*game*/, const char* text) {
+  game::Call<void (*)(void*, const char*, ...)>(0x1402bab70)(nullptr, reinterpret_cast<const char*>(0x142046fb8), text);  // "%s"
+}
+// 0x1403f5fd0 (slot 59): one of two constants depending on the game mode at +0x3899C.
+float GameClientModeConstant(uint8_t* game) {
+  return game::Field<int>(game, 0x3899C) == 4 ? *reinterpret_cast<float*>(0x1420728c4) : *reinterpret_cast<float*>(0x1420728c8);
+}
+// 0x1403f9ff0 (slot 82): format the window title "H1Z1 v%s Live".
+void GameClientFormatTitle(uint8_t* /*game*/, soeutil::IString* out) {
+  game::Call<void (*)(soeutil::IString*, const char*, ...)>(0x1402bd7f0)(out, reinterpret_cast<const char*>(0x14206cf50),
+                                                                          *reinterpret_cast<const char**>(0x1429fbd88));
+}
+// 0x14046da00 (slot 83): set the main window's title (SetWindowTextA via its IAT slot).
+BOOL GameClientSetWindowTitle(uint8_t* game, soeutil::IString* title) {
+  auto setWindowText = *reinterpret_cast<BOOL(WINAPI**)(HWND, const char*)>(0x1440a0468);
+  return setWindowText(game::Field<HWND>(game, 0x387F0), title->data);
+}
+// 0x1404081d0 (slot 88): vfunc 0x20 of the +0x388C8 handler (arguments passed through).
+uint64_t GameClientHandler388C8Vfunc20(uint8_t* game, uint64_t a, uint64_t b, uint64_t c) {
+  void* handler = game::Field<void*>(game, 0x388C8);
+  return (*reinterpret_cast<uint64_t (***)(void*, uint64_t, uint64_t, uint64_t)>(handler))[0x20 / 8](handler, a, b, c);
+}
+// 0x140408970 / 0x14040bb80 (slots 95, 96): raw packets for the local
+// player's group (player +0x9418, handlers 0x1405f2070 / 0x1405f5830).
+void GameClientGroupPacketA(uint8_t* game, const uint8_t* data, int length) {
+  game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x1405f2070)(
+      game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80) + 0x9418, data, length);
+}
+void GameClientGroupPacketB(uint8_t* game, const uint8_t* data, int length) {
+  game::Call<void (*)(uint8_t*, const uint8_t*, int)>(0x1405f5830)(
+      game::Field<uint8_t*>(game::Field<uint8_t*>(game, 0x314A8), 0xF80) + 0x9418, data, length);
+}
+// 0x1403b5120 (slot 116): adjustor thunk to the scalar deleting destructor (0x1403c1290).
+void* GameClientDeletingDestructorThunk(uint8_t* self, unsigned flags) {
+  return game::Call<void* (*)(uint8_t*, unsigned)>(0x1403c1290)(self - 8, flags);
+}
+// 0x14042fb50 (slot 118): recorder state 5 (0x14063d8e0).
+void GameClientRecorderState5(uint8_t* /*game*/) {
+  game::Call<void (*)(void*, int)>(0x14063d8e0)(*reinterpret_cast<void**>(0x142b19b98), 5);
+}
+// 0x1402f44d0 (slot 120): delete an object through its deleting destructor.
+void DeleteThroughVtable(void* object) {
+  if (object) (*reinterpret_cast<void (***)(void*, int)>(object))[0](object, 1);
+}
+
 REBUILD_FUNCTION(GameClient_HandleZonePacket, 0x140430a20, GameClientHandleZonePacket);
 REBUILD_FUNCTION(GameClient_OnZoneConnected, 0x140430490, GameClientOnZoneConnected);
 REBUILD_FUNCTION(GameClient_DeletingDestructor, 0x1403c1290, GameClientDeletingDestructor);
@@ -6723,6 +6782,19 @@ REBUILD_FUNCTION(GameClient_CreateAppServices, 0x1403d8a00, GameClientCreateAppS
 REBUILD_FUNCTION(GameClient_WriteCrashInfo, 0x14042c8a0, GameClientWriteCrashInfo);
 REBUILD_FUNCTION(GameClient_HandleInputActions, 0x140433680, GameClientHandleInputActions);
 REBUILD_FUNCTION(GameClient_HandlePacket11, 0x140404980, GameClientHandlePacket11);
+REBUILD_FUNCTION(GameClient_LogForward, 0x14047bde0, GameClientLogForward);
+REBUILD_FUNCTION(GameClient_UpdateState96A18, 0x1404742f0, GameClientUpdateState96A18);
+REBUILD_FUNCTION(GameClient_PostToHandler388C8, 0x140474570, GameClientPostToHandler388C8);
+REBUILD_FUNCTION(GameClient_LogText, 0x140428d40, GameClientLogText);
+REBUILD_FUNCTION(GameClient_ModeConstant, 0x1403f5fd0, GameClientModeConstant);
+REBUILD_FUNCTION(GameClient_FormatTitle, 0x1403f9ff0, GameClientFormatTitle);
+REBUILD_FUNCTION(GameClient_SetWindowTitle, 0x14046da00, GameClientSetWindowTitle);
+REBUILD_FUNCTION(GameClient_Handler388C8Vfunc20, 0x1404081d0, GameClientHandler388C8Vfunc20);
+REBUILD_FUNCTION(GameClient_GroupPacketA, 0x140408970, GameClientGroupPacketA);
+REBUILD_FUNCTION(GameClient_GroupPacketB, 0x14040bb80, GameClientGroupPacketB);
+REBUILD_FUNCTION(GameClient_DeletingDestructorThunk, 0x1403b5120, GameClientDeletingDestructorThunk);
+REBUILD_FUNCTION(GameClient_RecorderState5, 0x14042fb50, GameClientRecorderState5);
+REBUILD_FUNCTION(DeleteThroughVtable, 0x1402f44d0, DeleteThroughVtable);
 REBUILD_FUNCTION(GameClient_Slot5, 0x1403f51c0, GameClientSlot5);
 REBUILD_FUNCTION(GameClient_Slot6, 0x1403f5270, GameClientSlot6);
 REBUILD_FUNCTION(GameClient_Slot7, 0x1403f5320, GameClientSlot7);
