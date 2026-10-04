@@ -196,3 +196,53 @@ REBUILD_FUNCTION(JobQueueWorkerThread_DeletingDestructor, 0x141668d30, (ThreadDe
 REBUILD_FUNCTION(TinyHttp_HttpManagerThread_DeletingDestructor, 0x14167ab40, (ThreadDeletingDestructor<0x1424c62e0, 0xc0>));
 REBUILD_FUNCTION(IStringNoShare_DeletingDestructor, 0x1403be2c0, IStringNoShareDeletingDestructor);
 REBUILD_FUNCTION(JobQueueWorkerThread_Run, 0x14166a5a0, JobQueueWorkerRun);
+
+namespace rebuild::game_misc {
+// 0x141629200 (GameCommerce::BaseInGamePurchaseOrder): IsValid - the three
+// strings (+0x18 / +0x58 / +0xA0 lengths) are set, the quantity (vfunc 0x30)
+// is positive and every line item (vfunc 0x40 first / 0x48 next) validates
+// (item vfunc 8).
+bool PurchaseOrderIsValid(uint8_t* order) {
+  if (*reinterpret_cast<int*>(order + 0x18) <= 0 || *reinterpret_cast<int*>(order + 0x58) <= 0 || *reinterpret_cast<int*>(order + 0xA0) <= 0)
+    return false;
+  using CountFn = int (*)(uint8_t*);
+  using FirstFn = uint8_t* (*)(uint8_t*);
+  using NextFn = uint8_t* (*)(uint8_t*, uint8_t*);
+  bool valid = (*reinterpret_cast<CountFn**>(order))[0x30 / 8](order) > 0;
+  if (!valid) return false;
+  for (uint8_t* item = (*reinterpret_cast<FirstFn**>(order))[0x40 / 8](order); item && valid;
+       item = (*reinterpret_cast<NextFn**>(order))[0x48 / 8](order, item))
+    valid &= (*reinterpret_cast<bool (***)(uint8_t*)>(item))[1](item);
+  return valid;
+}
+
+// 0x1415011c0 (AssetDelivery::Loader): handler at +0x10.
+void* AssetLoaderGetHandler(uint8_t* self) { return *reinterpret_cast<void**>(self + 0x10); }
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(GameCommerce_PurchaseOrder_IsValid, 0x141629200, PurchaseOrderIsValid);
+REBUILD_FUNCTION_TOO_SMALL(AssetDeliveryLoader_GetHandler, 0x1415011c0, AssetLoaderGetHandler);
+
+namespace rebuild::game_misc {
+// 0x141628cb0 (GameCommerce::BaseInGamePurchaseOrder): Clear - vfunc 0x28
+// (clear line items), empty the five strings, reset the currency (+0x88)
+// to the default at 0x143c77fa4.
+void PurchaseOrderClear(uint8_t* order) {
+  (*reinterpret_cast<void (***)(uint8_t*)>(order))[0x28 / 8](order);
+  auto clear = [&](size_t offset) {
+    auto* text = reinterpret_cast<soeutil::IString*>(order + offset);
+    soeutil::StringRelease(text);
+    text->data = soeutil::EmptyStringData();
+    text->length = 0;
+    text->capacity = 0;
+  };
+  clear(0x08);
+  clear(0x48);
+  *reinterpret_cast<int*>(order + 0x88) = *reinterpret_cast<int*>(0x143c77fa4);
+  clear(0x90);
+  clear(0xB8);
+  clear(0x110);
+}
+}  // namespace rebuild::game_misc
+
+REBUILD_FUNCTION(GameCommerce_PurchaseOrder_Clear, 0x141628cb0, PurchaseOrderClear);
